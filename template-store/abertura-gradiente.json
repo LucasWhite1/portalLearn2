@@ -1,0 +1,158 @@
+{
+  "kind": "curso-slide-template",
+  "version": 1,
+  "store": {
+    "category": "Abertura",
+    "badge": "Pronto",
+    "summary": "Slide inicial com titulo forte, subtitulo e cartao de destaque.",
+    "accentColor": "#6d63ff"
+  },
+  "template": {
+    "title": "Abertura elegante",
+    "description": "Modelo inicial para abrir modulos com titulo, contexto e chamada principal.",
+    "builderData": {
+      "stageSize": {
+        "width": 1280,
+        "height": 720
+      },
+      "moduleSettings": {
+        "lockNextModuleUntilCompleted": false,
+        "isPublic": false
+      },
+      "slides": [
+        {
+          "id": "slide-store-abertura",
+          "title": "Slide 01",
+          "backgroundFillType": "gradient",
+          "backgroundColor": "#f7f4ff",
+          "backgroundGradientStart": "#f9f6ff",
+          "backgroundGradientEnd": "#ece8ff",
+          "elements": [
+            {
+              "id": "block-store-card",
+              "type": "block",
+              "x": 728,
+              "y": 116,
+              "width": 432,
+              "height": 456,
+              "rotation": 0,
+              "zIndex": 1,
+              "shape": "rectangle",
+              "backgroundColor": "#ffffff",
+              "solidColor": "#ffffff",
+              "borderRadius": 28
+            },
+            {
+              "id": "text-store-kicker",
+              "type": "text",
+              "x": 140,
+              "y": 132,
+              "width": 240,
+              "height": 46,
+              "rotation": 0,
+              "zIndex": 2,
+              "content": "MODELO DE ABERTURA",
+              "fontSize": 18,
+              "fontFamily": "Inter, sans-serif",
+              "fontWeight": "700",
+              "textColor": "#6d63ff",
+              "textAlign": "left",
+              "hasTextBackground": false,
+              "hasTextBorder": false
+            },
+            {
+              "id": "text-store-title",
+              "type": "text",
+              "x": 140,
+              "y": 188,
+              "width": 510,
+              "height": 160,
+              "rotation": 0,
+              "zIndex": 3,
+              "content": "Apresente o tema da aula com um titulo claro e memoravel",
+              "fontSize": 48,
+              "fontFamily": "Inter, sans-serif",
+              "fontWeight": "700",
+              "textColor": "#171933",
+              "textAlign": "left",
+              "hasTextBackground": false,
+              "hasTextBorder": false
+            },
+            {
+              "id": "text-store-description",
+              "type": "text",
+              "x": 140,
+              "y": 366,
+              "width": 512,
+              "height": 120,
+              "rotation": 0,
+              "zIndex": 4,
+              "content": "Use este espaco para resumir o objetivo da aula, alinhar expectativa e preparar o aluno para os proximos slides.",
+              "fontSize": 22,
+              "fontFamily": "Inter, sans-serif",
+              "fontWeight": "500",
+              "textColor": "#4f5679",
+              "textAlign": "left",
+              "hasTextBackground": false,
+              "hasTextBorder": false
+            },
+            {
+              "id": "button-store-cta",
+              "type": "floatingButton",
+              "x": 140,
+              "y": 520,
+              "width": 220,
+              "height": 58,
+              "rotation": 0,
+              "zIndex": 5,
+              "content": "Comecar aula",
+              "fontSize": 22,
+              "fontFamily": "Inter, sans-serif",
+              "fontWeight": "700",
+              "textColor": "#ffffff",
+              "backgroundColor": "#6d63ff",
+              "solidColor": "#6d63ff",
+              "shape": "rectangle"
+            },
+            {
+              "id": "text-store-card-title",
+              "type": "text",
+              "x": 774,
+              "y": 172,
+              "width": 340,
+              "height": 120,
+              "rotation": 0,
+              "zIndex": 6,
+              "content": "Destaque rapido",
+              "fontSize": 34,
+              "fontFamily": "Inter, sans-serif",
+              "fontWeight": "700",
+              "textColor": "#171933",
+              "textAlign": "left",
+              "hasTextBackground": false,
+              "hasTextBorder": false
+            },
+            {
+              "id": "text-store-card-body",
+              "type": "text",
+              "x": 774,
+              "y": 282,
+              "width": 320,
+              "height": 180,
+              "rotation": 0,
+              "zIndex": 7,
+              "content": "Troque este bloco por um resumo, promessa de resultado ou instrucoes iniciais do modulo.",
+              "fontSize": 20,
+              "fontFamily": "Inter, sans-serif",
+              "fontWeight": "500",
+              "textColor": "#4f5679",
+              "textAlign": "left",
+              "hasTextBackground": false,
+              "hasTextBorder": false
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

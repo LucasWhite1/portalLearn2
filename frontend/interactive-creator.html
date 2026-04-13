@@ -1,0 +1,1200 @@
+﻿<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Criador de aulas interativas</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="builder.css">
+</head>
+<body>
+  <div class="builder-page-shell">
+    <header class="builder-header">
+      <div>
+        <p class="badge">Ferramenta criativa</p>
+        <h1>Criador de aulas interativas</h1>
+        <p>Monte aulas com blocos, mídia, texto, animações e interações sem perder o controle do layout.</p>
+      </div>
+      <div class="builder-header-actions">
+        <a class="secondary-btn" href="admin.html">Voltar ao admin</a>
+        <button class="secondary-btn logout-btn" type="button">Sair</button>
+      </div>
+    </header>
+    <main class="builder-main">
+      <aside class="builder-panel" id="builderPanel">
+        <button id="builderPanelToggleBtn" class="builder-panel-toggle" type="button" aria-label="Alternar menu lateral" aria-expanded="true" title="Menu lateral">
+          <span aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false">
+              <path d="M4 7h16M4 12h16M4 17h16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"/>
+            </svg>
+          </span>
+        </button>
+        <div class="builder-panel-section">
+          <h3>Dados do módulo</h3>
+          <div class="builder-field">
+            <label for="moduleCourseSelect">Curso</label>
+            <select id="moduleCourseSelect">
+              <option value="">Carregando cursos...</option>
+            </select>
+          </div>
+          <div class="builder-field">
+            <label for="moduleTitleInput">Título do módulo</label>
+            <input id="moduleTitleInput" placeholder="Ex: Fundamentos da Experiência" />
+          </div>
+          <div class="builder-field">
+            <label for="moduleDescriptionInput">Descrição rápida</label>
+            <textarea id="moduleDescriptionInput" rows="2" placeholder="Explique o foco deste módulo"></textarea>
+          </div>
+          <div class="builder-field">
+            <label class="toggle-inline">
+              <input id="moduleLockNextToggle" type="checkbox" />
+              Bloquear o próximo módulo até este ser concluído
+            </label>
+          </div>
+          <div class="builder-field">
+            <label class="toggle-inline">
+              <input id="modulePublicToggle" type="checkbox" />
+              Liberar este módulo com link público, sem login de aluno
+            </label>
+            <small class="muted">Depois de salvar, você poderá abrir a aula por um link público.</small>
+          </div>
+          <div class="builder-field">
+            <label for="modulePublicLinkInput">Link público do módulo</label>
+            <input id="modulePublicLinkInput" readonly placeholder="Salve um módulo público para gerar o link" />
+            <div class="template-actions">
+              <button id="copyPublicModuleLinkBtn" class="secondary-btn" type="button" disabled>Copiar link</button>
+              <button id="openPublicModuleLinkBtn" class="secondary-btn" type="button" disabled>Abrir link</button>
+            </div>
+            <small id="modulePublicLinkStatus" class="muted">Ative a opção de link público e salve o módulo para gerar um link compartilhável.</small>
+          </div>
+          <button id="saveModuleBtn" class="primary-btn" type="button">Salvar módulo e associar ao curso</button>
+          <div class="template-actions">
+            <button id="exportTemplateBtn" class="secondary-btn" type="button">Exportar template</button>
+            <button id="importTemplateBtn" class="secondary-btn" type="button">Importar template</button>
+          </div>
+          <p class="muted template-help">Exporte um JSON do layout atual e importe templates criados por outras pessoas.</p>
+        </div>
+        <div class="builder-panel-section">
+          <h3>Módulos já publicados</h3>
+          <div class="ai-reference-card module-collapse-card collapsed" id="courseModuleCard" role="button" tabindex="0" aria-expanded="false">
+            <div class="ai-reference-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false">
+                <path d="M6 7.5A1.5 1.5 0 0 1 7.5 6h9A1.5 1.5 0 0 1 18 7.5v9a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 6 16.5z" fill="none" stroke="currentColor" stroke-width="1.7"/>
+                <path d="M9 10h6M9 13h6M9 16h4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.7"/>
+              </svg>
+            </div>
+            <div class="ai-reference-copy">
+              <strong>Módulos do curso</strong>
+              <small>Expanda para editar ou excluir módulos já criados para o curso selecionado.</small>
+            </div>
+            <div id="courseModuleList" class="module-list">
+              <p class="muted" style="margin:0;">Selecione um curso para visualizar os módulos existentes.</p>
+            </div>
+          </div>
+        </div>
+        <div class="builder-panel-section">
+          <h3>Estilo do slide</h3>
+          <div class="builder-field">
+            <label>Fundo do slide</label>
+            <button id="slideBgUploadBtn" class="secondary-btn" type="button">Abrir editor de fundo</button>
+            <input id="slideBgInput" hidden />
+            <small id="slideBgStatus" class="muted">Escolha cor sólida, gradiente, imagem ou vídeo para o fundo do slide.</small>
+          </div>
+          <div class="builder-field">
+            <label class="toggle-inline">
+              <input id="slideRequireQuizToggle" type="checkbox" />
+              Bloquear avanço até concluir os quizzes deste slide
+            </label>
+          </div>
+        </div>
+        <div class="builder-panel-section">
+          <h3>Elemento ativo</h3>
+          <div class="builder-field">
+            <label>Tipo</label>
+            <span id="selectedElementType" class="muted">nenhum</span>
+          </div>
+          <div id="sharedLayoutField" class="builder-field">
+            <label for="elementWidthInput">Largura (px)</label>
+            <input id="elementWidthInput" type="number" placeholder="ex: 240" />
+          </div>
+          <div id="sharedHeightField" class="builder-field">
+            <label for="elementHeightInput">Altura (px)</label>
+            <input id="elementHeightInput" type="number" placeholder="ex: 120" />
+          </div>
+          <div id="sharedRotationField" class="builder-field">
+            <label for="elementRotationInput">Rotação (°)</label>
+            <input id="elementRotationInput" type="number" min="0" max="360" step="1" placeholder="0" />
+          </div>
+          <div id="sharedLayerField" class="builder-field">
+            <label for="elementLayerInput">Camada</label>
+            <input id="elementLayerInput" type="number" min="0" step="1" placeholder="ex: 3" />
+          </div>
+          <div id="sharedTextColorField" class="builder-field">
+            <label for="elementTextColorInput">Cor do texto</label>
+            <input id="elementTextColorInput" type="color" value="#0f142c" />
+          </div>
+          <div id="sharedFontSizeField" class="builder-field">
+            <label for="elementFontSizeInput">Tamanho da fonte (px)</label>
+            <input id="elementFontSizeInput" type="number" min="10" max="160" step="1" placeholder="ex: 24" />
+          </div>
+          <div id="sharedFontFamilyField" class="builder-field">
+            <label for="elementFontFamilySelect">Fonte</label>
+            <select id="elementFontFamilySelect">
+              <option value="Inter, sans-serif">Inter</option>
+              <option value="Arial, sans-serif">Arial</option>
+              <option value="'Trebuchet MS', sans-serif">Trebuchet MS</option>
+              <option value="'Times New Roman', serif">Times New Roman</option>
+              <option value="Georgia, serif">Georgia</option>
+              <option value="'Courier New', monospace">Courier New</option>
+              <option value="Verdana, sans-serif">Verdana</option>
+            </select>
+          </div>
+          <div id="sharedFontWeightField" class="builder-field">
+            <label for="elementFontWeightSelect">Estilo da fonte</label>
+            <select id="elementFontWeightSelect">
+              <option value="400">Normal</option>
+              <option value="500">Médio</option>
+              <option value="600">Semibold</option>
+              <option value="700">Negrito</option>
+            </select>
+          </div>
+          <div id="sharedBackgroundField" class="builder-field">
+            <label for="elementBgColorInput">Cor de fundo</label>
+            <input id="elementBgColorInput" type="color" value="#ffffff" />
+          </div>
+          <div id="sharedStudentDragField" class="builder-field hidden">
+            <label class="toggle-inline">
+              <input id="elementStudentDragToggle" type="checkbox" />
+              Permitir que o aluno arraste este elemento
+            </label>
+          </div>
+          <div id="blockShapeField" class="builder-field hidden">
+            <label for="elementShapeSelect">Forma do bloco ou botão</label>
+            <select id="elementShapeSelect">
+              <option value="rectangle">Retângulo</option>
+              <option value="circle">Círculo</option>
+              <option value="triangle">Triângulo</option>
+              <option value="arrow">Seta</option>
+            </select>
+          </div>
+          <div id="gradientToggleField" class="builder-field hidden">
+            <label>
+              <input type="checkbox" id="elementGradientToggle" />
+              Usar gradiente
+            </label>
+          </div>
+          <div id="solidColorField" class="builder-field hidden">
+            <label for="elementSolidColorInput">Cor sólida</label>
+            <input id="elementSolidColorInput" type="color" value="#ffffff" />
+          </div>
+          <div id="gradientStartField" class="builder-field gradient-colors hidden">
+            <label for="elementGradientStartInput">Cor inicial</label>
+            <input id="elementGradientStartInput" type="color" value="#ffef5c" />
+          </div>
+          <div id="gradientEndField" class="builder-field gradient-colors hidden">
+            <label for="elementGradientEndInput">Cor final</label>
+            <input id="elementGradientEndInput" type="color" value="#ff9d5c" />
+          </div>
+          <div id="textBackgroundField" class="builder-field hidden">
+            <label>
+              <input type="checkbox" id="elementTextBackgroundToggle" />
+              Texto com fundo
+            </label>
+          </div>
+          <div id="textBorderField" class="builder-field hidden">
+            <label>
+              <input type="checkbox" id="elementTextBorderToggle" />
+              Texto com borda
+            </label>
+          </div>
+          <div id="textAlignToolsField" class="builder-field hidden">
+            <label>Alinhamento do texto</label>
+            <div class="text-align-actions">
+              <button id="centerTextStageBtn" class="secondary-btn" type="button">Centralizar no palco</button>
+              <button id="centerTextBlockBtn" class="secondary-btn" type="button">Centralizar no bloco</button>
+            </div>
+          </div>
+        </div>
+        <div class="builder-panel-section">
+          <h3>Assistente de IA</h3>
+          <p class="muted" id="aiAssistantStatus" style="margin:0;"></p>
+          <div class="builder-field">
+            <label for="aiAssistantPrompt">Pedido para a IA</label>
+            <textarea id="aiAssistantPrompt" rows="4" placeholder="Ex: crie um slide de abertura com título, bloco explicativo e um quiz no final"></textarea>
+          </div>
+          <div class="builder-field">
+            <label>Imagem anexada</label>
+            <div class="slide-toolbar ai-attachment-toolbar">
+              <button id="aiAssistantAttachImageBtn" class="secondary-btn icon-only-btn" type="button" title="Anexar imagem" aria-label="Anexar imagem">
+                <span class="tool-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false">
+                    <path d="M8 7.5a4 4 0 0 1 8 0V14a5 5 0 0 1-10 0V8.5a3 3 0 0 1 6 0V14a1 1 0 1 1-2 0V9.5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/>
+                  </svg>
+                </span>
+              </button>
+              <button id="aiAssistantClearImageBtn" class="secondary-btn icon-only-btn" type="button" title="Remover anexo" aria-label="Remover anexo" disabled>
+                <span class="tool-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false">
+                    <path d="M7 7 17 17M17 7 7 17" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"/>
+                  </svg>
+                </span>
+              </button>
+            </div>
+            <div id="aiAssistantAttachmentPreview" class="module-list">
+              <p class="muted" style="margin:0;">Nenhuma imagem anexada.</p>
+            </div>
+          </div>
+          <div class="ai-reference-card collapsed" id="aiReferenceCard" role="button" tabindex="0" aria-expanded="false">
+            <div class="ai-reference-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false">
+                <path d="M5 6.5A1.5 1.5 0 0 1 6.5 5h11A1.5 1.5 0 0 1 19 6.5v11a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 17.5z" fill="none" stroke="currentColor" stroke-width="1.6"/>
+                <path d="m8 15 2.2-2.6a1 1 0 0 1 1.5-.1l1.7 1.9 1.5-1.7a1 1 0 0 1 1.5 0L18 14.4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6"/>
+                <circle cx="9.2" cy="9" r="1.2" fill="currentColor"/>
+              </svg>
+            </div>
+            <div class="ai-reference-copy">
+              <strong>Referência visual</strong>
+              <small>Use este exemplo para pedir ajustes de layout, alinhamento, cores, blocos e imagem.</small>
+            </div>
+            <img src="assets/ai-layout-reference.svg" alt="Exemplo de layout profissional com título, blocos organizados, imagem ilustrativa e botão de ação" />
+            <button id="aiAssistantUseReferenceBtn" class="secondary-btn compact-reference-btn" type="button">Usar exemplo no pedido</button>
+          </div>
+          <div class="builder-field">
+            <label for="aiAssistantFeedback">Feedback da IA</label>
+            <div id="aiAssistantFeedback" class="ai-feedback-log" aria-live="polite">
+              <p class="muted" style="margin:0;">O andamento da IA vai aparecer aqui.</p>
+            </div>
+          </div>
+          <div class="slide-toolbar">
+            <button id="aiAssistantGenerateBtn" class="primary-btn" type="button">Gerar proposta</button>
+            <button id="aiAssistantApplyBtn" class="secondary-btn" type="button" disabled>Aplicar ações</button>
+            <button id="aiAssistantDiscardBtn" class="secondary-btn" type="button" disabled>Descartar</button>
+          </div>
+          <div id="aiAssistantActions" class="module-list">
+            <p class="muted" style="margin:0;">Nenhuma proposta carregada.</p>
+          </div>
+          <div class="builder-field">
+            <label for="aiAssistantDebugOutput">Debug da proposta</label>
+            <pre id="aiAssistantDebugOutput" class="ai-debug-output">Nenhum debug disponível ainda.</pre>
+          </div>
+          <div class="builder-field">
+            <label for="aiProposalHistoryList">Histórico de propostas</label>
+            <div id="aiProposalHistoryList" class="ai-proposal-history" aria-live="polite">
+              <p class="muted" style="margin:0;">As propostas geradas pela IA vão aparecer aqui.</p>
+            </div>
+          </div>
+        </div>
+        <div class="builder-panel-section">
+          <h3>Instruções</h3>
+          <ul class="builder-instructions">
+            <li>Use os ícones do topo para criar texto, bloco, imagem, áudio, vídeo, quiz, botão flutuante, borracha e animação.</li>
+            <li>Duplo clique em texto, bloco, imagem, vídeo ou botão para editar rapidamente o conteúdo principal.</li>
+            <li>Os menus de texto, quiz, botão flutuante e animação são flutuantes, podem ser arrastados pelo topo e fecham ao clicar fora.</li>
+            <li>Use os ícones do assistente para anexar ou remover imagem de referência e clique nos cards recolhíveis para expandir ou esconder conteúdo.</li>
+            <li>Limpar slide apaga o slide atual; Criar novo módulo reinicia o editor; salvar continua sendo manual.</li>
+          </ul>
+      </div>
+      <div class="builder-panel-section">
+        <h3>Gerenciar módulo</h3>
+        <button id="resetEditorBtn" type="button" class="secondary-btn">Criar novo módulo</button>
+      </div>
+    </aside>
+      <section class="builder-stage">
+        <div class="stage-toolbar-menu">
+          <div class="stage-toolbar-menu-main">
+            <button class="secondary-btn element-tool-btn" type="button" data-element="text" title="Texto" aria-label="Texto">
+              <span class="tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M5 6h14M12 6v12M8 18h8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/></svg></span>
+            </button>
+            <button class="secondary-btn element-tool-btn" type="button" data-element="block" title="Bloco" aria-label="Bloco">
+              <span class="tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><rect x="5" y="6" width="14" height="12" rx="2.4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 10h8M8 14h5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.8"/></svg></span>
+            </button>
+            <button class="secondary-btn element-tool-btn" type="button" data-element="image" title="Imagem" aria-label="Imagem">
+              <span class="tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><rect x="5" y="6" width="14" height="12" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m8 15 2.3-2.7a1 1 0 0 1 1.5-.1l1.8 2 1.5-1.7a1 1 0 0 1 1.5 0L19 15.1" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/><circle cx="9.3" cy="9.4" r="1.2" fill="currentColor"/></svg></span>
+            </button>
+            <button class="secondary-btn element-tool-btn" type="button" data-element="audio" title="Áudio" aria-label="Áudio">
+              <span class="tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M6.5 14h3.3l4.2 3V7l-4.2 3H6.5z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.8"/><path d="M16.6 9.2a4 4 0 0 1 0 5.6M18.6 7.2a6.8 6.8 0 0 1 0 9.6" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.8"/></svg></span>
+            </button>
+            <button class="secondary-btn element-tool-btn" type="button" data-element="video" title="Vídeo" aria-label="Vídeo">
+              <span class="tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><rect x="5" y="6" width="10.5" height="12" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m15.5 10.2 3.7-2.2v8l-3.7-2.2z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.8"/></svg></span>
+            </button>
+            <button class="secondary-btn element-tool-btn" type="button" data-element="quiz" title="Quiz" aria-label="Quiz">
+              <span class="tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M9.8 10a2.2 2.2 0 1 1 4.1 1.15c-.58.75-1.4 1.16-1.4 2.1" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/><circle cx="12" cy="16.6" r=".9" fill="currentColor"/></svg></span>
+            </button>
+            <button class="secondary-btn element-tool-btn" type="button" data-element="floatingButton" title="Botão flutuante" aria-label="Botão flutuante">
+              <span class="tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><rect x="5" y="8" width="14" height="8" rx="4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M9 12h6M13 10l2 2-2 2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/></svg></span>
+            </button>
+            <button class="secondary-btn element-tool-btn" type="button" data-element="detector" title="Detector" aria-label="Detector">
+              <span class="tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><rect x="5" y="6" width="14" height="12" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="3 2"/><circle cx="12" cy="12" r="2.4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 5v2M12 17v2M5 12h2M17 12h2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.8"/></svg></span>
+            </button>
+            <button class="secondary-btn element-tool-btn" type="button" data-element="eraser" title="Borracha" aria-label="Borracha">
+              <span class="tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="m8.3 6.2 6.9 6.9-5.8 5.8a2 2 0 0 1-2.8 0l-4.1-4.1a2 2 0 0 1 0-2.8z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.8"/><path d="M13.9 8.2 17 5.1a2 2 0 0 1 2.8 0l1 1a2 2 0 0 1 0 2.8l-3.1 3.1M9 19h10" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/></svg></span>
+            </button>
+            <button class="secondary-btn element-tool-btn" type="button" data-element="animation" title="Animação" aria-label="Animação">
+              <span class="tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="m12 5 1.8 3.7L18 10.5l-3.2 2.5.9 4-3.7-2-3.7 2 .9-4L6 10.5l4.2-1.8z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.8"/></svg></span>
+            </button>
+          </div>
+          <div class="stage-toolbar-actions">
+            <button id="undoActionBtn" class="secondary-btn icon-btn" type="button" title="Desfazer" aria-label="Desfazer" disabled>↶</button>
+            <button id="copyActionBtn" class="secondary-btn icon-btn" type="button" title="Copiar" aria-label="Copiar" disabled>
+              <span class="tool-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <rect x="9" y="8" width="9" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/>
+                  <path d="M7 15H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v1" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.8"/>
+                </svg>
+              </span>
+            </button>
+            <button id="pasteActionBtn" class="secondary-btn icon-btn" type="button" title="Colar" aria-label="Colar" disabled>
+              <span class="tool-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <path d="M9 5.2h6a1 1 0 0 1 1 1V8H8V6.2a1 1 0 0 1 1-1Z" fill="none" stroke="currentColor" stroke-width="1.8"/>
+                  <path d="M9.5 4h5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.8"/>
+                  <path d="M7 8h10a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2Z" fill="none" stroke="currentColor" stroke-width="1.8"/>
+                </svg>
+              </span>
+            </button>
+            <button id="redoActionBtn" class="secondary-btn icon-btn" type="button" title="Refazer" aria-label="Refazer" disabled>↷</button>
+            <label class="toolbar-step-control" for="keyboardMoveStepInput" title="Distância do movimento pelas setas do teclado">
+              <span>Setas</span>
+              <input id="keyboardMoveStepInput" type="number" min="1" max="500" step="1" value="10" />
+              <small>px</small>
+            </label>
+            <div id="sharedLayerToolbar" class="layer-toolbar layer-toolbar-inline">
+              <button id="layerBringForwardBtn" class="secondary-btn icon-only-btn" type="button" title="Trazer uma camada" aria-label="Trazer uma camada">+</button>
+              <button id="layerSendBackwardBtn" class="secondary-btn icon-only-btn" type="button" title="Enviar uma camada" aria-label="Enviar uma camada">-</button>
+              <button id="layerBringToFrontBtn" class="secondary-btn icon-only-btn" type="button" title="Trazer para frente" aria-label="Trazer para frente">↑</button>
+              <button id="layerSendToBackBtn" class="secondary-btn icon-only-btn" type="button" title="Mandar para trás" aria-label="Mandar para trás">↓</button>
+            </div>
+            <button id="removeSelectedElementBtn" class="secondary-btn danger-btn icon-only-btn" type="button" title="Remover elemento selecionado" aria-label="Remover elemento selecionado" disabled>
+              <span class="tool-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <path d="M5 7h14M9 7V5.8A1.8 1.8 0 0 1 10.8 4h2.4A1.8 1.8 0 0 1 15 5.8V7m-8 0 .7 11a2 2 0 0 0 2 1.9h4.6a2 2 0 0 0 2-1.9L17 7" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/>
+                </svg>
+              </span>
+            </button>
+          </div>
+          <input id="localImageInput" type="file" accept="image/*" hidden />
+          <input id="localAudioInput" type="file" accept="audio/*" hidden />
+          <input id="localVideoInput" type="file" accept="video/*" hidden />
+        </div>
+        <div id="stageEditorDock" class="stage-editor-dock">
+          <div id="stageEditorEmpty" class="stage-editor-empty">
+            <strong>Configuração rápida</strong>
+            <small>Selecione um texto, bloco, quiz, botão flutuante ou clique em Animação para editar acima do palco sem deslocar o layout.</small>
+          </div>
+        <section id="textEditorCard" class="quiz-editor-card hidden" data-stage-editor="text" aria-label="Editor de texto">
+          <div class="quiz-editor-head drag-handle">
+            <div>
+              <p class="badge">Texto</p>
+              <h3>Edite o texto do palco</h3>
+            </div>
+            <button type="button" class="secondary-btn small stage-editor-close" data-close-editor="text">Fechar</button>
+          </div>
+          <div class="quiz-editor-grid">
+            <div class="builder-field text-editor-content-field">
+              <label for="textElementContentInput">Conteúdo</label>
+              <textarea id="textElementContentInput" rows="5" placeholder="Digite o texto que deseja exibir no slide"></textarea>
+            </div>
+            <div class="builder-field">
+              <label for="textElementFontSizeInput">Tamanho da fonte (px)</label>
+              <input id="textElementFontSizeInput" type="number" min="10" max="160" step="1" />
+            </div>
+            <div class="builder-field">
+              <label for="textElementFontFamilySelect">Fonte</label>
+              <select id="textElementFontFamilySelect">
+                <option value="Inter, sans-serif">Inter</option>
+                <option value="Arial, sans-serif">Arial</option>
+                <option value="'Trebuchet MS', sans-serif">Trebuchet MS</option>
+                <option value="'Times New Roman', serif">Times New Roman</option>
+                <option value="Georgia, serif">Georgia</option>
+                <option value="'Courier New', monospace">Courier New</option>
+                <option value="Verdana, sans-serif">Verdana</option>
+              </select>
+            </div>
+            <div class="builder-field">
+              <label for="textElementFontWeightSelect">Peso da fonte</label>
+              <select id="textElementFontWeightSelect">
+                <option value="400">Normal</option>
+                <option value="500">Médio</option>
+                <option value="600">Semibold</option>
+                <option value="700">Negrito</option>
+              </select>
+            </div>
+            <div class="builder-field">
+              <label for="textElementTextAlignSelect">Alinhamento do parágrafo</label>
+              <select id="textElementTextAlignSelect">
+                <option value="left">Alinhar à esquerda</option>
+                <option value="center">Centralizar parágrafo</option>
+                <option value="right">Alinhar à direita</option>
+              </select>
+            </div>
+            <div class="builder-field">
+              <label for="textElementTextColorInput">Cor do texto</label>
+              <input id="textElementTextColorInput" type="color" value="#0f142c" />
+            </div>
+            <div class="builder-field">
+              <label for="textElementBgColorInput">Cor do bloco</label>
+              <input id="textElementBgColorInput" type="color" value="#ffffff" />
+            </div>
+            <div class="builder-field">
+              <label for="textElementWidthInput">Largura (px)</label>
+              <input id="textElementWidthInput" type="number" min="40" step="1" />
+            </div>
+            <div class="builder-field">
+              <label for="textElementHeightInput">Altura (px)</label>
+              <input id="textElementHeightInput" type="number" min="40" step="1" />
+            </div>
+            <div class="builder-field">
+              <label class="toggle-inline">
+                <input id="textElementBackgroundToggle" type="checkbox" />
+                Texto com fundo
+              </label>
+            </div>
+            <div class="builder-field">
+              <label class="toggle-inline">
+                <input id="textElementBorderToggle" type="checkbox" />
+                Texto com borda
+              </label>
+            </div>
+            <div class="builder-field text-editor-actions">
+              <label>Alinhamento rápido</label>
+              <div class="text-align-actions">
+                <button id="textElementCenterStageBtn" class="secondary-btn" type="button">Centralizar no palco</button>
+                <button id="textElementCenterBlockBtn" class="secondary-btn" type="button">Centralizar no bloco</button>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section id="blockEditorCard" class="quiz-editor-card hidden" data-stage-editor="block" aria-label="Editor de bloco">
+          <div class="quiz-editor-head drag-handle">
+            <div>
+              <p class="badge">Bloco</p>
+              <h3>Configure o bloco no palco</h3>
+            </div>
+            <button type="button" class="secondary-btn small stage-editor-close" data-close-editor="block">Fechar</button>
+          </div>
+          <div class="quiz-editor-grid">
+            <div class="builder-field text-editor-content-field">
+              <label for="blockElementContentInput">Conteúdo</label>
+              <textarea id="blockElementContentInput" rows="5" placeholder="Digite o conteúdo do bloco"></textarea>
+            </div>
+            <div class="builder-field">
+              <label for="blockElementWidthInput">Largura (px)</label>
+              <input id="blockElementWidthInput" type="number" min="40" step="1" />
+            </div>
+            <div class="builder-field">
+              <label for="blockElementHeightInput">Altura (px)</label>
+              <input id="blockElementHeightInput" type="number" min="40" step="1" />
+            </div>
+            <div class="builder-field">
+              <label for="blockElementRotationInput">Rotação (°)</label>
+              <input id="blockElementRotationInput" type="number" min="0" max="360" step="1" />
+            </div>
+            <div class="builder-field">
+              <label for="blockElementLayerInput">Camada</label>
+              <input id="blockElementLayerInput" type="number" min="0" step="1" />
+            </div>
+            <div class="builder-field">
+              <label for="blockElementShapeSelect">Forma</label>
+              <select id="blockElementShapeSelect">
+                <option value="rectangle">Retângulo</option>
+                <option value="circle">Círculo</option>
+                <option value="triangle">Triângulo</option>
+                <option value="arrow">Seta</option>
+              </select>
+            </div>
+            <div class="builder-field">
+              <label class="toggle-inline">
+                <input id="blockElementGradientToggle" type="checkbox" />
+                Usar gradiente
+              </label>
+            </div>
+            <div id="blockElementSolidColorField" class="builder-field">
+              <label for="blockElementSolidColorInput">Cor sólida</label>
+              <input id="blockElementSolidColorInput" type="color" value="#f4f6ff" />
+            </div>
+            <div id="blockElementGradientStartField" class="builder-field hidden">
+              <label for="blockElementGradientStartInput">Cor inicial</label>
+              <input id="blockElementGradientStartInput" type="color" value="#ffd54f" />
+            </div>
+            <div id="blockElementGradientEndField" class="builder-field hidden">
+              <label for="blockElementGradientEndInput">Cor final</label>
+              <input id="blockElementGradientEndInput" type="color" value="#ffb74d" />
+            </div>
+            <div class="builder-field">
+              <label for="blockElementTextColorInput">Cor do texto</label>
+              <input id="blockElementTextColorInput" type="color" value="#0f142c" />
+            </div>
+            <div class="builder-field">
+              <label for="blockElementFontSizeInput">Tamanho da fonte (px)</label>
+              <input id="blockElementFontSizeInput" type="number" min="10" max="160" step="1" />
+            </div>
+            <div class="builder-field">
+              <label for="blockElementFontFamilySelect">Fonte</label>
+              <select id="blockElementFontFamilySelect">
+                <option value="Inter, sans-serif">Inter</option>
+                <option value="Arial, sans-serif">Arial</option>
+                <option value="'Trebuchet MS', sans-serif">Trebuchet MS</option>
+                <option value="'Times New Roman', serif">Times New Roman</option>
+                <option value="Georgia, serif">Georgia</option>
+                <option value="'Courier New', monospace">Courier New</option>
+                <option value="Verdana, sans-serif">Verdana</option>
+              </select>
+            </div>
+            <div class="builder-field">
+              <label for="blockElementFontWeightSelect">Peso da fonte</label>
+              <select id="blockElementFontWeightSelect">
+                <option value="400">Normal</option>
+                <option value="500">Médio</option>
+                <option value="600">Semibold</option>
+                <option value="700">Negrito</option>
+              </select>
+            </div>
+            <div class="builder-field">
+              <label for="blockElementTextureFitSelect">Ajuste da textura</label>
+              <select id="blockElementTextureFitSelect">
+                <option value="cover">Preencher cortando</option>
+                <option value="contain">Mostrar inteira</option>
+                <option value="fill">Esticar</option>
+              </select>
+            </div>
+            <div class="builder-field text-editor-actions">
+              <label>Textura do bloco</label>
+              <div class="text-align-actions">
+                <button id="blockAttachTextureBtn" class="secondary-btn" type="button">Anexar imagem</button>
+                <button id="blockClearTextureBtn" class="secondary-btn" type="button">Remover textura</button>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section id="quizEditorCard" class="quiz-editor-card hidden" data-stage-editor="quiz" aria-label="Editor de quiz">
+          <div class="quiz-editor-head">
+            <div>
+              <p class="badge">Quiz interativo</p>
+              <h3>Configure a pergunta</h3>
+            </div>
+            <button type="button" class="secondary-btn small stage-editor-close" data-close-editor="quiz">Fechar</button>
+          </div>
+          <div class="quiz-editor-grid">
+            <div class="builder-field">
+              <label for="quizQuestionInput">Pergunta</label>
+              <textarea id="quizQuestionInput" rows="2" placeholder="Ex: Qual opção está correta?"></textarea>
+            </div>
+            <div class="builder-field">
+              <label for="quizCorrectAnswerSelect">Resposta correta</label>
+              <select id="quizCorrectAnswerSelect"></select>
+            </div>
+            <div class="builder-field">
+              <label for="quizOptionsInput">Alternativas</label>
+              <textarea id="quizOptionsInput" rows="6" placeholder="Uma alternativa por linha"></textarea>
+            </div>
+            <div class="builder-field">
+              <label for="quizSuccessMessageInput">Mensagem de acerto</label>
+              <input id="quizSuccessMessageInput" placeholder="Ex: Resposta correta!" />
+            </div>
+            <div class="builder-field">
+              <label for="quizErrorMessageInput">Mensagem de erro</label>
+              <input id="quizErrorMessageInput" placeholder="Ex: Tente novamente." />
+            </div>
+            <div class="builder-field">
+              <label for="quizActionLabelInput">Texto do botão</label>
+              <input id="quizActionLabelInput" placeholder="Ex: Validar resposta" />
+            </div>
+            <div class="builder-field">
+              <label for="quizBackgroundColorInput">Fundo do quiz</label>
+              <input id="quizBackgroundColorInput" type="color" value="#ffffff" />
+            </div>
+            <div class="builder-field">
+              <label for="quizQuestionColorInput">Cor da pergunta</label>
+              <input id="quizQuestionColorInput" type="color" value="#171934" />
+            </div>
+            <div class="builder-field">
+              <label for="quizOptionBackgroundColorInput">Fundo das opções</label>
+              <input id="quizOptionBackgroundColorInput" type="color" value="#f4f6ff" />
+            </div>
+            <div class="builder-field">
+              <label for="quizOptionTextColorInput">Cor do texto das opções</label>
+              <input id="quizOptionTextColorInput" type="color" value="#25284c" />
+            </div>
+            <div class="builder-field">
+              <label for="quizButtonBackgroundColorInput">Fundo do botão</label>
+              <input id="quizButtonBackgroundColorInput" type="color" value="#6d63ff" />
+            </div>
+            <div class="builder-field">
+              <label for="quizPointsInput">Pontuação da questão</label>
+              <input id="quizPointsInput" type="number" min="1" step="1" value="1" />
+            </div>
+            <div class="builder-field">
+              <label class="toggle-inline">
+                <input id="quizLockOnWrongToggle" type="checkbox" />
+                Bloquear nova tentativa quando errar
+              </label>
+            </div>
+          </div>
+        </section>
+        <section id="imageEditorCard" class="quiz-editor-card hidden" data-stage-editor="image" aria-label="Editor de imagem">
+          <div class="quiz-editor-head drag-handle">
+            <div>
+              <p class="badge">Imagem</p>
+              <h3>Configure a imagem no palco</h3>
+            </div>
+            <button type="button" class="secondary-btn small stage-editor-close" data-close-editor="image">Fechar</button>
+          </div>
+          <div class="quiz-editor-grid compact">
+            <div class="builder-field">
+              <label for="imageElementWidthInput">Largura (px)</label>
+              <input id="imageElementWidthInput" type="number" min="40" step="1" />
+            </div>
+            <div class="builder-field">
+              <label for="imageElementHeightInput">Altura (px)</label>
+              <input id="imageElementHeightInput" type="number" min="40" step="1" />
+            </div>
+            <div class="builder-field">
+              <label for="imageElementRotationInput">Rotação (°)</label>
+              <input id="imageElementRotationInput" type="number" min="0" max="360" step="1" />
+            </div>
+            <div class="builder-field">
+              <label for="imageElementObjectFitSelect">Ajuste da imagem</label>
+              <select id="imageElementObjectFitSelect">
+                <option value="cover">Preencher cortando</option>
+                <option value="contain">Mostrar inteira</option>
+                <option value="fill">Esticar</option>
+              </select>
+            </div>
+            <div class="builder-field">
+              <label class="toggle-inline">
+                <input id="imageElementStudentDragToggle" type="checkbox" />
+                Permitir que o aluno arraste esta imagem
+              </label>
+            </div>
+            <div class="builder-field">
+              <label>Ações rápidas</label>
+              <div class="text-align-actions">
+                <button id="imageReplaceSourceBtn" class="secondary-btn" type="button">Trocar imagem</button>
+                <button id="removeImageBackgroundBtn" class="secondary-btn" type="button">Remover fundo</button>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section id="floatingButtonEditorCard" class="quiz-editor-card hidden" data-stage-editor="floating" aria-label="Editor do botão flutuante">
+          <div class="quiz-editor-head">
+            <div>
+              <p id="floatingEditorBadge" class="badge">Botão flutuante</p>
+              <h3 id="floatingEditorTitle">Configure o clique</h3>
+            </div>
+            <button type="button" class="secondary-btn small stage-editor-close" data-close-editor="floating">Fechar</button>
+          </div>
+          <div class="quiz-editor-grid">
+            <div class="builder-field">
+              <label for="floatingActionTypeSelect">Ação ao clicar</label>
+              <select id="floatingActionTypeSelect">
+                <option value="none">Sem ação</option>
+                <option value="nextSlide">Pular para o próximo slide</option>
+                <option value="jumpSlide">Ir para um slide específico</option>
+                <option value="addText">Adicionar texto</option>
+                <option value="replaceText">Replace texto</option>
+                <option value="addImage">Adicionar imagem</option>
+                <option value="addAudio">Adicionar áudio</option>
+                <option value="addVideo">Adicionar vídeo</option>
+                <option value="addQuiz">Adicionar quiz</option>
+                <option value="playAudio">Reproduzir áudio</option>
+                <option value="playVideo">Dar play no vídeo</option>
+                <option value="pauseVideo">Pausar vídeo</option>
+                <option value="seekVideo">Ir para um tempo do vídeo</option>
+                <option value="showElement">Mostrar elemento</option>
+                <option value="hideElement">Esconder elemento</option>
+                <option value="moveElement">Mover elemento</option>
+                <option value="playAnimation">Ativar animação</option>
+              </select>
+            </div>
+            <div id="floatingTargetSlideField" class="builder-field hidden">
+              <label for="floatingTargetSlideSelect">Slide de destino</label>
+              <select id="floatingTargetSlideSelect"></select>
+            </div>
+            <div id="floatingTargetElementField" class="builder-field hidden">
+              <label for="floatingTargetElementSelect">Elemento alvo</label>
+              <div class="floating-placement-actions">
+                <select id="floatingTargetElementSelect"></select>
+                <button id="floatingPickTargetElementBtn" class="secondary-btn" type="button">Selecionar no palco</button>
+              </div>
+            </div>
+            <div class="builder-field">
+              <label class="toggle-inline">
+                <input id="floatingRequireAllToggle" type="checkbox" />
+                Só executar depois de clicar em todos os botões da regra
+              </label>
+            </div>
+            <div id="floatingRuleGroupField" class="builder-field hidden">
+              <label for="floatingRuleGroupInput">Nome da regra</label>
+              <input id="floatingRuleGroupInput" placeholder="Ex: pista-secreta" />
+            </div>
+            <div id="floatingDetectorAcceptedField" class="builder-field hidden">
+              <label for="floatingDetectorAcceptedSelect">Elemento esperado</label>
+              <select id="floatingDetectorAcceptedSelect"></select>
+            </div>
+            <div id="floatingDetectorMinCountField" class="builder-field hidden">
+              <label for="floatingDetectorMinCountInput">Quantidade mínima no detector</label>
+              <input id="floatingDetectorMinCountInput" type="number" min="1" step="1" value="1" />
+            </div>
+            <div id="floatingDetectorTriggerOnceField" class="builder-field hidden">
+              <label class="toggle-inline">
+                <input id="floatingDetectorTriggerOnceToggle" type="checkbox" />
+                Disparar apenas uma vez por tentativa
+              </label>
+            </div>
+            <div id="floatingActionTextField" class="builder-field hidden">
+              <label id="floatingActionTextLabel" for="floatingActionTextInput">Texto a inserir</label>
+              <textarea id="floatingActionTextInput" rows="3" placeholder="Ex: Bem-vindo à próxima etapa"></textarea>
+            </div>
+            <div id="floatingReplaceModeField" class="builder-field hidden">
+              <label for="floatingReplaceModeSelect">Modo do replace</label>
+              <select id="floatingReplaceModeSelect">
+                <option value="replace">Trocar pelo novo conteúdo</option>
+                <option value="counter">Concatenar como contador</option>
+              </select>
+            </div>
+            <div id="floatingReplaceCounterStartField" class="builder-field hidden">
+              <label for="floatingReplaceCounterStartInput">Valor inicial do contador</label>
+              <input id="floatingReplaceCounterStartInput" type="number" step="1" value="1" />
+            </div>
+            <div id="floatingReplaceCounterStepField" class="builder-field hidden">
+              <label for="floatingReplaceCounterStepInput">Incremento por disparo</label>
+              <input id="floatingReplaceCounterStepInput" type="number" step="1" value="1" />
+            </div>
+            <div id="floatingTextFontSizeField" class="builder-field hidden">
+              <label for="floatingTextFontSizeInput">Tamanho da fonte (px)</label>
+              <input id="floatingTextFontSizeInput" type="number" min="10" max="160" step="1" />
+            </div>
+            <div id="floatingTextFontFamilyField" class="builder-field hidden">
+              <label for="floatingTextFontFamilySelect">Fonte</label>
+              <select id="floatingTextFontFamilySelect">
+                <option value="Inter, sans-serif">Inter</option>
+                <option value="Arial, sans-serif">Arial</option>
+                <option value="'Trebuchet MS', sans-serif">Trebuchet MS</option>
+                <option value="'Times New Roman', serif">Times New Roman</option>
+                <option value="Georgia, serif">Georgia</option>
+                <option value="'Courier New', monospace">Courier New</option>
+                <option value="Verdana, sans-serif">Verdana</option>
+              </select>
+            </div>
+            <div id="floatingTextFontWeightField" class="builder-field hidden">
+              <label for="floatingTextFontWeightSelect">Peso da fonte</label>
+              <select id="floatingTextFontWeightSelect">
+                <option value="400">Normal</option>
+                <option value="500">Médio</option>
+                <option value="600">Semibold</option>
+                <option value="700">Negrito</option>
+              </select>
+            </div>
+            <div id="floatingTextAlignField" class="builder-field hidden">
+              <label for="floatingTextAlignSelect">Alinhamento do parágrafo</label>
+              <select id="floatingTextAlignSelect">
+                <option value="left">Alinhar à esquerda</option>
+                <option value="center">Centralizar parágrafo</option>
+                <option value="right">Alinhar à direita</option>
+              </select>
+            </div>
+            <div id="floatingTextColorField" class="builder-field hidden">
+              <label for="floatingTextColorInput">Cor do texto</label>
+              <input id="floatingTextColorInput" type="color" value="#0f142c" />
+            </div>
+            <div id="floatingTextBgColorField" class="builder-field hidden">
+              <label for="floatingTextBgColorInput">Cor do bloco</label>
+              <input id="floatingTextBgColorInput" type="color" value="#ffffff" />
+            </div>
+            <div id="floatingTextBackgroundToggleField" class="builder-field hidden">
+              <label class="toggle-inline">
+                <input id="floatingTextBackgroundToggle" type="checkbox" />
+                Texto com fundo
+              </label>
+            </div>
+            <div id="floatingTextBorderToggleField" class="builder-field hidden">
+              <label class="toggle-inline">
+                <input id="floatingTextBorderToggle" type="checkbox" />
+                Texto com borda
+              </label>
+            </div>
+            <div id="floatingActionUrlField" class="builder-field hidden">
+              <label for="floatingActionUrlInput">URL da mídia</label>
+              <input id="floatingActionUrlInput" placeholder="Cole a URL da imagem, áudio ou vídeo" />
+            </div>
+            <div id="floatingAudioVisibleField" class="builder-field hidden">
+              <label class="toggle-inline">
+                <input id="floatingAudioVisibleToggle" type="checkbox" />
+                Mostrar player de áudio no slide
+              </label>
+            </div>
+            <div id="floatingAudioLoopField" class="builder-field hidden">
+              <label class="toggle-inline">
+                <input id="floatingAudioLoopToggle" type="checkbox" />
+                Reproduzir em loop
+              </label>
+            </div>
+            <div id="floatingInsertXField" class="builder-field hidden">
+              <label for="floatingInsertXInput">Posição X</label>
+              <input id="floatingInsertXInput" type="number" min="0" step="1" placeholder="Ex: 120" />
+            </div>
+            <div id="floatingInsertYField" class="builder-field hidden">
+              <label for="floatingInsertYInput">Posição Y</label>
+              <input id="floatingInsertYInput" type="number" min="0" step="1" placeholder="Ex: 120" />
+            </div>
+            <div id="floatingInsertWidthField" class="builder-field hidden">
+              <label for="floatingInsertWidthInput">Largura do item</label>
+              <input id="floatingInsertWidthInput" type="number" min="40" step="1" placeholder="Ex: 280" />
+            </div>
+            <div id="floatingInsertHeightField" class="builder-field hidden">
+              <label for="floatingInsertHeightInput">Altura do item</label>
+              <input id="floatingInsertHeightInput" type="number" min="40" step="1" placeholder="Ex: 180" />
+            </div>
+            <div id="floatingMoveXField" class="builder-field hidden">
+              <label for="floatingMoveXInput">Mover no eixo X (px)</label>
+              <input id="floatingMoveXInput" type="number" step="1" placeholder="Ex: -120 ou 120" />
+            </div>
+            <div id="floatingMoveYField" class="builder-field hidden">
+              <label for="floatingMoveYInput">Mover no eixo Y (px)</label>
+              <input id="floatingMoveYInput" type="number" step="1" placeholder="Ex: -80 ou 80" />
+            </div>
+            <div id="floatingMoveDurationField" class="builder-field hidden">
+              <label for="floatingMoveDurationInput">Duração do movimento (s)</label>
+              <input id="floatingMoveDurationInput" type="number" min="0.1" max="20" step="0.1" placeholder="Ex: 0.8" />
+            </div>
+            <div id="floatingVideoTimeField" class="builder-field hidden">
+              <label for="floatingVideoTimeInput">Tempo do vídeo (s)</label>
+              <input id="floatingVideoTimeInput" type="number" min="0" step="0.1" placeholder="Ex: 2.35" />
+            </div>
+            <div id="floatingPlacementToolsField" class="builder-field floating-placement-tools hidden">
+              <label>Posicionamento no palco</label>
+              <div class="floating-placement-actions">
+                <button id="floatingPickPlacementBtn" class="secondary-btn" type="button">Marcar no palco</button>
+                <span id="floatingPlacementHint" class="muted">A prévia mostra onde o item vai aparecer.</span>
+              </div>
+            </div>
+            <div id="floatingQuizQuestionField" class="builder-field hidden">
+              <label for="floatingQuizQuestionInput">Pergunta do quiz</label>
+              <textarea id="floatingQuizQuestionInput" rows="2" placeholder="Ex: Qual é a resposta correta?"></textarea>
+            </div>
+            <div id="floatingQuizOptionsField" class="builder-field hidden">
+              <label for="floatingQuizOptionsInput">Alternativas do quiz</label>
+              <textarea id="floatingQuizOptionsInput" rows="5" placeholder="Uma alternativa por linha"></textarea>
+            </div>
+            <div id="floatingQuizCorrectField" class="builder-field hidden">
+              <label for="floatingQuizCorrectSelect">Resposta correta</label>
+              <select id="floatingQuizCorrectSelect"></select>
+            </div>
+            <div id="floatingQuizSuccessField" class="builder-field hidden">
+              <label for="floatingQuizSuccessInput">Mensagem de acerto</label>
+              <input id="floatingQuizSuccessInput" placeholder="Ex: Resposta correta!" />
+            </div>
+            <div id="floatingQuizErrorField" class="builder-field hidden">
+              <label for="floatingQuizErrorInput">Mensagem de erro</label>
+              <input id="floatingQuizErrorInput" placeholder="Ex: Tente novamente." />
+            </div>
+            <div id="floatingQuizActionLabelField" class="builder-field hidden">
+              <label for="floatingQuizActionLabelInput">Texto do botão</label>
+              <input id="floatingQuizActionLabelInput" placeholder="Ex: Validar resposta" />
+            </div>
+            <div id="floatingQuizBackgroundColorField" class="builder-field hidden">
+              <label for="floatingQuizBackgroundColorInput">Fundo do quiz</label>
+              <input id="floatingQuizBackgroundColorInput" type="color" value="#ffffff" />
+            </div>
+            <div id="floatingQuizQuestionColorField" class="builder-field hidden">
+              <label for="floatingQuizQuestionColorInput">Cor da pergunta</label>
+              <input id="floatingQuizQuestionColorInput" type="color" value="#171934" />
+            </div>
+            <div id="floatingQuizOptionBackgroundColorField" class="builder-field hidden">
+              <label for="floatingQuizOptionBackgroundColorInput">Fundo das opções</label>
+              <input id="floatingQuizOptionBackgroundColorInput" type="color" value="#f4f6ff" />
+            </div>
+            <div id="floatingQuizOptionTextColorField" class="builder-field hidden">
+              <label for="floatingQuizOptionTextColorInput">Cor do texto das opções</label>
+              <input id="floatingQuizOptionTextColorInput" type="color" value="#25284c" />
+            </div>
+            <div id="floatingQuizButtonBackgroundColorField" class="builder-field hidden">
+              <label for="floatingQuizButtonBackgroundColorInput">Fundo do botão</label>
+              <input id="floatingQuizButtonBackgroundColorInput" type="color" value="#6d63ff" />
+            </div>
+            <div id="floatingQuizPointsField" class="builder-field hidden">
+              <label for="floatingQuizPointsInput">Pontuação</label>
+              <input id="floatingQuizPointsInput" type="number" min="1" step="1" value="1" />
+            </div>
+            <div id="floatingQuizLockOnWrongField" class="builder-field hidden">
+              <label class="toggle-inline">
+                <input id="floatingQuizLockOnWrongToggle" type="checkbox" />
+                Bloquear nova tentativa ao errar
+              </label>
+            </div>
+          </div>
+        </section>
+        <section id="videoEditorCard" class="quiz-editor-card hidden" data-stage-editor="video" aria-label="Editor de gatilhos do vídeo">
+          <div class="quiz-editor-head drag-handle">
+            <div>
+              <p class="badge">Vídeo</p>
+              <h3>Configure gatilhos por tempo</h3>
+            </div>
+            <button type="button" class="secondary-btn small stage-editor-close" data-close-editor="video">Fechar</button>
+          </div>
+          <div class="quiz-editor-grid compact">
+            <div class="builder-field">
+              <label for="videoTriggerTimeInput">Disparar no tempo (s)</label>
+              <input id="videoTriggerTimeInput" type="number" min="0" step="0.1" value="2.35" />
+            </div>
+            <div class="builder-field">
+              <label for="videoTriggerActionSelect">Ação ao atingir o tempo</label>
+              <select id="videoTriggerActionSelect">
+                <option value="none">Sem ação</option>
+                <option value="playAudio">Reproduzir áudio</option>
+                <option value="pauseVideo">Pausar vídeo</option>
+                <option value="playVideo">Dar play no vídeo</option>
+                <option value="seekVideo">Ir para um tempo do vídeo</option>
+                <option value="showElement">Mostrar elemento</option>
+                <option value="hideElement">Esconder elemento</option>
+              </select>
+            </div>
+            <div id="videoTriggerTargetElementField" class="builder-field hidden">
+              <label for="videoTriggerTargetElementSelect">Elemento alvo</label>
+              <select id="videoTriggerTargetElementSelect"></select>
+            </div>
+            <div id="videoTriggerSeekTimeField" class="builder-field hidden">
+              <label for="videoTriggerSeekTimeInput">Ir para o tempo (s)</label>
+              <input id="videoTriggerSeekTimeInput" type="number" min="0" step="0.1" value="0" />
+            </div>
+            <div class="builder-field">
+              <small class="muted">O gatilho por tempo funciona em vídeos nativos do editor. Ao chegar nesse ponto, o vídeo executa a ação configurada.</small>
+            </div>
+          </div>
+        </section>
+        <section id="audioEditorCard" class="quiz-editor-card hidden" data-stage-editor="audio" aria-label="Editor de áudio">
+          <div class="quiz-editor-head drag-handle">
+            <div>
+              <p class="badge">Áudio</p>
+              <h3>Configure o áudio do slide</h3>
+            </div>
+            <button type="button" class="secondary-btn small stage-editor-close" data-close-editor="audio">Fechar</button>
+          </div>
+          <div class="quiz-editor-grid compact">
+            <div class="builder-field">
+              <label for="audioElementWidthInput">Largura (px)</label>
+              <input id="audioElementWidthInput" type="number" min="40" step="1" />
+            </div>
+            <div class="builder-field">
+              <label for="audioElementHeightInput">Altura (px)</label>
+              <input id="audioElementHeightInput" type="number" min="40" step="1" />
+            </div>
+            <div class="builder-field">
+              <label for="audioElementRotationInput">Rotação (°)</label>
+              <input id="audioElementRotationInput" type="number" min="0" max="360" step="1" />
+            </div>
+            <div class="builder-field">
+              <label class="toggle-inline">
+                <input id="audioElementVisibleToggle" type="checkbox" />
+                Mostrar player para o aluno
+              </label>
+            </div>
+            <div class="builder-field">
+              <label class="toggle-inline">
+                <input id="audioElementLoopToggle" type="checkbox" />
+                Reproduzir em loop
+              </label>
+            </div>
+            <div class="builder-field">
+              <label>Ações rápidas</label>
+              <div class="text-align-actions">
+                <button id="audioReplaceSourceBtn" class="secondary-btn" type="button">Trocar áudio</button>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section id="eraserEditorCard" class="quiz-editor-card hidden" data-stage-editor="eraser" aria-label="Editor da borracha">
+          <div class="quiz-editor-head">
+            <div>
+              <p class="badge">Borracha</p>
+              <h3>Apague partes do bloco ou imagem</h3>
+            </div>
+            <button type="button" class="secondary-btn small stage-editor-close" data-close-editor="eraser">Fechar</button>
+          </div>
+          <div class="quiz-editor-grid compact">
+            <div class="builder-field">
+              <label for="eraserModeSelect">Modo</label>
+              <select id="eraserModeSelect">
+                <option value="brush">Borracha</option>
+                <option value="lasso">Laço</option>
+              </select>
+            </div>
+            <div class="builder-field">
+              <label for="eraserShapeSelect">Formato</label>
+              <select id="eraserShapeSelect">
+                <option value="circle">Círculo</option>
+                <option value="square">Quadrado</option>
+                <option value="diamond">Losango</option>
+              </select>
+            </div>
+            <div class="builder-field">
+              <label for="eraserSizeInput">Tamanho</label>
+              <input id="eraserSizeInput" type="range" min="8" max="180" step="1" value="42" />
+            </div>
+            <div class="builder-field">
+              <label for="eraserSizeNumberInput">Tamanho exato</label>
+              <input id="eraserSizeNumberInput" type="number" min="8" max="180" step="1" value="42" />
+            </div>
+            <div class="builder-field eraser-editor-actions">
+              <label>Ações</label>
+              <div class="floating-placement-actions">
+                <button id="eraserClosePathBtn" class="secondary-btn" type="button">Concluir laço</button>
+                <button id="eraserClearBtn" class="secondary-btn" type="button">Limpar seleção</button>
+                <button id="eraserApplyBtn" class="primary-btn" type="button">Aplicar borracha</button>
+              </div>
+              <small class="muted">Selecione um bloco ou imagem, desenhe sobre ele no palco e aplique ao final.</small>
+            </div>
+          </div>
+        </section>
+        <section id="animationEditorCard" class="quiz-editor-card hidden" data-stage-editor="animation" aria-label="Editor de animação">
+          <div class="quiz-editor-head">
+            <div>
+              <p class="badge">Animação</p>
+              <h3>Anime o elemento selecionado</h3>
+            </div>
+            <button type="button" class="secondary-btn small stage-editor-close" data-close-editor="animation">Fechar</button>
+          </div>
+          <div class="quiz-editor-grid compact">
+            <div class="builder-field">
+              <label for="elementAnimationTypeSelect">Efeito</label>
+              <select id="elementAnimationTypeSelect">
+                <option value="none">Sem animação</option>
+                <option value="fade-in">Aparecer aos poucos</option>
+                <option value="fade-out">Sumir aos poucos</option>
+                <option value="slide-left">Deslizar da esquerda</option>
+                <option value="slide-right">Deslizar da direita</option>
+                <option value="rotate-in">Girar ao entrar</option>
+                <option value="pulse">Pulso suave</option>
+                <option value="float">Flutuar levemente</option>
+                <option value="zoom-in">Zoom suave</option>
+                <option value="motion-recording">Criar movimentação</option>
+              </select>
+            </div>
+            <div class="builder-field">
+              <label for="elementAnimationDurationInput">Duração (s)</label>
+              <input id="elementAnimationDurationInput" type="number" min="0.2" max="20" step="0.1" value="1.2" />
+            </div>
+            <div class="builder-field">
+              <label for="elementAnimationDelayInput">Atraso (s)</label>
+              <input id="elementAnimationDelayInput" type="number" min="0" max="20" step="0.1" value="0" />
+            </div>
+            <div class="builder-field">
+              <label class="toggle-inline">
+                <input type="checkbox" id="elementAnimationLoopToggle" />
+                Repetir continuamente
+              </label>
+            </div>
+            <div id="elementMotionFrameTools" class="builder-field hidden">
+              <label>Movimentação quadro a quadro</label>
+              <div class="floating-placement-actions">
+                <button id="addMotionFrameBtn" class="secondary-btn" type="button">Gravar quadro atual</button>
+                <button id="updateMotionFrameBtn" class="secondary-btn" type="button">Atualizar quadro</button>
+                <button id="removeMotionFrameBtn" class="secondary-btn" type="button">Excluir quadro</button>
+                <button id="clearMotionFramesBtn" class="secondary-btn" type="button">Limpar tudo</button>
+              </div>
+              <small class="muted">Posicione ou redimensione o texto, bloco, imagem ou botao no palco, grave cada quadro e clique na lista para voltar a um quadro salvo.</small>
+              <div id="elementMotionFrameList" class="motion-frame-list"></div>
+            </div>
+          </div>
+        </section>
+        <section id="backgroundEditorCard" class="quiz-editor-card hidden" data-stage-editor="background" aria-label="Editor de mídia de fundo">
+          <div class="quiz-editor-head drag-handle">
+            <div>
+              <p class="badge">Fundo</p>
+              <h3>Configure o fundo do slide</h3>
+            </div>
+            <button type="button" class="secondary-btn small stage-editor-close" data-close-editor="background">Fechar</button>
+          </div>
+          <div class="quiz-editor-grid compact">
+            <div class="builder-field">
+              <label for="backgroundMediaTypeSelect">Tipo de fundo</label>
+              <select id="backgroundMediaTypeSelect">
+                <option value="color-solid">Cor sólida</option>
+                <option value="color-gradient">Cor gradiente</option>
+                <option value="image-url">Imagem por URL</option>
+                <option value="image-local">Imagem do computador</option>
+                <option value="video-url">Vídeo por URL</option>
+                <option value="video-local">Vídeo do computador</option>
+              </select>
+            </div>
+            <div id="backgroundSolidColorField" class="builder-field hidden">
+              <label for="backgroundSolidColorInput">Cor sólida</label>
+              <input id="backgroundSolidColorInput" type="color" value="#fdfbff" />
+            </div>
+            <div id="backgroundGradientStartField" class="builder-field hidden">
+              <label for="backgroundGradientStartInput">Gradiente: cor inicial</label>
+              <input id="backgroundGradientStartInput" type="color" value="#fdfbff" />
+            </div>
+            <div id="backgroundGradientEndField" class="builder-field hidden">
+              <label for="backgroundGradientEndInput">Gradiente: cor final</label>
+              <input id="backgroundGradientEndInput" type="color" value="#dfe7ff" />
+            </div>
+            <div id="backgroundMediaUrlField" class="builder-field">
+              <label for="backgroundMediaUrlInput">URL da mídia</label>
+              <input id="backgroundMediaUrlInput" placeholder="Cole a URL da mídia" />
+            </div>
+            <div id="backgroundMediaLocalField" class="builder-field hidden">
+              <label>Arquivo local</label>
+              <button id="backgroundMediaLocalBtn" class="secondary-btn" type="button">Escolher arquivo</button>
+            </div>
+            <div class="builder-field">
+              <label>Resumo</label>
+              <small id="backgroundMediaEditorStatus" class="muted">Escolha imagem por URL, imagem do computador, vídeo por URL ou vídeo do computador.</small>
+            </div>
+            <div class="builder-field">
+              <label>Ações</label>
+              <div class="floating-placement-actions">
+                <button id="backgroundMediaApplyBtn" class="secondary-btn" type="button">Aplicar fundo</button>
+                <button id="backgroundMediaClearBtn" class="secondary-btn" type="button">Limpar fundo</button>
+              </div>
+            </div>
+          </div>
+        </section>
+        </div>
+        <div class="stage-shell">
+          <div class="stage-canvas-viewport" id="slideCanvasViewport">
+            <div class="stage-canvas" id="slideCanvas" aria-label="Canvas da aula interativa">
+              <p class="canvas-hint">Arraste elementos aqui ou clique em um botão do painel para começar.</p>
+            </div>
+          </div>
+          <div class="stage-footer">
+            <button id="slideName" class="ghost-btn slide-name-btn" type="button">Slide 01</button>
+            <div class="stage-footer-actions">
+              <button id="previewStageBtn" class="ghost-btn" type="button">Prévia do aluno</button>
+              <button id="addSlideBtn" class="ghost-btn" type="button">Novo slide</button>
+              <button id="removeSlideBtn" class="ghost-btn" type="button">Excluir slide</button>
+              <button id="clearStageBtn" class="ghost-btn" type="button">Limpar slide</button>
+            </div>
+          </div>
+          <div class="stage-slide-strip">
+            <div class="stage-slide-strip-head">
+              <strong>Slides</strong>
+              <small>Troque rapidamente sem sair do palco.</small>
+            </div>
+            <div id="slideList" class="slide-list"></div>
+          </div>
+          <div class="template-store-panel" id="templateStoreCard" aria-label="Loja de templates">
+            <div class="template-store-panel-head">
+              <div>
+                <strong>Loja de templates</strong>
+                <small>Modelos internos adicionados pela pasta `template-store/` do projeto.</small>
+              </div>
+              <div class="template-store-panel-actions">
+                <input id="templateStoreSearchInput" placeholder="Buscar template..." />
+                <button id="refreshTemplateStoreBtn" class="secondary-btn small" type="button">Atualizar loja</button>
+              </div>
+            </div>
+            <small id="templateStoreStatus" class="muted">Carregando catálogo interno...</small>
+            <div id="templateStoreList" class="template-store-grid">
+              <p class="muted" style="margin:0;">Carregando templates da loja...</p>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <input id="aiAssistantImageInput" type="file" accept="image/*" hidden />
+  <input id="templateImportInput" type="file" accept="application/json,.json" hidden />
+  <script type="module" src="interactive-creator.js"></script>
+</body>
+</html>

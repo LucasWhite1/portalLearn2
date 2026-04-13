@@ -1,0 +1,10 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${PORT:-4000}:4000"
+    env_file:
+      - ./backend/.env
+    restart: unless-stopped

@@ -1,0 +1,101 @@
+﻿<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Portal do Aluno</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="page-shell">
+    <aside class="sidenav">
+      <h1>LearnSpace</h1>
+      <p>Conteúdos ao vivo, notificações e suporte.</p>
+      <ul class="nav-menu">
+        <li><button type="button" class="nav-link" data-target="courseList">📚 <span>Conteúdos</span></button></li>
+        <li><button type="button" class="nav-link" data-target="portalProgressSection">⭐ <span>Progresso</span></button></li>
+        <li><button type="button" class="nav-link" data-target="notificationPanel">🔔 <span>Notificações</span></button></li>
+        <li><button type="button" class="nav-link" data-target="portalTutoringSection">🧑‍🏫 <span>Meu Tutoring</span></button></li>
+        <li><button type="button" class="nav-link logout-btn">🚪 <span>Sair da conta</span></button></li>
+      </ul>
+    </aside>
+    <main class="main-panel">
+      <section class="dashboard-hero">
+        <div>
+          <div class="badge">PROGRESSO CONECTADO</div>
+          <h1>Olá, <span id="studentDisplayName">Aluno</span></h1>
+          <p>Continue de onde parou e acompanhe o desempenho em cada curso.</p>
+        </div>
+      </section>
+
+      <section class="module-preview">
+        <h2>Trilhas em produção</h2>
+        <p>Seu progresso fica registrado aqui; módulos interativos são liberados pelos admins e aparecem automaticamente quando estiverem prontos.</p>
+      </section>
+
+      <div class="card-grid" id="portalProgressSection">
+        <div class="card">
+          <h2>Vídeo em andamento</h2>
+          <p id="videoTitle">Sem aula selecionada</p>
+          <div class="progress-bar"><span id="videoProgress" style="width: 30%"></span></div>
+          <p style="margin: 0.5rem 0 0;">Último timestamp salvo: <strong id="videoTimestamp">00:00</strong></p>
+        </div>
+        <div class="card">
+          <h2>Aula interativa</h2>
+          <p class="muted">Etapa atual</p>
+          <p id="interactiveStep">0.0</p>
+          <div class="progress-bar"><span id="interactiveProgress" style="width: 45%"></span></div>
+        </div>
+        <div class="card">
+          <h2>Atividades do mês</h2>
+          <p class="muted">Nota média</p>
+          <p id="gradeValue" style="font-size: 2rem; margin: 0;">88%</p>
+          <p id="moduleInfo" class="muted" style="margin: 0.25rem 0 0;">Módulo atual: <strong id="currentModule">03/04/2026</strong></p>
+        </div>
+      </div>
+
+      <section class="list-panel course-list-panel" id="courseList">
+        <h2>Seus cursos matriculados</h2>
+        <div class="course-grid" id="courseGrid">
+          <p class="muted" style="margin:0;">Assim que a API retornar dados, os cards aparecem aqui.</p>
+        </div>
+      </section>
+
+      <section class="module-preview" id="portalTutoringSection">
+        <h2>Meu Tutoring</h2>
+        <p>Acompanhe exatamente onde você parou, quanto já concluiu e qual é o próximo passo recomendado para continuar a trilha.</p>
+        <div class="card-grid">
+          <div class="card">
+            <h2>Curso em foco</h2>
+            <p id="portalCurrentCourseLabel" style="margin:0; font-size:1.15rem; font-weight:700;">Nenhum curso em andamento</p>
+            <p id="portalCurrentCourseStatus" class="muted" style="margin:0.4rem 0 0;">Assim que você entrar em um curso, ele aparece aqui.</p>
+          </div>
+          <div class="card">
+            <h2>Módulo atual</h2>
+            <p id="portalCurrentModuleLabel" style="margin:0; font-size:1.15rem; font-weight:700;">Nenhum módulo em andamento</p>
+            <p id="portalCurrentSlideLabel" class="muted" style="margin:0.4rem 0 0;">Nenhum slide em andamento</p>
+          </div>
+          <div class="card">
+            <h2>Próximo passo</h2>
+            <p id="portalNextActionLabel" style="margin:0; color:#8b92b1;">Abra um curso para continuar sua jornada.</p>
+          </div>
+          <div class="card">
+            <h2>Desempenho atual</h2>
+            <p id="portalGradeDetail" style="margin:0; font-size:1.15rem; font-weight:700;">Sem nota registrada</p>
+            <p id="portalVideoDetail" class="muted" style="margin:0.4rem 0 0;">Vídeos ainda não iniciados.</p>
+            <p id="portalSlideDetail" class="muted" style="margin:0.2rem 0 0;">Slides ainda não iniciados.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="notification-panel" id="notificationPanel">
+        <h2>Notificações</h2>
+        <div class="notification">
+          <p style="margin: 0; color: #8b92b1;">Nenhuma notificação disponível.</p>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="script.js" type="module"></script>
+</body>
+</html>

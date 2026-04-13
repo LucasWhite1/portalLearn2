@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Visualizador de módulo</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="builder.css" />
+  <style>
+    .builder-page-shell {
+      width: 100%;
+      max-width: 100%;
+    }
+    .builder-main {
+      display: block;
+      width: 100%;
+      margin: 0;
+      padding: 0;
+    }
+    .builder-stage {
+      width: 100%;
+      margin: 0;
+    }
+    .stage-shell {
+      padding: 1.25rem 1.5rem 2rem;
+      width: 100%;
+      max-width: none;
+      margin: 0;
+      min-height: 0;
+    }
+    .stage-viewer {
+      max-width: none;
+      margin: 0;
+      width: 100%;
+      min-height: 0;
+      height: auto;
+      aspect-ratio: var(--module-stage-aspect, 16 / 9);
+      max-height: none;
+    }
+    .stage-content-wrapper {
+      position: absolute;
+      top: 0;
+      left: 0;
+      transform-origin: top left;
+      pointer-events: auto;
+    }
+    @media (max-width: 768px) {
+      .builder-page-shell {
+        padding: 1rem;
+      }
+      .stage-shell {
+        padding: 1rem;
+      }
+    }
+  </style>
+</head>
+  <body>
+    <div class="builder-page-shell">
+    <header class="builder-header">
+      <div>
+        <p class="badge">Módulo interativo</p>
+        <h1 id="viewerTitle">Carregando módulo...</h1>
+        <p id="viewerSubtitle" class="muted">Aguarde enquanto conectamos ao conteúdo licenciado para o seu curso.</p>
+      </div>
+      <div class="builder-header-actions">
+        <a id="viewerBackLink" class="secondary-btn" href="portal.html">Voltar ao portal</a>
+        <button id="viewerLogoutBtn" class="secondary-btn logout-btn" type="button">Sair</button>
+      </div>
+    </header>
+    <main class="builder-main">
+      <section class="builder-stage">
+        <div class="stage-shell" id="moduleStageShell">
+          <div class="stage-header">
+            <div>
+              <h2>O módulo será exibido abaixo.</h2>
+              <p class="muted">Use as setas para navegar entre os slides liberados.</p>
+            </div>
+            <div class="stage-nav">
+              <button id="viewerFullscreenBtn" class="secondary-btn small" type="button">Tela cheia</button>
+              <button id="viewerPrevBtn" class="secondary-btn small" type="button">Anterior</button>
+              <button id="viewerNextBtn" class="secondary-btn small" type="button">Próximo</button>
+            </div>
+            <div id="orientationPrompt" class="orientation-prompt hidden" aria-live="polite">
+              <strong>Vire o celular</strong>
+              <span>Este conteudo funciona melhor no modo paisagem.</span>
+            </div>
+          </div>
+          <div class="stage-canvas stage-viewer" id="moduleStage">
+            <p class="canvas-hint" id="moduleStageHint">Nenhum módulo selecionado.</p>
+          </div>
+        </div>
+        <div id="moduleSelection" class="module-selection-panel">
+          <h3>Módulos disponíveis</h3>
+          <div id="moduleList" class="module-selection-list"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="module-viewer.js"></script>
+</body>
+</html>

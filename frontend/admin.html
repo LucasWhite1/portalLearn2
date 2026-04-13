@@ -1,0 +1,245 @@
+﻿<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Administração | Portal do Curso</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="page-shell">
+    <aside class="sidenav">
+      <h1>LearnSpace</h1>
+      <p>Administração do portal em uma única tela.</p>
+      <ul class="nav-menu">
+        <li><button type="button" class="nav-link" data-target="adminStudentsSection">👤 <span>Alunos</span></button></li>
+        <li><button type="button" class="nav-link" data-target="adminReportsSection">📊 <span>Relatórios</span></button></li>
+        <li><button type="button" class="nav-link" data-target="adminCoursesSection">📝 <span>Cursos</span></button></li>
+        <li><button type="button" class="nav-link" data-target="adminNotificationsSection">🔔 <span>Notificações</span></button></li>
+        <li><button type="button" class="nav-link" data-target="adminSettingsSection">⚙️ <span>Configurações</span></button></li>
+      </ul>
+    </aside>
+    <main class="main-panel">
+      <div class="panel header-panel">
+        <div>
+          <h2>Administração em tempo real</h2>
+          <p>Monitore alunos, cursos e progresso antes de liberar novos módulos.</p>
+        </div>
+        <div style="display:flex; gap:0.5rem;">
+          <a class="primary-btn" href="interactive-creator.html">Criar aula interativa</a>
+          <button class="secondary-btn logout-btn" type="button">Sair</button>
+        </div>
+      </div>
+      <section class="admin-panel">
+        <div class="panel" id="adminStudentsSection">
+          <div class="badge">CREATIVITY OPS</div>
+          <h2>Cadastro rápido de alunos</h2>
+          <form id="studentForm">
+            <div class="field-group">
+              <label for="adminStudentName">Nome completo</label>
+              <input id="adminStudentName" required />
+            </div>
+            <div class="field-group">
+              <label for="adminStudentEmail">Email</label>
+              <input id="adminStudentEmail" type="email" required />
+            </div>
+            <div class="field-group">
+              <label for="adminStudentTelephone">Telefone</label>
+              <input id="adminStudentTelephone" type="text" placeholder="+55 11 99999-0000" />
+            </div>
+            <div class="field-group">
+              <label for="adminStudentPassword">Senha temporária</label>
+              <input id="adminStudentPassword" type="password" required placeholder="Ataque123" />
+            </div>
+            <button type="submit" class="primary-btn">Criar aluno</button>
+          </form>
+        </div>
+
+        <div class="panel" id="adminNotificationsSection">
+          <h2>Enviar notificação</h2>
+          <form id="notificationForm">
+            <div class="field-group">
+              <label for="notificationMessage">Mensagem</label>
+              <textarea id="notificationMessage" rows="2" required></textarea>
+            </div>
+            <div class="field-group">
+              <label for="notificationTarget">Destinatário</label>
+              <select id="notificationTarget">
+                <option value="all">Todos</option>
+                <option value="class">Turma Master</option>
+                <option value="student">Aluno específico</option>
+              </select>
+            </div>
+            <div class="field-group" id="studentSelector" style="display:none;">
+              <label for="notificationStudent">Aluno</label>
+              <input id="notificationStudent" placeholder="Cole o ID do aluno" />
+            </div>
+            <button class="primary-btn" type="submit">Agendar publicação</button>
+          </form>
+          <div class="module-list" id="adminNotificationList" style="margin-top:1rem;">
+            <p class="muted" style="margin:0;">Nenhuma notificação carregada.</p>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Turmas e status</h2>
+          <div class="table-wrapper">
+            <table class="table" id="studentsTable">
+              <thead>
+                <tr>
+                  <th>Aluno</th>
+                  <th>Turma</th>
+                  <th>Telefone</th>
+                  <th>Status</th>
+                  <th>Última ação</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td colspan="5" style="color:#8b92b1;">Nenhum dado carregado.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel" id="adminCoursesSection">
+          <h2>Gerenciar cursos</h2>
+          <form id="courseForm">
+            <div class="field-group">
+              <label for="courseTitle">Título</label>
+              <input id="courseTitle" required />
+            </div>
+            <div class="field-group">
+              <label for="courseSlug">Slug</label>
+              <input id="courseSlug" required placeholder="ex: fundamentos-da-experiencia" />
+            </div>
+            <div class="field-group">
+              <label for="courseDescription">Descrição</label>
+              <textarea id="courseDescription" rows="2"></textarea>
+            </div>
+            <button class="primary-btn" type="submit">Criar curso</button>
+          </form>
+          <div class="list-panel" id="adminCourseList"></div>
+        </div>
+
+        <div class="panel" id="adminSettingsSection">
+          <h2>Integração de IA</h2>
+          <p style="margin-top:0; color:#8b92b1; font-size:0.9rem;">Cada admin conecta sua própria IA. A chave fica salva no backend e o criador de slides só aplica mudanças após confirmação.</p>
+          <form id="aiSettingsForm">
+            <div class="field-group">
+              <label for="aiProviderLabel">Nome do provedor</label>
+              <input id="aiProviderLabel" value="DeepSeek" placeholder="Ex: DeepSeek" />
+            </div>
+            <div class="field-group">
+              <label for="aiProviderKey">Identificador do provedor</label>
+              <input id="aiProviderKey" value="deepseek" placeholder="Ex: deepseek" />
+            </div>
+            <div class="field-group">
+              <label for="aiBaseUrl">Base URL</label>
+              <input id="aiBaseUrl" value="https://api.deepseek.com" placeholder="https://api.deepseek.com" />
+            </div>
+            <div class="field-group">
+              <label for="aiModel">Modelo</label>
+              <input id="aiModel" value="deepseek-chat" placeholder="Ex: deepseek-chat" />
+            </div>
+            <div class="field-group">
+              <label for="aiApiKey">API key</label>
+              <input id="aiApiKey" type="password" placeholder="Cole aqui a chave da API" />
+            </div>
+            <div class="field-group">
+              <label for="aiImageProviderLabel">Nome do provedor de imagem</label>
+              <input id="aiImageProviderLabel" value="Nano Banana" placeholder="Ex: Nano Banana" />
+            </div>
+            <div class="field-group">
+              <label for="aiImageProviderKey">Identificador do provedor de imagem</label>
+              <input id="aiImageProviderKey" value="google-gemini-image" placeholder="Ex: google-gemini-image" />
+            </div>
+            <div class="field-group">
+              <label for="aiImageBaseUrl">Base URL de imagem</label>
+              <input id="aiImageBaseUrl" value="https://generativelanguage.googleapis.com/v1beta" placeholder="https://generativelanguage.googleapis.com/v1beta" />
+            </div>
+            <div class="field-group">
+              <label for="aiImageModel">Modelo de imagem</label>
+              <input id="aiImageModel" value="gemini-2.5-flash-image" placeholder="Ex: gemini-2.5-flash-image" />
+            </div>
+            <div class="field-group">
+              <label for="aiImageApiKey">API key da Nano Banana</label>
+              <input id="aiImageApiKey" type="password" placeholder="Cole aqui a chave da Gemini" />
+            </div>
+            <div class="field-group">
+              <label for="aiSystemPrompt">Prompt base</label>
+              <textarea id="aiSystemPrompt" rows="4" placeholder="Instruções adicionais para sua IA"></textarea>
+            </div>
+            <div class="field-group">
+              <label><input id="aiRequireConfirmation" type="checkbox" checked /> Exigir confirmação antes de aplicar ações</label>
+            </div>
+            <div class="field-group">
+              <label><input id="aiEnabled" type="checkbox" checked /> Integração ativa</label>
+            </div>
+            <div class="field-group">
+              <label><input id="aiImageEnabled" type="checkbox" checked /> Nano Banana ativa para gerar imagens</label>
+            </div>
+            <div class="form-actions" style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+              <button class="primary-btn" type="submit">Salvar integração</button>
+              <button class="secondary-btn" id="testAiSettingsBtn" type="button">Testar conexão</button>
+            </div>
+          </form>
+          <p id="aiSettingsStatus" style="margin:0.75rem 0 0; color:#8b92b1; font-size:0.9rem;">Nenhuma integração carregada.</p>
+        </div>
+
+        <div class="panel">
+          <h2>Gerenciador de matrículas</h2>
+          <p style="margin-top:0; color:#8b92b1; font-size:0.9rem;">Adicione e remova cursos pelos alunos e o módulo desaparece quando a matrícula é cancelada.</p>
+          <form id="enrollmentForm">
+            <div class="field-group">
+              <label for="enrollmentStudent">Aluno</label>
+              <select id="enrollmentStudent" required>
+                <option value="">Carregando alunos...</option>
+              </select>
+            </div>
+            <div class="field-group">
+              <label for="enrollmentCourse">Curso</label>
+              <select id="enrollmentCourse" required>
+                <option value="">Carregando cursos...</option>
+              </select>
+            </div>
+            <div class="form-actions" style="display:flex; gap:0.5rem;">
+              <button class="primary-btn" type="submit">Adicionar curso</button>
+              <button class="secondary-btn" type="button" id="enrollmentRemoveBtn">Remover curso</button>
+            </div>
+          </form>
+          <div class="list-panel" id="enrollmentList">
+            <p style="margin:0; color:#8b92b1;">Selecione um aluno para ver os cursos matriculados.</p>
+          </div>
+        </div>
+
+        <div class="panel" id="adminReportsSection">
+          <h2>Relatórios de progresso</h2>
+          <div class="table-wrapper">
+            <table class="table progress-table">
+              <thead>
+                <tr>
+                  <th>Aluno</th>
+                  <th>Curso</th>
+                  <th>Módulo atual</th>
+                  <th>Vídeo (min)</th>
+                  <th>Interativo</th>
+                  <th>Nota</th>
+                  <th>Atualizado em</th>
+                </tr>
+              </thead>
+              <tbody id="reportsTableBody">
+                <tr>
+                  <td colspan="7" style="color:#8b92b1;">Carregando relatórios...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="script.js" type="module"></script>
+</body>
+</html>

@@ -1,0 +1,33 @@
+﻿<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Portal do Aluno | Login</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="login-shell">
+    <div class="login-box">
+      <div class="field-group">
+        <div class="badge badge-pill">Curso Avançado</div>
+        <h1>Entrar</h1>
+        <p>Use seu email cadastrado para acessar as aulas, progressos e notificações.</p>
+      </div>
+      <form id="loginForm">
+        <div class="field-group">
+          <label for="email">Email institucional</label>
+          <input type="email" id="email" name="email" required placeholder="aluno@curso.com" />
+        </div>
+        <div class="field-group">
+          <label for="password">Senha</label>
+          <input type="password" id="password" name="password" required placeholder="••••••••" />
+        </div>
+        <button type="submit" class="primary-btn">Entrar</button>
+      </form>
+      <p id="loginFeedback" style="margin-top: 1rem; color: #ff6b6b; display: none;"></p>
+    </div>
+  </div>
+  <script src="script.js" type="module"></script>
+</body>
+</html>
