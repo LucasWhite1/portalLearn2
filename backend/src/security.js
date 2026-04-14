@@ -99,7 +99,7 @@ function sanitizeBuilderData(builderData) {
       return Number.isFinite(value) ? value : null;
     }
     if (typeof value === 'string') {
-      if (/^(src|url|embedSrc|backgroundImage|backgroundVideo)$/i.test(key)) {
+      if (/^(src|url|embedSrc|backgroundImage|backgroundVideo|backgroundVideoEmbedSrc|textureImage)$/i.test(key)) {
         return sanitizeMediaUrl(value);
       }
       if (/color/i.test(key)) {

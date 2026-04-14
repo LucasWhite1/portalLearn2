@@ -72,6 +72,30 @@ const tests = [
     }
   },
   {
+    name: 'keep long texture images and background embeds inside builder data',
+    run() {
+      const texturePayload = 'c'.repeat(7000);
+      const textureDataUrl = `data:image/png;base64,${texturePayload}`;
+      const embedUrl = 'https://www.youtube.com/embed/abc123?autoplay=1&mute=1';
+      const result = sanitizeBuilderData({
+        slides: [
+          {
+            backgroundVideo: 'https://www.youtube.com/watch?v=abc123',
+            backgroundVideoEmbedSrc: embedUrl,
+            elements: [
+              {
+                type: 'block',
+                textureImage: textureDataUrl
+              }
+            ]
+          }
+        ]
+      });
+      assert.strictEqual(result.slides[0].backgroundVideoEmbedSrc, embedUrl);
+      assert.strictEqual(result.slides[0].elements[0].textureImage, textureDataUrl);
+    }
+  },
+  {
     name: 'sanitize slug format',
     run() {
       assert.strictEqual(sanitizeSlug('Curso Segurança!! 2026'), 'curso-seguranca-2026');
