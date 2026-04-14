@@ -1,6 +1,17 @@
-const API_BASE =
-  window.__API_BASE__ ||
-  (window.location.protocol === 'file:' ? 'http://localhost:4000' : window.location.origin);
+const resolveApiBase = () => {
+  if (window.__API_BASE__) {
+    return window.__API_BASE__;
+  }
+  if (window.location.protocol === 'file:') {
+    return 'http://localhost:4000';
+  }
+  if (['localhost', '127.0.0.1'].includes(window.location.hostname) && window.location.port !== '4000') {
+    return `${window.location.protocol}//${window.location.hostname}:4000`;
+  }
+  return window.location.origin;
+};
+
+const API_BASE = resolveApiBase();
 const STORAGE_KEY = 'curso-platform-token';
 const USER_ROLE_KEY = 'curso-platform-role';
 let cachedCourses = [];
