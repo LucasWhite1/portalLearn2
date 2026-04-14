@@ -8,7 +8,7 @@ const poolConfig = process.env.DATABASE_URL
   : {
       host: process.env.DATABASE_HOST || 'localhost',
       port: parseInt(process.env.DATABASE_PORT || '5432', 10),
-      database: process.env.DATABASE_NAME || 'curso',
+      database: process.env.DATABASE_NAME || 'producao',
       user: process.env.DATABASE_USER || 'postgres',
       password: process.env.DATABASE_PASSWORD || '',
       ssl
