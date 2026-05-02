@@ -15,11 +15,269 @@ const API_BASE = resolveApiBase();
 const STORAGE_KEY = 'curso-platform-token';
 const USER_ROLE_KEY = 'curso-platform-role';
 let cachedCourses = [];
+let cachedStoreCourses = [];
 let adminStudentsCache = [];
+let adminProfessorsCache = [];
 let adminCoursesCache = [];
+let adminAccessRequestsCache = [];
+let adminClassesCache = [];
 let courseGrid;
+let courseStoreGrid;
 let adminAiSettingsCache = null;
+let openProgressTimelineKey = null;
 let activeNavCleanupTimer = null;
+let editingCourseCoverId = '';
+let editingCourseCoverImage = '';
+let editingCourseCoverMode = 'local';
+let adminChatCoursesCache = [];
+let adminActiveChatCourseId = '';
+let adminChatPollTimer = null;
+let adminReplyTarget = null;
+let adminCurrentChatMessages = [];
+
+const getCurrentUserRole = () => localStorage.getItem(USER_ROLE_KEY) || '';
+const getCurrentUserData = () => {
+  try {
+    return JSON.parse(localStorage.getItem('curso-platform-user') || '{}');
+  } catch (error) {
+    return {};
+  }
+};
+const isGlobalAdminUser = () => getCurrentUserRole() === 'admin';
+const formatCreditNumber = (value) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return '0';
+  return numeric.toLocaleString('pt-BR', {
+    minimumFractionDigits: numeric % 1 === 0 ? 0 : 1,
+    maximumFractionDigits: 2
+  });
+};
+const formatStorageAmount = (bytes) => {
+  const numeric = Number(bytes);
+  if (!Number.isFinite(numeric) || numeric <= 0) return '0 MB';
+  if (numeric >= 1024 * 1024 * 1024) {
+    return `${(numeric / (1024 * 1024 * 1024)).toLocaleString('pt-BR', { maximumFractionDigits: 2 })} GB`;
+  }
+  return `${(numeric / (1024 * 1024)).toLocaleString('pt-BR', { maximumFractionDigits: 2 })} MB`;
+};
+
+const escapeHtml = (value) =>
+  String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+const truncateChatPreview = (value, max = 110) => {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  return normalized.length > max ? `${normalized.slice(0, max - 1)}...` : normalized;
+};
+
+const formatChatReplyAuthor = (message) => {
+  if (!message) return 'Mensagem';
+  return message.reply_to_role === 'admin' || message.reply_to_role === 'professor' || message.role === 'admin' || message.role === 'professor'
+    ? `${message.reply_to_full_name || message.full_name} (Professor)`
+    : (message.reply_to_full_name || message.full_name || 'Aluno');
+};
+
+const buildReplyQuoteMarkup = (message) => {
+  if (!message?.reply_to_message) {
+    return '';
+  }
+  return `
+    <div class="chat-reply-quote">
+      <strong>${escapeHtml(formatChatReplyAuthor(message))}</strong>
+      <p>${escapeHtml(truncateChatPreview(message.reply_to_message, 160))}</p>
+    </div>
+  `;
+};
+
+let pendingCourseCoverImage = '';
+
+const readLocalImageFile = (input) =>
+  new Promise((resolve, reject) => {
+    const file = input?.files?.[0];
+    if (!file) {
+      resolve('');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+    reader.onerror = () => reject(new Error('Não foi possível ler a imagem escolhida.'));
+    reader.readAsDataURL(file);
+  });
+
+const getModuleCoverImage = (module) => {
+  const coverImage = module?.builder_data?.moduleSettings?.coverImage;
+  return typeof coverImage === 'string' ? coverImage.trim() : '';
+};
+
+const getCourseCoverImage = (course) => (typeof course?.cover_image === 'string' ? course.cover_image.trim() : '');
+
+const setHorizontalCourseScroll = (container, itemCount, threshold) => {
+  if (!container) return;
+  container.classList.toggle('is-scrollable', Number(itemCount) > Number(threshold));
+};
+
+const getModuleCoverInitials = (title = '') =>
+  String(title || '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part.charAt(0).toUpperCase())
+    .join('') || 'MD';
+
+const syncCourseCoverModeUi = () => {
+  const mode = document.getElementById('courseCoverMode')?.value || 'local';
+  const urlField = document.getElementById('courseCoverUrlField');
+  if (urlField) {
+    urlField.style.display = mode === 'url' ? 'block' : 'none';
+  }
+};
+
+const syncCourseCoverPreview = () => {
+  const preview = document.getElementById('courseCoverPreview');
+  const title = document.getElementById('courseCoverPreviewTitle');
+  const meta = document.getElementById('courseCoverPreviewMeta');
+  const courseTitle = document.getElementById('courseTitle')?.value?.trim() || 'Sem capa';
+  if (preview) {
+    preview.style.backgroundImage = pendingCourseCoverImage
+      ? `linear-gradient(155deg, rgba(16, 20, 52, 0.18), rgba(16, 20, 52, 0.02)), url("${pendingCourseCoverImage}")`
+      : '';
+  }
+  if (title) {
+    title.textContent = pendingCourseCoverImage ? courseTitle : 'Sem capa';
+  }
+  if (meta) {
+    meta.textContent = pendingCourseCoverImage
+      ? 'Preview da capa principal do curso no portal do aluno.'
+      : 'Adicione uma imagem retangular para destacar o curso no portal.';
+  }
+};
+
+const applyCourseCover = async () => {
+  const mode = document.getElementById('courseCoverMode')?.value || 'local';
+  if (mode === 'url') {
+    const nextCover = document.getElementById('courseCoverUrl')?.value?.trim() || '';
+    if (!nextCover) {
+      alert('Informe a URL da capa do curso.');
+      return;
+    }
+    pendingCourseCoverImage = nextCover;
+    syncCourseCoverPreview();
+    return;
+  }
+  const fileInput = document.getElementById('courseCoverFile');
+  if (!fileInput) {
+    return;
+  }
+  fileInput.value = '';
+  fileInput.click();
+};
+
+const clearCourseCover = () => {
+  pendingCourseCoverImage = '';
+  const urlInput = document.getElementById('courseCoverUrl');
+  const fileInput = document.getElementById('courseCoverFile');
+  if (urlInput) {
+    urlInput.value = '';
+  }
+  if (fileInput) {
+    fileInput.value = '';
+  }
+  syncCourseCoverPreview();
+};
+
+const syncEditCourseCoverModeUi = () => {
+  loadAdminCourses();
+};
+
+const syncEditCourseCoverPreview = () => {
+  loadAdminCourses();
+};
+
+const closeCourseCoverEditor = () => {
+  editingCourseCoverId = '';
+  editingCourseCoverImage = '';
+  editingCourseCoverMode = 'local';
+  loadAdminCourses();
+};
+
+const openCourseCoverEditor = (courseId) => {
+  const course = adminCoursesCache.find((item) => item.id === courseId);
+  if (!course) return;
+  editingCourseCoverId = course.id;
+  editingCourseCoverImage = getCourseCoverImage(course);
+  editingCourseCoverMode = editingCourseCoverImage.startsWith('http') ? 'url' : 'local';
+  loadAdminCourses();
+};
+
+const applyEditCourseCover = async () => {
+  const mode = document.querySelector(`[data-course-cover-mode="${editingCourseCoverId}"]`)?.value || editingCourseCoverMode;
+  editingCourseCoverMode = mode;
+  if (mode === 'url') {
+    const nextCover = document.querySelector(`[data-course-cover-url="${editingCourseCoverId}"]`)?.value?.trim() || '';
+    if (!nextCover) {
+      alert('Informe a URL da nova capa.');
+      return;
+    }
+    editingCourseCoverImage = nextCover;
+    loadAdminCourses();
+    return;
+  }
+  const fileInput = document.querySelector(`[data-course-cover-file="${editingCourseCoverId}"]`);
+  if (!fileInput) return;
+  fileInput.value = '';
+  fileInput.click();
+};
+
+const updateStudentClassSelect = () => {
+  const select = document.getElementById('adminStudentClass');
+  if (!select) return;
+  if (!adminClassesCache.length) {
+    select.innerHTML = '<option value="">Nenhuma turma cadastrada</option>';
+    return;
+  }
+  select.innerHTML = adminClassesCache
+    .map((item) => `<option value="${escapeHtml(item.name)}">${escapeHtml(item.name)}</option>`)
+    .join('');
+};
+
+const renderClassList = () => {
+  const list = document.getElementById('classList');
+  if (!list) return;
+  if (!adminClassesCache.length) {
+    list.innerHTML = '<p style="margin:0; color:#8b92b1;">Nenhuma turma cadastrada.</p>';
+    return;
+  }
+  list.innerHTML = adminClassesCache
+    .map(
+      (item) => `
+        <div class="list-item">
+          <div>
+            <strong>${escapeHtml(item.name)}</strong>
+          </div>
+          <button class="secondary-btn small" type="button" data-class-id="${item.id}">Excluir turma</button>
+        </div>`
+    )
+    .join('');
+};
+
+const loadAdminClasses = async () => {
+  try {
+    const response = await authorizedFetch('/api/admin/classes');
+    const classes = await response.json();
+    adminClassesCache = Array.isArray(classes) ? classes : [];
+    updateStudentClassSelect();
+    renderClassList();
+  } catch (error) {
+    adminClassesCache = [];
+    updateStudentClassSelect();
+    renderClassList();
+  }
+};
 
 const getToken = () => localStorage.getItem(STORAGE_KEY);
 const setToken = (token) => localStorage.setItem(STORAGE_KEY, token);
@@ -101,25 +359,52 @@ const activateNavLink = (button) => {
   button.classList.add('active');
 };
 
-const scrollToSectionById = (targetId, button = null) => {
+const showSectionById = (targetId, button = null) => {
   if (!targetId) return false;
-  const section = document.getElementById(targetId);
-  if (!section) return false;
-  activateNavLink(button);
-  section.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  spotlightSection(section);
+
+  // Ativa o botão do menu
+  if (button) {
+    const nav = button.closest('.nav-menu');
+    nav?.querySelectorAll('.nav-link').forEach((link) => link.classList.remove('active'));
+    button.classList.add('active');
+  }
+
+  // Esconde todos os painéis que têm data-section
+  document.querySelectorAll('[data-section]').forEach((panel) => {
+    panel.style.display = 'none';
+  });
+
+  // Mostra apenas os painéis da seção clicada
+  document.querySelectorAll(`[data-section="${targetId}"]`).forEach((panel) => {
+    panel.style.display = '';
+  });
+
+  // Scroll suave ao topo da área de conteúdo
+  document.querySelector('.main-panel')?.scrollTo({ top: 0, behavior: 'smooth' });
+
   return true;
 };
 
 const setupSideNavigation = () => {
+  const hasSections = !!document.querySelector('[data-section]');
+
   document.querySelectorAll('.nav-link[data-target]').forEach((button) => {
     button.addEventListener('click', () => {
       const targetId = button.dataset.target;
-      if (targetId) {
+      if (!targetId) return;
+      if (hasSections) {
+        showSectionById(targetId, button);
+      } else {
         scrollToSectionById(targetId, button);
       }
     });
   });
+
+  // Ativa a primeira aba ao carregar
+  if (hasSections) {
+    const firstBtn = document.querySelector('.nav-link[data-target]');
+    if (firstBtn) showSectionById(firstBtn.dataset.target, firstBtn);
+  }
 
   document.querySelectorAll('[data-target].course-module-pill').forEach((button) => {
     button.addEventListener('click', () => {
@@ -127,6 +412,7 @@ const setupSideNavigation = () => {
     });
   });
 };
+
 
 const setupLogoutButtons = () => {
   document.querySelectorAll('.logout-btn').forEach((btn) => {
@@ -345,25 +631,46 @@ const createCourseCard = (course) => {
     : (course.progress?.interactive_step || '0/0 slides').toString();
   const modules = sortModulesForPhase(course.modules || []);
   const unlockedModuleIds = getUnlockedCourseModuleIds(course);
-  const shouldUseScrollableModuleList = modules.length > 5;
-  const modulesMarkup = modules.length
-    ? `<div class="course-module-list${shouldUseScrollableModuleList ? ' is-scrollable' : ''}">
+  const recommendedModule = getRecommendedCourseModule(course);
+  const courseCover = getCourseCoverImage(course);
+  const recommendedCover = courseCover || getModuleCoverImage(recommendedModule);
+  const coverStripMarkup = modules.length
+    ? `<div class="course-module-cover-strip" role="list" aria-label="Preview dos módulos">
          ${modules
-           .map(
-              (module) =>
-               `<button type="button" class="course-module-pill ${unlockedModuleIds.has(module.id) ? '' : 'locked'}" data-module-id="${module.id}" data-locked="${
-                 unlockedModuleIds.has(module.id) ? 'false' : 'true'
-               }">${module.title}${unlockedModuleIds.has(module.id) ? '' : ' • Bloqueado'}</button>`
-           )
+           .map((module) => {
+             const coverImage = getModuleCoverImage(module);
+             const isUnlocked = unlockedModuleIds.has(module.id);
+             const isRecommended = recommendedModule?.id === module.id;
+             return `<button type="button" class="course-module-cover ${isUnlocked ? '' : 'locked'} ${isRecommended ? 'active' : ''}" data-module-id="${module.id}" data-locked="${isUnlocked ? 'false' : 'true'}" aria-label="${escapeHtml(module.title)}">
+               <span class="course-module-cover-art"${coverImage ? ` style="background-image:url('${coverImage.replace(/'/g, "\\'")}')"` : ''}>
+                 ${coverImage ? '' : `<span class="course-module-cover-fallback">${escapeHtml(getModuleCoverInitials(module.title))}</span>`}
+               </span>
+               <span class="course-module-cover-label">${escapeHtml(module.title)}</span>
+             </button>`;
+           })
            .join('')}
        </div>`
-    : '<p class="muted" style="margin:0.5rem 0 0;">Nenhum módulo liberado.</p>';
-  const recommendedModule = getRecommendedCourseModule(course);
+    : '';
   card.innerHTML = `
-    <div>
-      <strong>${course.title}</strong>
-      <p style="margin:0; color:#8b92b1; font-size:0.9rem;">${course.description || 'Curso em construção'}</p>
-      ${modulesMarkup}
+    <div class="course-card-top">
+      <div class="course-card-headline">
+        <strong>${course.title}</strong>
+      </div>
+      ${
+        recommendedModule
+          ? `<div class="course-hero-preview ${recommendedCover ? 'has-cover' : ''}">
+              <div class="course-hero-cover"${recommendedCover ? ` style="background-image:url('${recommendedCover.replace(/'/g, "\\'")}')"` : ''}>
+                ${recommendedCover ? '' : `<span>${escapeHtml(getModuleCoverInitials(course.title))}</span>`}
+              </div>
+              <div class="course-hero-copy">
+                <small class="muted">Próximo módulo</small>
+                <strong>${escapeHtml(recommendedModule.title)}</strong>
+                <span>${escapeHtml(recommendedModule.description || 'Continue de onde você parou com um preview visual do próximo passo.')}</span>
+              </div>
+            </div>`
+          : ''
+      }
+      ${coverStripMarkup}
     </div>
     <div class="course-card-meta">
       <span class="badge">${interactiveLabel}</span>
@@ -373,7 +680,7 @@ const createCourseCard = (course) => {
   if (recommendedModule) {
     card.classList.add('clickable-card');
     card.addEventListener('click', (event) => {
-      const pill = event.target.closest('.course-module-pill');
+      const pill = event.target.closest('.course-module-cover');
       if (pill) {
         event.stopPropagation();
         const selectedModule = modules.find((module) => module.id === pill.dataset.moduleId);
@@ -390,7 +697,7 @@ const createCourseCard = (course) => {
   const actionButton = document.createElement('button');
   actionButton.type = 'button';
   actionButton.className = recommendedModule ? 'primary-btn course-card-btn' : 'secondary-btn course-card-btn';
-  actionButton.textContent = recommendedModule ? 'Continuar fase' : 'Aguardando módulo';
+  actionButton.textContent = recommendedModule ? 'Continuar módulo' : 'Aguardando módulo';
   actionButton.disabled = !recommendedModule;
   if (recommendedModule) {
     actionButton.addEventListener('click', (event) => {
@@ -399,6 +706,18 @@ const createCourseCard = (course) => {
     });
   }
   card.appendChild(actionButton);
+
+  // Botão de Chat do Curso
+  const chatButton = document.createElement('button');
+  chatButton.type = 'button';
+  chatButton.className = 'chat-btn';
+  chatButton.innerHTML = '💬 Chat do curso';
+  chatButton.addEventListener('click', (event) => {
+    event.stopPropagation();
+    openCourseChat(course.id, course.title);
+  });
+  card.appendChild(chatButton);
+
   return card;
 };
 
@@ -407,11 +726,85 @@ const renderCourses = (courses) => {
   courseGrid = document.getElementById('courseGrid');
   if (!courseGrid) return;
   courseGrid.innerHTML = '';
+  setHorizontalCourseScroll(courseGrid, courses.length, 3);
   if (!courses.length) {
-    courseGrid.innerHTML = '<p class="muted" style="margin:0;">Você ainda não está matriculado em nenhum curso.</p>';
+    courseGrid.innerHTML = '<p class="muted" style="margin:0;">Voc\u00ea ainda n\u00e3o est\u00e1 matriculado em nenhum curso.</p>';
     return;
   }
   courses.forEach((course) => courseGrid.appendChild(createCourseCard(course)));
+};
+
+const createStoreCourseCard = (course) => {
+  const card = document.createElement('article');
+  card.className = 'course-card store-course-card';
+  const coverImage = getCourseCoverImage(course);
+  const moduleCount = Number(course.module_count) || 0;
+  const requestPending = course.access_request_status === 'pending';
+  card.innerHTML = `
+    <div class="course-card-top">
+      <div class="course-cover-preview-card store-course-cover"${coverImage ? ` style="background-image:linear-gradient(155deg, rgba(16, 20, 52, 0.18), rgba(16, 20, 52, 0.02)), url('${coverImage.replace(/'/g, "\\'")}')"` : ''}>
+        <div class="course-cover-preview-copy">
+          <strong>${escapeHtml(course.title)}</strong>
+          <small>${moduleCount ? `${moduleCount} m\u00f3dulo(s) dispon\u00edveis` : 'Nova trilha dispon\u00edvel'}</small>
+        </div>
+      </div>
+      <div class="course-card-headline">
+        <strong>${escapeHtml(course.title)}</strong>
+        <span class="store-course-description">${escapeHtml(course.description || 'Sem descri\u00e7\u00e3o cadastrada para este curso.')}</span>
+      </div>
+    </div>
+    <div class="course-card-meta">
+      <span class="badge">${moduleCount ? `${moduleCount} m\u00f3dulo(s)` : 'Em apresenta\u00e7\u00e3o'}</span>
+      <p class="store-course-status">${requestPending ? 'Solicita\u00e7\u00e3o enviada ao admin.' : 'Dispon\u00edvel para solicitar acesso.'}</p>
+    </div>
+    <button type="button" class="${requestPending ? 'secondary-btn' : 'primary-btn'} course-card-btn" data-store-course-id="${course.id}" ${requestPending ? 'disabled' : ''}>
+      ${requestPending ? 'Aguardando libera\u00e7\u00e3o' : 'Solicitar acesso'}
+    </button>
+  `;
+  return card;
+};
+
+const renderStoreCourses = (courses) => {
+  cachedStoreCourses = courses;
+  courseStoreGrid = document.getElementById('courseStoreGrid');
+  if (!courseStoreGrid) return;
+  courseStoreGrid.innerHTML = '';
+  setHorizontalCourseScroll(courseStoreGrid, courses.length, 4);
+  if (!courses.length) {
+    courseStoreGrid.innerHTML = '<p class="muted" style="margin:0;">Nenhum curso extra dispon\u00edvel na loja no momento.</p>';
+    return;
+  }
+  courses.forEach((course) => courseStoreGrid.appendChild(createStoreCourseCard(course)));
+};
+
+const loadStoreCourses = async () => {
+  courseStoreGrid = document.getElementById('courseStoreGrid');
+  try {
+    const response = await authorizedFetch('/api/student/store-courses');
+    const courses = await response.json();
+    renderStoreCourses(Array.isArray(courses) ? courses : []);
+  } catch (error) {
+    if (courseStoreGrid) {
+      courseStoreGrid.innerHTML = '<p class="muted" style="margin:0; color:#ff6b6b;">N\u00e3o foi poss\u00edvel carregar a loja de cursos.</p>';
+    }
+  }
+};
+
+const requestStoreCourseAccess = async (courseId) => {
+  if (!courseId) return;
+  try {
+    const response = await authorizedFetch(`/api/student/store-courses/${courseId}/request-access`, {
+      method: 'POST'
+    });
+    const data = await parseJsonSafely(response);
+    if (!response.ok) {
+      throw new Error(data?.message || 'N\u00e3o foi poss\u00edvel solicitar acesso.');
+    }
+    await loadStoreCourses();
+    alert('Solicita\u00e7\u00e3o enviada para o admin.');
+  } catch (error) {
+    alert(error.message || 'N\u00e3o foi poss\u00edvel solicitar acesso.');
+  }
 };
 
 const renderNotifications = async () => {
@@ -420,9 +813,9 @@ const renderNotifications = async () => {
   try {
     const response = await authorizedFetch('/api/student/notifications');
     const data = await response.json();
-    panel.innerHTML = '<h2>Notificações</h2>';
+    panel.innerHTML = '<h2>Notifica\u00e7\u00f5es</h2>';
     if (!data.length) {
-      panel.innerHTML += '<div class="notification"><p style="margin:0; color:#8b92b1;">Sem novas notificações.</p></div>';
+      panel.innerHTML += '<div class="notification"><p style="margin:0; color:#8b92b1;">Sem novas notifica\u00e7\u00f5es.</p></div>';
       return;
     }
     data.forEach((note) => {
@@ -438,15 +831,23 @@ const renderNotifications = async () => {
 
 const renderDashboard = async () => {
   try {
-    const profileRes = await authorizedFetch('/api/student/profile');
-    const profile = await profileRes.json();
+    const [profileRes, coursesRes] = await Promise.all([
+      authorizedFetch('/api/student/profile'),
+      authorizedFetch('/api/student/courses?lite=1')
+    ]);
+    const [profile, courses] = await Promise.all([
+      profileRes.json(),
+      coursesRes.json()
+    ]);
     const nameElem = document.getElementById('studentDisplayName');
     if (nameElem) {
       nameElem.textContent = profile.full_name;
     }
-    const coursesRes = await authorizedFetch('/api/student/courses');
-    const courses = await coursesRes.json();
     renderCourses(courses);
+    const secondaryLoads = [
+      loadStoreCourses(),
+      renderNotifications()
+    ];
     const currentCourseLabel = document.getElementById('portalCurrentCourseLabel');
     const currentCourseStatus = document.getElementById('portalCurrentCourseStatus');
     const currentModuleLabel = document.getElementById('portalCurrentModuleLabel');
@@ -575,14 +976,14 @@ const renderDashboard = async () => {
         slideDetail.textContent = 'Slides ainda não iniciados.';
       }
     }
-    await renderNotifications();
+    await Promise.all(secondaryLoads);
   } catch (err) {
     console.error(err);
   }
 };
 
 const redirectAfterLogin = (role) => {
-  if (role === 'admin') {
+  if (role === 'admin' || role === 'professor') {
     window.location.href = 'admin.html';
   } else {
     window.location.href = 'portal.html';
@@ -591,10 +992,71 @@ const redirectAfterLogin = (role) => {
 
 const initLogin = () => {
   const form = document.getElementById('loginForm');
+  const forgotForm = document.getElementById('forgotPasswordForm');
+  const resetForm = document.getElementById('resetPasswordForm');
   const feedback = document.getElementById('loginFeedback');
+  
+  const showForgotBtn = document.getElementById('showForgotBtn');
+  const showLoginFromForgotBtn = document.getElementById('showLoginFromForgotBtn');
+  const showLoginFromResetBtn = document.getElementById('showLoginFromResetBtn');
+
+  if (showForgotBtn) showForgotBtn.addEventListener('click', (e) => { e.preventDefault(); form.style.display = 'none'; resetForm.style.display = 'none'; forgotForm.style.display = 'block'; feedback.style.display = 'none'; });
+  if (showLoginFromForgotBtn) showLoginFromForgotBtn.addEventListener('click', (e) => { e.preventDefault(); forgotForm.style.display = 'none'; resetForm.style.display = 'none'; form.style.display = 'block'; feedback.style.display = 'none'; });
+  if (showLoginFromResetBtn) showLoginFromResetBtn.addEventListener('click', (e) => { e.preventDefault(); resetForm.style.display = 'none'; forgotForm.style.display = 'none'; form.style.display = 'block'; feedback.style.display = 'none'; });
+
+  forgotForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    feedback.style.display = 'none';
+    const email = forgotForm.forgotEmail.value;
+    try {
+      const response = await fetch(`${API_BASE}/api/auth/forgot-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email })
+      });
+      const data = await parseJsonSafely(response);
+      feedback.textContent = data?.message || 'Se o email estiver cadastrado, um token foi enviado.';
+      feedback.style.color = '#8be9fd';
+      feedback.style.display = 'block';
+      forgotForm.style.display = 'none';
+      resetForm.style.display = 'block';
+    } catch (error) {
+      feedback.textContent = error.message;
+      feedback.style.color = '#ff6b6b';
+      feedback.style.display = 'block';
+    }
+  });
+
+  resetForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    feedback.style.display = 'none';
+    const email = forgotForm.forgotEmail.value;
+    const token = resetForm.resetToken.value;
+    const newPassword = resetForm.newPassword.value;
+    try {
+      const response = await fetch(`${API_BASE}/api/auth/reset-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, token, newPassword })
+      });
+      const data = await parseJsonSafely(response);
+      if (!response.ok) throw new Error(data?.message || 'Falha ao redefinir senha');
+      feedback.textContent = 'Senha atualizada com sucesso! Você já pode entrar.';
+      feedback.style.color = '#50fa7b';
+      feedback.style.display = 'block';
+      resetForm.style.display = 'none';
+      form.style.display = 'block';
+    } catch (error) {
+      feedback.textContent = error.message;
+      feedback.style.color = '#ff6b6b';
+      feedback.style.display = 'block';
+    }
+  });
+
   form?.addEventListener('submit', async (event) => {
     event.preventDefault();
     feedback.style.display = 'none';
+    feedback.style.color = '#ff6b6b';
     const email = form.email.value;
     const password = form.password.value;
     try {
@@ -612,9 +1074,17 @@ const initLogin = () => {
       }
       setToken(data.token);
       localStorage.setItem(USER_ROLE_KEY, data.user.role);
+      localStorage.setItem('curso-platform-user', JSON.stringify({
+        fullName: data.user.fullName,
+        role: data.user.role,
+        aiCredits: data.user.aiCredits ?? null,
+        studentLimit: data.user.studentLimit ?? null,
+        storageLimitBytes: data.user.storageLimitBytes ?? null
+      }));
       redirectAfterLogin(data.user.role);
     } catch (error) {
       feedback.textContent = error.message;
+      feedback.style.color = '#ff6b6b';
       feedback.style.display = 'block';
     }
   });
@@ -666,6 +1136,98 @@ const loadAdminStudents = async () => {
   }
 };
 
+const renderProfessorCreditsStatus = (payload = null) => {
+  const node = document.getElementById('professorCreditsStatus');
+  if (!node) return;
+  const role = getCurrentUserRole();
+  if (role !== 'professor') {
+    node.textContent = '';
+    return;
+  }
+  const credits = Number(payload?.aiCredits);
+  const safeCredits = Number.isFinite(credits) ? Math.max(0, Number(credits.toFixed(2))) : 0;
+  const safeCostPerCall = 0;
+  node.textContent = `Seus créditos de IA disponíveis: ${safeCredits}`;
+  node.textContent = `Seus crÃ©ditos de IA disponÃ­veis: ${formatCreditNumber(safeCredits)} | custo por chamada: ${formatCreditNumber(safeCostPerCall)}`;
+  node.textContent = `Seus creditos de IA disponiveis: ${formatCreditNumber(safeCredits)}`;
+  node.style.color = safeCredits > 0 ? '#6d63ff' : '#ff6b6b';
+  const storedUser = getCurrentUserData();
+  localStorage.setItem('curso-platform-user', JSON.stringify({
+    ...storedUser,
+    role,
+    aiCredits: safeCredits,
+    studentLimit: payload?.studentLimit ?? storedUser.studentLimit ?? null,
+    storageLimitBytes: payload?.storageLimitBytes ?? storedUser.storageLimitBytes ?? null
+  }));
+};
+
+const loadProfessorCreditsStatus = async () => {
+  const role = getCurrentUserRole();
+  if (role !== 'professor') {
+    renderProfessorCreditsStatus(null);
+    return;
+  }
+  try {
+    const response = await authorizedFetch('/api/admin/me/professor-credits');
+    const payload = await response.json();
+    renderProfessorCreditsStatus(payload);
+  } catch (error) {
+    renderProfessorCreditsStatus({ aiCredits: getCurrentUserData().aiCredits ?? 0 });
+  }
+};
+
+const renderAdminProfessors = () => {
+  const list = document.getElementById('adminProfessorList');
+  if (!list) return;
+  if (!adminProfessorsCache.length) {
+    list.innerHTML = '<p style="margin:0; color:#8b92b1;">Nenhum professor cadastrado.</p>';
+    return;
+  }
+  list.innerHTML = adminProfessorsCache
+    .map((professor) => `
+      <div class="module-list-item">
+        <h4>${escapeHtml(professor.full_name)}</h4>
+        <p>${escapeHtml(professor.email)}${professor.phone ? ` • ${escapeHtml(professor.phone)}` : ''}</p>
+        <p>Créditos de IA: <strong>${Number(professor.aiCredits || 0)}</strong></p>
+        <p>Alunos: <strong>${Number(professor.studentCount || 0)}</strong>${professor.studentLimit ? ` / ${Number(professor.studentLimit)}` : ' / sem limite'}</p>
+        <p>Armazenamento: <strong>${formatStorageAmount(professor.storageUsedBytes || 0)}</strong>${professor.storageLimitBytes ? ` / ${formatStorageAmount(professor.storageLimitBytes)}` : ' / sem limite'}</p>
+        <p>Status: ${professor.is_active ? 'Ativo' : 'Bloqueado'}</p>
+        <div class="form-actions" style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
+          <input type="number" min="0.5" step="0.5" value="10" data-professor-credit-input="${professor.id}" style="max-width:120px;" />
+          <input type="number" min="1" step="1" value="${professor.studentLimit || ''}" data-professor-student-limit="${professor.id}" placeholder="Limite alunos" style="max-width:140px;" />
+          <input type="number" min="0" step="0.1" value="${professor.storageLimitBytes ? (Number(professor.storageLimitBytes) / (1024 * 1024 * 1024)).toFixed(2) : ''}" data-professor-storage-limit="${professor.id}" placeholder="Limite GB" style="max-width:140px;" />
+          <button class="secondary-btn small" type="button" data-professor-limits-save="${professor.id}">Salvar limites</button>
+          <button class="primary-btn" type="button" data-professor-credit-add="${professor.id}" style="width:auto;">Adicionar créditos</button>
+          <button class="secondary-btn small" type="button" data-professor-toggle="${professor.id}">
+            ${professor.is_active ? 'Bloquear' : 'Autorizar'}
+          </button>
+        </div>
+      </div>
+    `)
+    .join('');
+};
+
+const loadAdminProfessors = async () => {
+  const section = document.getElementById('adminProfessorsSection');
+  if (!section || !isGlobalAdminUser()) {
+    if (section) {
+      section.style.display = 'none';
+    }
+    return;
+  }
+  try {
+    const response = await authorizedFetch('/api/admin/professors');
+    const professors = await response.json();
+    adminProfessorsCache = Array.isArray(professors) ? professors : [];
+    renderAdminProfessors();
+  } catch (error) {
+    const list = document.getElementById('adminProfessorList');
+    if (list) {
+      list.innerHTML = '<p style="margin:0; color:#ff6b6b;">Não foi possível carregar os professores.</p>';
+    }
+  }
+};
+
 const loadAdminCourses = async () => {
   const container = document.getElementById('adminCourseList');
   if (!container) return;
@@ -679,25 +1241,278 @@ const loadAdminCourses = async () => {
       return;
     }
     container.innerHTML = courses
-      .map(
-        (course) => `
-        <div class="list-item">
-          <div>
-            <strong>${course.title}</strong>
-            <p style="margin:0; color:#8b92b1; font-size:0.85rem;">${course.slug}</p>
-            <small style="color:#8b92b1; font-size:0.8rem;">${course.description || 'Sem descrição'}</small>
-            <small style="color:#6d63ff; display:block; margin-top:0.35rem; font-size:0.75rem;">${course.module_count || 0} módulo(s)</small>
+      .map((course) => {
+        const coverImage = getCourseCoverImage(course);
+        return `
+        <div class="list-item admin-course-item">
+          <div class="admin-course-content">
+            <div class="course-cover-preview-card admin-course-thumb"${coverImage ? ` style="background-image:linear-gradient(155deg, rgba(16, 20, 52, 0.18), rgba(16, 20, 52, 0.02)), url('${coverImage.replace(/'/g, "\'")}')"` : ''}>
+              <div class="course-cover-preview-copy">
+                <strong>${escapeHtml(course.title)}</strong>
+                <small>${coverImage ? 'Capa ativa no portal.' : 'Curso sem capa cadastrada.'}</small>
+              </div>
+            </div>
+            <div class="admin-course-copy">
+              <strong>${escapeHtml(course.title)}</strong>
+              <p style="margin:0; color:#8b92b1; font-size:0.85rem;">${escapeHtml(course.slug)}</p>
+              <small style="color:#8b92b1; font-size:0.8rem;">${escapeHtml(course.description || 'Sem descri\u00e7\u00e3o')}</small>
+              <div class="admin-course-meta">
+                <small style="color:#6d63ff; display:block; margin-top:0.35rem; font-size:0.75rem;">${course.module_count || 0} m\u00f3dulo(s)</small>
+                <small class="admin-course-store-badge ${coverImage ? 'is-visible' : ''}">${coverImage ? 'Com capa' : 'Sem capa'}</small>
+                <small class="admin-course-store-badge ${course.show_in_store ? 'is-visible' : ''}">${course.show_in_store ? 'Na loja do aluno' : 'Fora da loja'}</small>
+                ${Number(course.pending_request_count) > 0 ? `<small class="admin-course-request-badge">${course.pending_request_count} solicita\u00e7\u00e3o(\u00f5es)</small>` : ''}
+              </div>
+            </div>
           </div>
-          <button data-course-id="${course.id}" class="secondary-btn small" type="button">Excluir</button>
-        </div>`
-      )
+          <div class="admin-course-actions">
+            <button
+              data-course-id="${course.id}"
+              data-course-edit-cover="true"
+              class="secondary-btn small"
+              type="button"
+            >
+              Editar capa
+            </button>
+            <button
+              data-course-id="${course.id}"
+              data-course-store-visible="${course.show_in_store ? 'true' : 'false'}"
+              class="secondary-btn small admin-course-store-toggle"
+              type="button"
+            >
+              ${course.show_in_store ? 'Ocultar da loja' : 'Exibir na loja'}
+            </button>
+            <button data-course-id="${course.id}" class="secondary-btn small" type="button">Excluir</button>
+            <div class="admin-course-cover-menu" ${editingCourseCoverId === course.id ? '' : 'hidden'}>
+              <div class="admin-course-cover-menu-head">
+                <div>
+                  <strong>Editar capa</strong>
+                  <p style="margin:0.2rem 0 0; color:#8b92b1; font-size:0.84rem;">${escapeHtml(course.title)}</p>
+                </div>
+                <button class="secondary-btn small" type="button" data-course-cover-close="${course.id}">Fechar</button>
+              </div>
+              <div class="compact-inline">
+                <select data-course-cover-mode="${course.id}">
+                  <option value="local" ${editingCourseCoverMode === 'local' ? 'selected' : ''}>Arquivo do computador</option>
+                  <option value="url" ${editingCourseCoverMode === 'url' ? 'selected' : ''}>URL da imagem</option>
+                </select>
+                <button class="secondary-btn icon-only-btn" type="button" data-course-cover-apply="${course.id}" aria-label="Adicionar nova capa" title="Adicionar nova capa">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path>
+                  </svg>
+                </button>
+              </div>
+              <div class="field-group" style="display:${editingCourseCoverMode === 'url' ? 'block' : 'none'};">
+                <label>URL da capa</label>
+                <input data-course-cover-url="${course.id}" value="${editingCourseCoverMode === 'url' ? escapeHtml(editingCourseCoverImage) : ''}" placeholder="https://..." />
+              </div>
+              <div class="course-cover-preview-card admin-course-cover-preview spacious-preview"${editingCourseCoverImage ? ` style="background-image:linear-gradient(155deg, rgba(16, 20, 52, 0.18), rgba(16, 20, 52, 0.02)), url('${editingCourseCoverImage.replace(/'/g, "\\'")}')"` : ''}>
+                <div class="course-cover-preview-copy">
+                  <strong>${escapeHtml(course.title)}</strong>
+                  <small>${editingCourseCoverImage ? 'Prévia da capa antes de salvar.' : 'Este curso ficará sem capa até você salvar uma nova imagem.'}</small>
+                </div>
+              </div>
+              <div class="admin-course-cover-menu-actions">
+                <button class="primary-btn" type="button" data-course-cover-save="${course.id}">Salvar capa</button>
+                <button class="secondary-btn" type="button" data-course-remove-cover="true" data-course-id="${course.id}">Excluir capa</button>
+              </div>
+              <input data-course-cover-file="${course.id}" type="file" accept="image/*" hidden />
+            </div>
+          </div>
+        </div>`;
+      })
       .join('');
     updateEnrollmentCourseSelect();
   } catch (error) {
-    container.innerHTML = '<p style="margin:0; color:#ff6b6b;">Não foi possível carregar os cursos.</p>';
+    container.innerHTML = '<p style="margin:0; color:#ff6b6b;">N\u00e3o foi poss\u00edvel carregar os cursos.</p>';
   }
 };
 
+const getAccessRequestStatusLabel = (status) => {
+  if (status === 'approved') return 'Aprovada';
+  if (status === 'rejected') return 'Rejeitada';
+  return 'Pendente';
+};
+
+const getAccessRequestStatusClass = (status) => {
+  if (status === 'approved') return 'status-pill-approved';
+  if (status === 'rejected') return 'status-pill-rejected';
+  return 'status-pill-pending';
+};
+
+const loadAdminAccessRequests = async () => {
+  const container = document.getElementById('adminAccessRequestList');
+  if (!container) return;
+  try {
+    const response = await authorizedFetch('/api/admin/course-access-requests');
+    const requests = await response.json();
+    adminAccessRequestsCache = Array.isArray(requests) ? requests : [];
+    if (!adminAccessRequestsCache.length) {
+      container.innerHTML = '<p style="margin:0; color:#8b92b1;">Nenhuma solicita\u00e7\u00e3o de acesso no momento.</p>';
+      return;
+    }
+    container.innerHTML = adminAccessRequestsCache
+      .map((request) => {
+        const coverImage = typeof request.course_cover_image === 'string' ? request.course_cover_image.trim() : '';
+        const statusLabel = getAccessRequestStatusLabel(request.status);
+        const statusClass = getAccessRequestStatusClass(request.status);
+        return `
+          <article class="access-request-card">
+            <div class="access-request-main">
+              <div class="course-cover-preview-card access-request-cover"${coverImage ? ` style="background-image:linear-gradient(155deg, rgba(16, 20, 52, 0.18), rgba(16, 20, 52, 0.02)), url('${coverImage.replace(/'/g, "\'")}')"` : ''}>
+                <div class="course-cover-preview-copy">
+                  <strong>${escapeHtml(request.course_title)}</strong>
+                  <small>${coverImage ? 'Capa vinculada ao curso.' : 'Curso sem capa cadastrada.'}</small>
+                </div>
+              </div>
+              <div class="access-request-copy">
+                <div>
+                  <strong>${escapeHtml(request.student_name)}</strong>
+                  <p style="margin:0.2rem 0 0; color:#8b92b1; font-size:0.9rem;">${escapeHtml(request.student_email)}</p>
+                </div>
+                <p style="margin:0; color:#1f2343; font-weight:600;">Curso solicitado: ${escapeHtml(request.course_title)}</p>
+                <p style="margin:0; color:#8b92b1; font-size:0.85rem;">Turma: ${escapeHtml(request.student_class_name || 'Sem turma')} | Telefone: ${escapeHtml(request.student_phone || 'N\u00e3o informado')}</p>
+                <div class="access-request-meta">
+                  <span class="${statusClass}">${statusLabel}</span>
+                  <small style="color:#8b92b1;">Solicitado em ${new Date(request.created_at).toLocaleString('pt-BR')}</small>
+                </div>
+              </div>
+            </div>
+            <div class="access-request-actions">
+              <button class="primary-btn" type="button" data-access-request-id="${request.id}" data-access-decision="approved" ${request.status === 'pending' ? '' : 'disabled'}>Aceitar acesso</button>
+              <button class="secondary-btn" type="button" data-access-request-id="${request.id}" data-access-decision="rejected" ${request.status === 'pending' ? '' : 'disabled'}>Rejeitar acesso</button>
+            </div>
+          </article>`;
+      })
+      .join('');
+  } catch (error) {
+    container.innerHTML = '<p style="margin:0; color:#ff6b6b;">N\u00e3o foi poss\u00edvel carregar as solicita\u00e7\u00f5es de acesso.</p>';
+  }
+};
+
+const clearAdminReplyTarget = () => {
+  adminReplyTarget = null;
+  document.getElementById('adminChatReplyPreview')?.classList.add('hidden');
+};
+
+const setAdminReplyTarget = (message) => {
+  adminReplyTarget = message || null;
+  const preview = document.getElementById('adminChatReplyPreview');
+  const author = document.getElementById('adminChatReplyAuthor');
+  const text = document.getElementById('adminChatReplyText');
+  if (!preview || !author || !text) return;
+  if (!message) {
+    preview.classList.add('hidden');
+    return;
+  }
+  author.textContent = `Respondendo para ${formatChatReplyAuthor(message)}`;
+  text.textContent = truncateChatPreview(message.message, 180) || 'Mensagem selecionada';
+  preview.classList.remove('hidden');
+};
+
+const renderAdminChatMessages = (messages) => {
+  const container = document.getElementById('adminChatMessages');
+  if (!container) return;
+  adminCurrentChatMessages = Array.isArray(messages) ? messages : [];
+  if (!messages.length) {
+    container.innerHTML = '<p style="margin:0; color:#8b92b1; text-align:center;">Nenhuma mensagem ainda neste curso.</p>';
+    return;
+  }
+  const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 90;
+  container.innerHTML = messages.map((msg) => {
+    const isAdmin = msg.role === 'admin' || msg.role === 'professor';
+    const safeMessage = escapeHtml(msg.message);
+    const safeName = escapeHtml(msg.full_name);
+    const time = new Date(msg.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    return `
+      <div class="chat-bubble ${isAdmin ? 'mine' : 'theirs'}" data-admin-chat-message-id="${msg.id}">
+        ${buildReplyQuoteMarkup(msg)}
+        <strong style="font-size:0.78rem; display:block; margin-bottom:0.2rem;">${isAdmin ? `Professor ${safeName}` : safeName}</strong>
+        ${safeMessage}
+        <span class="chat-bubble-meta">${time}</span>
+        <div class="chat-bubble-actions">
+          <button type="button" class="chat-link-btn" data-admin-reply-id="${msg.id}">Responder</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+  if (isNearBottom) {
+    container.scrollTop = container.scrollHeight;
+  }
+};
+
+const renderAdminChatCourseList = () => {
+  const container = document.getElementById('adminChatCourseList');
+  if (!container) return;
+  if (!adminChatCoursesCache.length) {
+    container.innerHTML = '<p style="margin:0; color:#8b92b1;">Nenhum chat de curso disponivel.</p>';
+    return;
+  }
+  container.innerHTML = adminChatCoursesCache.map((course) => `
+    <button type="button" class="admin-chat-course-item ${adminActiveChatCourseId === course.id ? 'active' : ''}" data-admin-chat-course="${course.id}">
+      <div class="admin-chat-course-head">
+        <strong>${escapeHtml(course.title)}</strong>
+        ${Number(course.unread_count) > 0 ? `<span class="unread-badge">${Number(course.unread_count)}</span>` : ''}
+      </div>
+      <p style="color:#5f678a; font-size:0.83rem;">${escapeHtml(truncateChatPreview(course.last_message || 'Sem mensagens ainda.', 72))}</p>
+      <small style="color:#8b92b1;">${course.last_message_created_at ? new Date(course.last_message_created_at).toLocaleString('pt-BR') : 'Aguardando conversa'}</small>
+    </button>
+  `).join('');
+};
+
+const loadAdminChatCourses = async (keepSelection = true) => {
+  const container = document.getElementById('adminChatCourseList');
+  if (!container) return;
+  try {
+    const response = await authorizedFetch('/api/chat/admin/courses');
+    const courses = await response.json();
+    adminChatCoursesCache = Array.isArray(courses) ? courses : [];
+    if (!keepSelection || !adminChatCoursesCache.some((course) => course.id === adminActiveChatCourseId)) {
+      adminActiveChatCourseId = adminChatCoursesCache[0]?.id || '';
+    }
+    renderAdminChatCourseList();
+  } catch (error) {
+    container.innerHTML = '<p style="margin:0; color:#ff6b6b;">Nao foi possivel carregar os chats dos cursos.</p>';
+  }
+};
+
+const openAdminCourseChat = async (courseId) => {
+  if (!courseId) return;
+  adminActiveChatCourseId = courseId;
+  const activeCourse = adminChatCoursesCache.find((course) => course.id === courseId);
+  const title = document.getElementById('adminChatTitle');
+  const subtitle = document.getElementById('adminChatSubtitle');
+  const messages = document.getElementById('adminChatMessages');
+  if (title) {
+    title.textContent = activeCourse?.title || 'Chat do curso';
+  }
+  if (subtitle) {
+    subtitle.textContent = activeCourse?.slug ? `Curso: ${activeCourse.slug}` : 'Acompanhe a conversa deste curso.';
+  }
+  if (messages) {
+    messages.innerHTML = '<p style="margin:0; color:#8b92b1; text-align:center;">Carregando mensagens...</p>';
+  }
+  clearAdminReplyTarget();
+  renderAdminChatCourseList();
+  await fetchAdminCourseChatMessages(courseId, { markRead: true });
+};
+
+const fetchAdminCourseChatMessages = async (courseId, options = {}) => {
+  const { markRead = false } = options;
+  const messages = document.getElementById('adminChatMessages');
+  try {
+    const response = await authorizedFetch(`/api/chat/${encodeURIComponent(courseId)}`);
+    const data = await response.json();
+    renderAdminChatMessages(Array.isArray(data) ? data : []);
+    if (markRead) {
+      await authorizedFetch(`/api/chat/${encodeURIComponent(courseId)}/read`, { method: 'POST' });
+      await loadAdminChatCourses(true);
+    }
+  } catch (error) {
+    if (messages) {
+      messages.innerHTML = '<p style="margin:0; color:#ff6b6b; text-align:center;">Nao foi possivel abrir este chat.</p>';
+    }
+  }
+};
 const loadReports = async () => {
   const tbody = document.getElementById('reportsTableBody');
   if (!tbody) return;
@@ -705,7 +1520,7 @@ const loadReports = async () => {
     const response = await authorizedFetch('/api/admin/reports');
     const data = await response.json();
     if (!data.length) {
-      tbody.innerHTML = '<tr><td colspan="7" style="color:#8b92b1;">Nenhum progresso registrado.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" style="color:#8b92b1;">Nenhum progresso registrado.</td></tr>';
       return;
     }
     tbody.innerHTML = data
@@ -722,11 +1537,124 @@ const loadReports = async () => {
             <td>${row.interactive_step || '0.0'}</td>
             <td>${formatGrade(row.grade)}</td>
             <td>${formatDate(row.updated_at)}</td>
+            <td>
+              <button
+                class="secondary-btn small"
+                type="button"
+                data-progress-timeline-user="${row.user_id}"
+                data-progress-timeline-course="${row.course_id}"
+              >
+                Ver passos${Number(row.progress_event_count) > 0 ? ` (${Number(row.progress_event_count)})` : ''}
+              </button>
+            </td>
           </tr>`
       )
       .join('');
   } catch (error) {
-    tbody.innerHTML = '<tr><td colspan="7" style="color:#ff6b6b;">Não foi possível carregar os relatórios.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" style="color:#ff6b6b;">Não foi possível carregar os relatórios.</td></tr>';
+  }
+};
+
+const formatProgressEventType = (type = '') => {
+  const labels = {
+    slide_view: 'Entrou no slide',
+    quiz_answer: 'Respondeu quiz',
+    drag_end: 'Arrastou elemento',
+    text_input: 'Preencheu campo',
+    drawing: 'Rabiscou no quadro'
+  };
+  return labels[type] || type || 'Evento';
+};
+
+const openProgressTimelineModal = () => {
+  const modal = document.getElementById('progressTimelineModal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+};
+
+const closeProgressTimelineModal = () => {
+  const modal = document.getElementById('progressTimelineModal');
+  const frame = document.getElementById('progressTimelineFrame');
+  const list = document.getElementById('progressTimelineList');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+  if (frame) {
+    frame.classList.add('hidden');
+    frame.removeAttribute('src');
+  }
+  if (list) {
+    list.classList.remove('hidden');
+  }
+  openProgressTimelineKey = null;
+};
+
+const renderProgressTimeline = (payload) => {
+  const subtitle = document.getElementById('progressTimelineSubtitle');
+  const list = document.getElementById('progressTimelineList');
+  const frame = document.getElementById('progressTimelineFrame');
+  if (!subtitle || !list || !frame) return;
+  subtitle.textContent = `${payload.student.fullName} • ${payload.course.title}${payload.course.currentModule ? ` • ${payload.course.currentModule}` : ''}`;
+  if (!Array.isArray(payload.events) || !payload.events.length) {
+    list.innerHTML = '<p style="margin:0; color:#8b92b1;">Nenhum passo detalhado foi registrado ainda para este aluno neste curso.</p>';
+    return;
+  }
+  list.innerHTML = payload.events
+    .map((event) => {
+      const chips = [];
+      if (event.slideTitle || event.slideId) chips.push(`<span class="admin-report-event-chip">Slide: ${escapeHtml(event.slideTitle || event.slideId)}</span>`);
+      if (event.elementType) chips.push(`<span class="admin-report-event-chip">Elemento: ${escapeHtml(event.elementType)}</span>`);
+      if (event.details?.selectedOptionText) chips.push(`<span class="admin-report-event-chip">Resposta: ${escapeHtml(event.details.selectedOptionText)}</span>`);
+      if (typeof event.details?.isCorrect === 'boolean') chips.push(`<span class="admin-report-event-chip">${event.details.isCorrect ? 'Acertou' : 'Errou'}</span>`);
+      if (typeof event.details?.triggeredDetector === 'boolean') chips.push(`<span class="admin-report-event-chip">${event.details.triggeredDetector ? 'Encaixou no alvo' : 'Sem alvo acionado'}</span>`);
+      if (Number.isFinite(Number(event.details?.x)) && Number.isFinite(Number(event.details?.y))) {
+        chips.push(`<span class="admin-report-event-chip">Posição: ${Number(event.details.x).toFixed(0)} x ${Number(event.details.y).toFixed(0)}</span>`);
+      }
+      return `
+        <article class="admin-report-event">
+          <div class="admin-report-event-head">
+            <strong>${escapeHtml(formatProgressEventType(event.type))}</strong>
+            <span class="admin-report-event-meta">${formatDate(event.createdAt)}</span>
+          </div>
+          <p class="admin-report-event-summary">${escapeHtml(event.summary || 'Sem resumo informado.')}</p>
+          ${chips.length ? `<div class="admin-report-event-details">${chips.join('')}</div>` : ''}
+        </article>
+      `;
+    })
+    .join('');
+};
+
+const loadProgressTimeline = async (userId, courseId) => {
+  const subtitle = document.getElementById('progressTimelineSubtitle');
+  const list = document.getElementById('progressTimelineList');
+  const frame = document.getElementById('progressTimelineFrame');
+  if (!subtitle || !list || !frame) return;
+  openProgressTimelineModal();
+  subtitle.textContent = 'Carregando replay visual...';
+  frame.classList.add('hidden');
+  list.classList.remove('hidden');
+  list.innerHTML = '<p style="margin:0; color:#8b92b1;">Montando a visualização do aluno...</p>';
+  const requestKey = `${userId}::${courseId}`;
+  openProgressTimelineKey = requestKey;
+  try {
+    const response = await authorizedFetch(`/api/admin/reports/${userId}/${courseId}/timeline`);
+    const payload = await response.json();
+    if (openProgressTimelineKey !== requestKey) {
+      return;
+    }
+    subtitle.textContent = `${payload.student.fullName} • ${payload.course.title}${payload.course.currentModule ? ` • ${payload.course.currentModule}` : ''}`;
+    frame.src = `module-viewer.html?adminReplay=1&userId=${encodeURIComponent(userId)}&courseId=${encodeURIComponent(courseId)}`;
+    frame.classList.remove('hidden');
+    list.classList.add('hidden');
+  } catch (error) {
+    if (openProgressTimelineKey !== requestKey) {
+      return;
+    }
+    subtitle.textContent = 'Não foi possível carregar';
+    frame.classList.add('hidden');
+    list.classList.remove('hidden');
+    list.innerHTML = '<p style="margin:0; color:#ff6b6b;">Não foi possível carregar o replay visual do aluno.</p>';
   }
 };
 
@@ -746,6 +1674,8 @@ const renderAiSettingsStatus = (settings) => {
       ? ` • ${imageProvider.providerLabel} • ${imageProvider.model} • imagem ativa`
       : ' • Nano Banana não configurada';
   statusNode.textContent = `${settings.providerLabel} • ${settings.model} • ${statusLabel} • ${confirmationLabel}${imageLabel}`;
+  statusNode.textContent += ` â€¢ custo/chamada: ${formatCreditNumber(settings.aiCreditCostPerCall || 0.5)}`;
+  statusNode.textContent = statusNode.textContent.replace(/ ?[•Ã¢â‚¬Â¢]\s*custo\/chamada:.*$/i, '');
   statusNode.style.color = settings.isEnabled ? '#6d63ff' : '#8b92b1';
 };
 
@@ -761,6 +1691,8 @@ const fillAiSettingsForm = (settings) => {
   document.getElementById('aiImageBaseUrl').value =
     settings?.imageProvider?.baseUrl || 'https://generativelanguage.googleapis.com/v1beta';
   document.getElementById('aiImageModel').value = settings?.imageProvider?.model || 'gemini-2.5-flash-image';
+  const aiCreditCostInput = document.getElementById('aiCreditCostPerCall');
+  if (aiCreditCostInput) aiCreditCostInput.value = settings?.aiCreditCostPerCall || 0.5;
   document.getElementById('aiSystemPrompt').value = settings?.systemPrompt || '';
   document.getElementById('aiRequireConfirmation').checked = settings?.requireConfirmation !== false;
   document.getElementById('aiEnabled').checked = settings?.isEnabled !== false;
@@ -810,7 +1742,45 @@ const loadAdminNotifications = async () => {
   }
 };
 
+const loadAdminSmtpSettings = async () => {
+  const statusEl = document.getElementById('smtpSettingsStatus');
+  if (!statusEl) return;
+  try {
+    const response = await authorizedFetch('/api/admin/smtp-settings');
+    const settings = await response.json();
+    document.getElementById('smtpHost').value = settings.host || '';
+    document.getElementById('smtpPort').value = settings.port || '';
+    document.getElementById('smtpSecure').checked = settings.secure !== false;
+    document.getElementById('smtpUser').value = settings.user_email || '';
+    document.getElementById('smtpPass').value = '';
+    document.getElementById('smtpFrom').value = settings.from_email || '';
+    statusEl.textContent = 'Configurações de E-mail carregadas.';
+  } catch (error) {
+    statusEl.textContent = 'Falha ao carregar configurações de E-mail.';
+    statusEl.style.color = '#ff6b6b';
+  }
+};
+
 const initAdminPage = () => {
+  if (adminChatPollTimer) {
+    clearInterval(adminChatPollTimer);
+    adminChatPollTimer = null;
+  }
+  if (!isGlobalAdminUser()) {
+    document.querySelector('[data-target="adminProfessorsSection"]')?.closest('li')?.remove();
+    document.getElementById('adminProfessorsSection')?.remove();
+    document.querySelector('#adminSettingsSection h2')?.replaceChildren(document.createTextNode('Configuracoes'));
+    const smtpTitle = document.querySelector('#adminSmtpSettingsSection h2');
+    if (smtpTitle) smtpTitle.textContent = 'Seu E-mail de Envio (SMTP)';
+    const smtpDescription = document.querySelector('#adminSmtpSettingsSection p');
+    if (smtpDescription) {
+      smtpDescription.textContent = 'Se voce nao configurar seu proprio SMTP, o sistema usa automaticamente o email padrao cadastrado pelo admin.';
+    }
+    const aiCostField = document.getElementById('aiCreditCostPerCall')?.closest('.field-group');
+    if (aiCostField) aiCostField.remove();
+  }
+  loadProfessorCreditsStatus();
+  loadAdminSmtpSettings();
   const notifTarget = document.getElementById('notificationTarget');
   const studentSelector = document.getElementById('studentSelector');
   notifTarget?.addEventListener('change', () => {
@@ -823,7 +1793,8 @@ const initAdminPage = () => {
       fullName: document.getElementById('adminStudentName').value,
       email: document.getElementById('adminStudentEmail').value,
       phone: document.getElementById('adminStudentTelephone').value,
-      password: document.getElementById('adminStudentPassword').value
+      password: document.getElementById('adminStudentPassword').value,
+      className: document.getElementById('adminStudentClass').value
     };
     try {
       const response = await authorizedFetch('/api/admin/students', {
@@ -833,9 +1804,67 @@ const initAdminPage = () => {
       const created = await response.json();
       alert('Aluno cadastrado com sucesso.');
       document.getElementById('studentForm').reset();
+      updateStudentClassSelect();
       loadAdminStudents();
     } catch (error) {
       alert(error.message);
+    }
+  });
+
+  document.getElementById('professorForm')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const payload = {
+      fullName: document.getElementById('adminProfessorName').value,
+      email: document.getElementById('adminProfessorEmail').value,
+      phone: document.getElementById('adminProfessorTelephone').value,
+      password: document.getElementById('adminProfessorPassword').value,
+      aiCredits: Number(document.getElementById('adminProfessorCredits').value) || 0,
+      studentLimit: document.getElementById('adminProfessorStudentLimit').value,
+      storageLimitGb: document.getElementById('adminProfessorStorageLimitGb').value
+    };
+    try {
+      const response = await authorizedFetch('/api/admin/professors', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      const created = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(created?.message || 'Não foi possível criar o professor.');
+      }
+      alert('Professor cadastrado com sucesso.');
+      document.getElementById('professorForm').reset();
+      document.getElementById('adminProfessorCredits').value = '0';
+      document.getElementById('adminProfessorStudentLimit').value = '';
+      document.getElementById('adminProfessorStorageLimitGb').value = '';
+      await loadAdminProfessors();
+    } catch (error) {
+      alert(error.message || 'Não foi possível criar o professor.');
+    }
+  });
+
+  document.getElementById('classForm')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    try {
+      await authorizedFetch('/api/admin/classes', {
+        method: 'POST',
+        body: JSON.stringify({ name: document.getElementById('className').value })
+      });
+      document.getElementById('classForm').reset();
+      await loadAdminClasses();
+    } catch (error) {
+      alert(error.message || 'Não foi possível criar a turma.');
+    }
+  });
+
+  document.getElementById('classList')?.addEventListener('click', async (event) => {
+    const button = event.target.closest('button[data-class-id]');
+    if (!button) return;
+    try {
+      await authorizedFetch(`/api/admin/classes/${button.dataset.classId}`, { method: 'DELETE' });
+      await loadAdminClasses();
+      await loadAdminStudents();
+    } catch (error) {
+      alert(error.message || 'Não foi possível excluir a turma.');
     }
   });
 
@@ -896,12 +1925,77 @@ const initAdminPage = () => {
     }
   });
 
+  document.getElementById('adminProfessorList')?.addEventListener('click', async (event) => {
+    const addCreditsButton = event.target.closest('button[data-professor-credit-add]');
+    if (addCreditsButton) {
+      const professorId = addCreditsButton.dataset.professorCreditAdd;
+      const input = document.querySelector(`[data-professor-credit-input="${professorId}"]`);
+      const credits = Number(input?.value || 0);
+      if (!credits || credits < 0.5) {
+        alert('Informe uma quantidade positiva de créditos.');
+        return;
+      }
+      try {
+        const response = await authorizedFetch(`/api/admin/professors/${professorId}/credits`, {
+          method: 'POST',
+          body: JSON.stringify({ credits })
+        });
+        const result = await response.json().catch(() => null);
+        if (!response.ok) {
+          throw new Error(result?.message || 'Não foi possível adicionar créditos.');
+        }
+        await loadAdminProfessors();
+        return;
+      } catch (error) {
+        alert(error.message || 'Não foi possível adicionar créditos.');
+        return;
+      }
+    }
+    const saveLimitsButton = event.target.closest('button[data-professor-limits-save]');
+    if (saveLimitsButton) {
+      const professorId = saveLimitsButton.dataset.professorLimitsSave;
+      const studentLimit = document.querySelector(`[data-professor-student-limit="${professorId}"]`)?.value ?? '';
+      const storageLimitGb = document.querySelector(`[data-professor-storage-limit="${professorId}"]`)?.value ?? '';
+      try {
+        const response = await authorizedFetch(`/api/admin/professors/${professorId}/limits`, {
+          method: 'PUT',
+          body: JSON.stringify({ studentLimit, storageLimitGb })
+        });
+        const result = await response.json().catch(() => null);
+        if (!response.ok) {
+          throw new Error(result?.message || 'NÃ£o foi possÃ­vel salvar os limites.');
+        }
+        await loadAdminProfessors();
+        return;
+      } catch (error) {
+        alert(error.message || 'NÃ£o foi possÃ­vel salvar os limites.');
+        return;
+      }
+    }
+    const toggleButton = event.target.closest('button[data-professor-toggle]');
+    if (!toggleButton) return;
+    const professorId = toggleButton.dataset.professorToggle;
+    const professor = adminProfessorsCache.find((item) => item.id === professorId);
+    if (!professor) return;
+    try {
+      await authorizedFetch(`/api/admin/professors/${professorId}/status`, {
+        method: 'PUT',
+        body: JSON.stringify({ isActive: !professor.is_active })
+      });
+      await loadAdminProfessors();
+    } catch (error) {
+      alert(error.message || 'Não foi possível atualizar o professor.');
+    }
+  });
+
   document.getElementById('courseForm')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const payload = {
       title: document.getElementById('courseTitle').value,
       description: document.getElementById('courseDescription').value,
-      slug: document.getElementById('courseSlug').value
+      slug: document.getElementById('courseSlug').value,
+      coverImage: pendingCourseCoverImage,
+      showInStore: document.getElementById('courseShowInStore')?.checked === true
     };
     try {
       await authorizedFetch('/api/admin/courses', {
@@ -910,6 +2004,9 @@ const initAdminPage = () => {
       });
       alert('Curso criado com sucesso.');
       document.getElementById('courseForm').reset();
+      pendingCourseCoverImage = '';
+      syncCourseCoverModeUi();
+      syncCourseCoverPreview();
       loadAdminCourses();
     } catch (error) {
       alert(error.message);
@@ -917,15 +2014,205 @@ const initAdminPage = () => {
   });
 
   document.getElementById('adminCourseList')?.addEventListener('click', async (event) => {
+    const closeButton = event.target.closest('button[data-course-cover-close]');
+    if (closeButton) {
+      closeCourseCoverEditor();
+      return;
+    }
+    const applyCoverButton = event.target.closest('button[data-course-cover-apply]');
+    if (applyCoverButton) {
+      editingCourseCoverId = applyCoverButton.dataset.courseCoverApply || '';
+      await applyEditCourseCover();
+      return;
+    }
+    const saveCoverButton = event.target.closest('button[data-course-cover-save]');
+    if (saveCoverButton) {
+      editingCourseCoverId = saveCoverButton.dataset.courseCoverSave || '';
+      const currentMode =
+        document.querySelector(`[data-course-cover-mode="${editingCourseCoverId}"]`)?.value || editingCourseCoverMode;
+      if (currentMode === 'url') {
+        editingCourseCoverImage =
+          document.querySelector(`[data-course-cover-url="${editingCourseCoverId}"]`)?.value?.trim() || '';
+      }
+      try {
+        await authorizedFetch(`/api/admin/courses/${editingCourseCoverId}`, {
+          method: 'PUT',
+          body: JSON.stringify({ coverImage: editingCourseCoverImage || '' })
+        });
+        await loadAdminCourses();
+        closeCourseCoverEditor();
+      } catch (error) {
+        alert(error.message || 'Não foi possível salvar a nova capa.');
+      }
+      return;
+    }
     const button = event.target.closest('button[data-course-id]');
     if (!button) return;
     const courseId = button.dataset.courseId;
     try {
-      await authorizedFetch(`/api/admin/courses/${courseId}`, { method: 'DELETE' });
-      loadAdminCourses();
+      if (button.dataset.courseEditCover === 'true') {
+        openCourseCoverEditor(courseId);
+        return;
+      }
+      if (button.classList.contains('admin-course-store-toggle')) {
+        await authorizedFetch(
+          "/api/admin/courses/" + courseId,
+          {
+            method: 'PUT',
+            body: JSON.stringify({ showInStore: button.dataset.courseStoreVisible !== 'true' })
+          }
+        );
+        await loadAdminCourses();
+        await loadAdminAccessRequests();
+        return;
+      }
+      if (button.dataset.courseRemoveCover === 'true') {
+        editingCourseCoverId = courseId;
+        editingCourseCoverImage = '';
+        await authorizedFetch(
+          "/api/admin/courses/" + courseId,
+          {
+            method: 'PUT',
+            body: JSON.stringify({ coverImage: '' })
+          }
+        );
+        await loadAdminCourses();
+        await loadAdminAccessRequests();
+        return;
+      }
+      await authorizedFetch("/api/admin/courses/" + courseId, { method: 'DELETE' });
+      await loadAdminCourses();
+      await loadAdminAccessRequests();
     } catch (error) {
-      alert('Não foi possível remover o curso.');
+      alert(error.message || 'N\u00e3o foi poss\u00edvel remover o curso.');
     }
+  });
+
+  document.getElementById('adminCourseList')?.addEventListener('change', async (event) => {
+    const modeSelect = event.target.closest('select[data-course-cover-mode]');
+    if (modeSelect) {
+      editingCourseCoverId = modeSelect.dataset.courseCoverMode || '';
+      editingCourseCoverMode = modeSelect.value || 'local';
+      loadAdminCourses();
+      return;
+    }
+    const fileInput = event.target.closest('input[data-course-cover-file]');
+    if (fileInput) {
+      try {
+        editingCourseCoverId = fileInput.dataset.courseCoverFile || '';
+        editingCourseCoverImage = await readLocalImageFile(fileInput);
+        loadAdminCourses();
+      } catch (error) {
+        alert(error.message || 'Não foi possível carregar a nova capa.');
+      }
+    }
+  });
+
+  document.getElementById('adminAccessRequestList')?.addEventListener('click', async (event) => {
+    const button = event.target.closest('button[data-access-request-id]');
+    if (!button) return;
+    try {
+      await authorizedFetch('/api/admin/course-access-requests/' + button.dataset.accessRequestId + '/decision', {
+        method: 'POST',
+        body: JSON.stringify({ decision: button.dataset.accessDecision })
+      });
+      await loadAdminAccessRequests();
+      await loadAdminCourses();
+      await loadAdminStudents();
+      await loadReports();
+    } catch (error) {
+      alert(error.message || 'N\u00e3o foi poss\u00edvel analisar a solicita\u00e7\u00e3o.');
+    }
+  });
+
+  document.getElementById('reportsTableBody')?.addEventListener('click', async (event) => {
+    const button = event.target.closest('button[data-progress-timeline-user]');
+    if (!button) return;
+    await loadProgressTimeline(button.dataset.progressTimelineUser, button.dataset.progressTimelineCourse);
+  });
+
+  document.getElementById('adminChatCourseList')?.addEventListener('click', async (event) => {
+    const button = event.target.closest('button[data-admin-chat-course]');
+    if (!button) return;
+    await openAdminCourseChat(button.dataset.adminChatCourse);
+  });
+
+  document.getElementById('adminChatMessages')?.addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-admin-reply-id]');
+    if (!button) return;
+    const messageId = button.dataset.adminReplyId;
+    const message = adminCurrentChatMessages.find((item) => item.id === messageId);
+    if (!message) return;
+    setAdminReplyTarget(message);
+    document.getElementById('adminChatInput')?.focus();
+  });
+
+  document.getElementById('adminChatReplyCancel')?.addEventListener('click', () => {
+    clearAdminReplyTarget();
+    document.getElementById('adminChatInput')?.focus();
+  });
+
+  document.getElementById('adminChatForm')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!adminActiveChatCourseId) {
+      alert('Selecione um curso antes de responder.');
+      return;
+    }
+    const input = document.getElementById('adminChatInput');
+    const button = document.getElementById('adminChatSendBtn');
+    const message = input?.value?.slice(0, 1000).trim() || '';
+    if (!message) return;
+    if (button) button.disabled = true;
+    try {
+      const response = await authorizedFetch(`/api/chat/${encodeURIComponent(adminActiveChatCourseId)}`, {
+        method: 'POST',
+        body: JSON.stringify({
+          message,
+          replyToMessageId: adminReplyTarget?.id || null
+        })
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(payload?.message || 'Nao foi possivel enviar a resposta.');
+      }
+      if (input) input.value = '';
+      clearAdminReplyTarget();
+      await openAdminCourseChat(adminActiveChatCourseId);
+    } catch (error) {
+      alert(error.message || 'Nao foi possivel enviar a resposta.');
+    } finally {
+      if (button) button.disabled = false;
+      input?.focus();
+    }
+  });
+
+  document.getElementById('closeProgressTimelineModalBtn')?.addEventListener('click', closeProgressTimelineModal);
+  document.getElementById('progressTimelineModal')?.addEventListener('click', (event) => {
+    const target = event.target;
+    if (target instanceof Element && target.closest('[data-progress-modal-close="true"]')) {
+      closeProgressTimelineModal();
+    }
+  });
+
+  document.getElementById('courseTitle')?.addEventListener('input', syncCourseCoverPreview);
+  document.getElementById('courseCoverMode')?.addEventListener('change', syncCourseCoverModeUi);
+  document.getElementById('applyCourseCoverBtn')?.addEventListener('click', applyCourseCover);
+  document.getElementById('clearCourseCoverBtn')?.addEventListener('click', clearCourseCover);
+  document.getElementById('courseCoverFile')?.addEventListener('change', async (event) => {
+    try {
+      pendingCourseCoverImage = await readLocalImageFile(event.target);
+      syncCourseCoverPreview();
+    } catch (error) {
+      alert(error.message || 'Não foi possível carregar a capa do curso.');
+    }
+  });
+  syncCourseCoverModeUi();
+  syncCourseCoverPreview();
+
+  document.getElementById('courseStoreGrid')?.addEventListener('click', async (event) => {
+    const button = event.target.closest('button[data-store-course-id]');
+    if (!button) return;
+    await requestStoreCourseAccess(button.dataset.storeCourseId);
   });
 
   document.getElementById('enrollmentStudent')?.addEventListener('change', renderEnrollmentList);
@@ -968,6 +2255,30 @@ const initAdminPage = () => {
     });
   });
 
+  document.getElementById('smtpSettingsForm')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const payload = {
+      host: document.getElementById('smtpHost').value,
+      port: Number(document.getElementById('smtpPort').value) || 587,
+      secure: document.getElementById('smtpSecure').checked,
+      user_email: document.getElementById('smtpUser').value,
+      user_pass: document.getElementById('smtpPass').value,
+      from_email: document.getElementById('smtpFrom').value
+    };
+    try {
+      await authorizedFetch('/api/admin/smtp-settings', {
+        method: 'PUT',
+        body: JSON.stringify(payload)
+      });
+      const statusEl = document.getElementById('smtpSettingsStatus');
+      statusEl.textContent = 'Configurações SMTP salvas com sucesso!';
+      statusEl.style.color = '#50fa7b';
+      setTimeout(() => { statusEl.textContent = 'Configurações de E-mail carregadas.'; statusEl.style.color = '#8b92b1'; }, 3000);
+    } catch (error) {
+      alert('Não foi possível salvar as configurações de SMTP.');
+    }
+  });
+
   document.getElementById('aiSettingsForm')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const payload = {
@@ -981,6 +2292,7 @@ const initAdminPage = () => {
       imageBaseUrl: document.getElementById('aiImageBaseUrl').value,
       imageModel: document.getElementById('aiImageModel').value,
       imageApiKey: document.getElementById('aiImageApiKey').value,
+      aiCreditCostPerCall: Number(document.getElementById('aiCreditCostPerCall')?.value) || 0.5,
       systemPrompt: document.getElementById('aiSystemPrompt').value,
       requireConfirmation: document.getElementById('aiRequireConfirmation').checked,
       isEnabled: document.getElementById('aiEnabled').checked,
@@ -1018,10 +2330,148 @@ const initAdminPage = () => {
   });
 
   loadAdminStudents();
+  loadAdminProfessors();
+  loadAdminClasses();
   loadAdminCourses();
+  loadAdminAccessRequests();
+  loadAdminChatCourses(false).then(() => {
+    if (adminActiveChatCourseId) {
+      return openAdminCourseChat(adminActiveChatCourseId);
+    }
+    return null;
+  });
   loadReports();
   loadAdminAiSettings();
   loadAdminNotifications();
+  adminChatPollTimer = window.setInterval(async () => {
+    await loadAdminChatCourses(true);
+    if (adminActiveChatCourseId) {
+      await fetchAdminCourseChatMessages(adminActiveChatCourseId);
+    }
+  }, 5000);
+};
+
+// ── Chat do Curso ─────────────────────────────────────────────
+let activeChatCourseId = null;
+let chatPollTimer = null;
+let lastMessageCount = 0;
+
+const closeCourseChat = () => {
+  const modal = document.getElementById('chatModal');
+  if (modal) modal.classList.add('hidden');
+  if (chatPollTimer) { clearInterval(chatPollTimer); chatPollTimer = null; }
+  activeChatCourseId = null;
+  lastMessageCount = 0;
+};
+
+const renderChatMessages = (messages) => {
+  const container = document.getElementById('chatMessages');
+  if (!container) return;
+  const sessionUser = JSON.parse(localStorage.getItem('curso-platform-user') || '{}');
+
+  if (!messages.length) {
+    container.innerHTML = '<p style="margin:0; color:#8b92b1; text-align:center;">Nenhuma mensagem ainda. Seja o primeiro!</p>';
+    return;
+  }
+
+  const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+
+  container.innerHTML = messages.map((msg) => {
+    const isAdmin = msg.role === 'admin' || msg.role === 'professor';
+    // Usa escapeHtml para prevenir XSS no frontend
+    const safeMessage = escapeHtml(msg.message);
+    const safeName = escapeHtml(msg.full_name);
+    const time = new Date(msg.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+    const isMine = !isAdmin && msg.full_name === sessionUser.fullName;
+    const bubbleClass = isAdmin ? 'admin-msg' : (isMine ? 'mine' : 'theirs');
+    const label = isAdmin ? `👨‍🏫 ${safeName} (Professor)` : safeName;
+
+    return `
+      <div class="chat-bubble ${bubbleClass}">
+        ${buildReplyQuoteMarkup(msg)}
+        ${!isMine ? `<strong style="font-size:0.78rem; display:block; margin-bottom:0.2rem;">${label}</strong>` : ''}
+        ${safeMessage}
+        <span class="chat-bubble-meta">${time}</span>
+      </div>
+    `;
+  }).join('');
+
+  if (isNearBottom || messages.length !== lastMessageCount) {
+    container.scrollTop = container.scrollHeight;
+  }
+  lastMessageCount = messages.length;
+};
+
+const fetchChatMessages = async (courseId) => {
+  try {
+    const response = await authorizedFetch(`/api/chat/${courseId}`);
+    if (!response.ok) return;
+    const messages = await response.json();
+    renderChatMessages(messages);
+  } catch (e) {
+    // silencioso — próximo poll tentará novamente
+  }
+};
+
+const openCourseChat = async (courseId, courseTitle) => {
+  activeChatCourseId = courseId;
+  const modal = document.getElementById('chatModal');
+  const title = document.getElementById('chatModalTitle');
+  const messages = document.getElementById('chatMessages');
+
+  if (!modal) return;
+  title.textContent = `💬 ${escapeHtml(courseTitle)}`;
+  messages.innerHTML = '<p style="margin:0; color:#8b92b1; text-align:center;">Carregando mensagens...</p>';
+  modal.classList.remove('hidden');
+
+  await fetchChatMessages(courseId);
+
+  // Polling a cada 5 segundos
+  if (chatPollTimer) clearInterval(chatPollTimer);
+  chatPollTimer = setInterval(() => {
+    if (activeChatCourseId) fetchChatMessages(activeChatCourseId);
+  }, 5000);
+
+  document.getElementById('chatInput')?.focus();
+};
+
+const initChatModal = () => {
+  document.getElementById('chatModalClose')?.addEventListener('click', closeCourseChat);
+  document.getElementById('chatModalBackdrop')?.addEventListener('click', closeCourseChat);
+
+  document.getElementById('chatForm')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!activeChatCourseId) return;
+
+    const input = document.getElementById('chatInput');
+    const rawMessage = input.value;
+    // Limita no frontend também (dupla validação)
+    const message = rawMessage.slice(0, 1000).trim();
+    if (!message) return;
+
+    const btn = document.getElementById('chatSendBtn');
+    btn.disabled = true;
+
+    try {
+      const response = await authorizedFetch(`/api/chat/${activeChatCourseId}`, {
+        method: 'POST',
+        body: JSON.stringify({ message })
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        alert(data?.message || 'Não foi possível enviar a mensagem.');
+        return;
+      }
+      input.value = '';
+      await fetchChatMessages(activeChatCourseId);
+    } catch (e) {
+      alert('Erro ao enviar mensagem. Tente novamente.');
+    } finally {
+      btn.disabled = false;
+      input.focus();
+    }
+  });
 };
 
 const init = () => {
@@ -1042,6 +2492,12 @@ const init = () => {
 
   if (isPortal) {
     setupSideNavigation();
+    initChatModal();
+    document.getElementById('courseStoreGrid')?.addEventListener('click', async (event) => {
+      const button = event.target.closest('button[data-store-course-id]');
+      if (!button) return;
+      await requestStoreCourseAccess(button.dataset.storeCourseId);
+    });
     renderDashboard();
     return;
   }

@@ -1,3 +1,6 @@
+const crypto = require('crypto');
+const fs = require('fs/promises');
+const path = require('path');
 const { decryptApiKey } = require('./aiConfigCrypto');
 
 const DEFAULT_SYSTEM_PROMPT =
@@ -32,92 +35,494 @@ const ALLOWED_ELEMENT_TYPES = new Set([
 
 const DEFAULT_STAGE_SIZE = { width: 1280, height: 720 };
 const DEFAULT_SLIDE_FLOW_TITLES = ['Introducao', 'Descoberta', 'Desafio'];
-const MAX_SUMMARIZED_SLIDES = 3;
+const MAX_SUMMARIZED_SLIDES = 12;
 const MAX_SUMMARIZED_ELEMENTS_PER_SLIDE = 6;
 const MAX_SUMMARIZED_LABEL_LENGTH = 48;
 const MAX_REQUEST_LENGTH = 1800;
 const MAX_ATTACHMENT_INSIGHTS_LENGTH = 600;
 const MAX_STEPWISE_ACTIONS = 12;
+const MAX_PLAN_SLIDES = 12;
 const MAX_PROVIDER_MESSAGE_CHARS = 40000;
 const MAX_PROVIDER_TOTAL_CHARS = 120000;
 const MAX_REPAIR_ECHO_CHARS = 12000;
+const MAX_TEMPLATE_REFERENCES = 2;
+const MAX_TEMPLATE_SLIDES_PER_REFERENCE = 4;
+const TEMPLATE_STORE_DIR = path.resolve(__dirname, '../../template-store');
+const TEMPLATE_REFERENCE_CACHE_TTL_MS = 30000;
+const TEMPLATE_TRIGGER_ACTION_TYPES = [
+  'none',
+  'nextSlide',
+  'jumpSlide',
+  'redirect',
+  'addText',
+  'replaceText',
+  'addImage',
+  'addAudio',
+  'addVideo',
+  'addQuiz',
+  'playAudio',
+  'pauseVideo',
+  'playVideo',
+  'seekVideo',
+  'showElement',
+  'hideElement',
+  'moveElement',
+  'playAnimation'
+];
+const TEMPLATE_ANIMATION_TYPES = [
+  'none',
+  'fade-in',
+  'fade-out',
+  'slide-left',
+  'slide-right',
+  'rotate-in',
+  'pulse',
+  'float',
+  'zoom-in',
+  'motion-recording'
+];
+const templateReferenceCache = {
+  expiresAt: 0,
+  entries: []
+};
+// const BASIC_LAYOUT_RULES = [
+//   'Responda apenas com JSON valido.',
+//   'Retorne um array de acoes.',
+//   'Retorne somente a estrutura pedida, sem markdown e sem explicacoes fora do JSON.',
+//   'Use somente os tipos de acao e elementos permitidos.',
+//   'Use somente os campos e comportamentos que ja existem na plataforma. Nao invente ferramentas, propriedades, componentes, HTML, CSS, DOM ou codigo.',
+//   'Nunca descreva a solucao como mudanca de HTML. Sempre pense em acoes do editor e propriedades do estado dos slides.',
+
+//   // 🎯 REGRA PRINCIPAL (CRITICA)
+//   'O layout deve ser limpo, organizado e legivel. Slides feios, amontoados ou desorganizados sao INVALIDOS.',
+
+//   // 📐 LIMITES DO PALCO
+//   'O palco e 1280x720 e funciona como limite RIGIDO.',
+//   'Use o palco 1280x720 como limite absoluto.',
+//   'Nenhum elemento pode ultrapassar esse limite em nenhuma direcao.',
+//   'Todos os elementos devem caber 100% dentro do palco.',
+//   'Considere margens de seguranca (minimo 24px das bordas).',
+
+//   // 🧱 ORGANIZACAO VISUAL
+//   'Nao empilhe elementos aleatoriamente.',
+//   'Nao sobreponha elementos sem motivo claro.',
+//   'Evite poluicao visual.',
+
+//   'Use estrutura previsivel:',
+//   '- Topo: titulo',
+//   '- Meio: conteudo',
+//   '- Base: interacao',
+
+//   'Distribua bem o espaco. Nao concentre tudo em um lado.',
+//   'Se houver elementos grandes, use colunas ou secoes.',
+
+//   // 📏 ESPACAMENTO
+//   'Use no minimo 24px entre elementos principais.',
+//   'Se faltar espaco, REMOVA elementos — nao aperte tudo.',
+
+//   // 🔠 TEXTO
+//   'Texto nunca pode vazar do box.',
+//   'Sempre ajustar width, height e fontSize juntos.',
+//   'Texto longo precisa de mais espaco ou fonte menor.',
+//   'Titulo: grande e curto. Paragrafo: menor e mais area.',
+
+//   // 🧩 HIERARQUIA
+//   'Deixe claro titulo, subtitulo e conteudo.',
+//   'Titulo deve ter mais destaque.',
+//   'Nao use tudo com o mesmo peso visual.',
+
+//   // 🎨 CORES
+//   'Use paleta consistente (primaria, secundaria e destaque).',
+//   'Nao usar cores aleatorias.',
+//   'Manter harmonia entre fundo, blocos e textos.',
+//   'Garantir contraste alto.',
+//   'Se fundo for complexo, usar block para leitura.',
+
+//   // 🎯 FUNDO DO SLIDE (CRITICO)
+//   'O slide nunca pode ficar sem fundo.',
+//   'Sempre usar backgroundColor ou backgroundImage.',
+
+//   'Nao usar imagem de fundo com texto direto.',
+//   'Se houver texto, nao colocar sobre imagem de fundo.',
+
+//   'Use layout separado (imagem + texto) ou block com fundo solido.',
+
+//   'Se usar imagem de fundo, ela deve ser limpa e sem ruido.',
+//   'Se for complexa, usar como elemento separado.',
+
+//   'Se houver imagem anexada, NAO usar automaticamente como fundo.',
+//   'Se houver texto, nao usar imagem anexada como fundo.',
+
+//   'Nunca sacrificar legibilidade por estetica.',
+
+//   // 🖼️ IMAGENS
+//   'Usar imagem quando ajudar na explicacao.',
+//   'Use imagens também como decorativas.',
+//   'Preferir generationPrompt para imagens novas.',
+
+//   // 🧱 BLOCK
+//   'Usar block para dar fundo a textos importantes.',
+//   'Nao deixar texto solto sobre imagem.',
+
+//   // 🚫 ERROS GRAVES
+//   'Nao sobrepor quiz.',
+//   'Nao colocar botao sobre texto importante.',
+//   'Nao criar elementos ilegiveis.',
+
+//   // 🔘 BOTÕES
+//   'FloatingButton deve ter funcao real.',
+//   'Nao criar botao inutil.',
+//   'Botao deve ser visivel e clicavel.',
+
+//   // 🧪 QUIZ (CRITICO)
+//   'Tamanho minimo do quiz é de (min 400px de largura e 350px de altura). então sempre considere isso no layout.',
+//   'Evitar quiz fixo com muito conteudo.',
+//   'Preferir quiz via botao (addQuiz).',
+
+//   'NUNCA Usar quiz fixo apenas quando solicitado. Opte por quiz via botao',
+//   'Nunca sobrepor quiz.',
+
+//   'Se usar botao para quiz, preencher tudo:',
+//   'quizQuestion, quizOptions, quizCorrectOption, successMessage, errorMessage, actionLabel.',
+
+//   'quizOptions deve ser array de strings.',
+//   'Nunca criar quiz incompleto.',
+//   'Jamais colocar um quiz em cima de um texto ou bloco com informacao importante. O quiz deve ter seu proprio espaco dedicado no layout.',
+
+
+//   // 🧲 DETECTOR
+//   'Detector é invisivel.',
+//   'Sempre usar elemento visual junto.',
+
+//   'Se houver detector, deve existir elemento arrastavel.',
+//   'Elemento arrastavel deve ter studentCanDrag true.',
+//   'O detector sempre tem que ter uma ação clara (encaixe, acerto, colisao ou validacao).',
+//   'Nao criar detector sem interacao real.',
+
+//   // 🎮 INTERATIVIDADE
+//   'Para aulas interativas, usar detector e arrastar.',
+//   'Preferir imagens arrastaveis com sentido pedagogico.',
+//   'Interacao deve ser clara e intuitiva.',
+//   'Use botões com ações claras para interatividade, como adicionar quiz ou navegar entre slides.',
+
+//   // 🔁 ACOES
+//   'add_element exige slideId e element.',
+//   'update_element exige slideId, elementId e dados.',
+//   'add_slide exige id ou title.',
+//   'Nao criar acoes vazias.',
+
+//   'Nao inventar IDs.',
+//   'Criar slide antes de adicionar elementos.',
+
+//   // 🎬 ANIMACOES
+//   'Usar animacoes com moderacao.',
+//   'Nao animar muitos elementos.',
+
+//   // 🧩 REGRA FINAL
+//   'Antes de responder, valide:',
+//   '- Layout organizado?',
+//   '- Legivel?',
+//   '- Tem espaco?',
+//   '- Fundo correto?',
+//   '- Sem texto em imagem de fundo?',
+//   '- Quiz bem usado?',
+//   '- Detector com arrastar?',
+//   '- Parece profissional?',
+
+//   'Se algo estiver errado, refaca o layout.'
+// ];
 const BASIC_LAYOUT_RULES = [
   'Responda apenas com JSON valido.',
-  'Retorne somente a estrutura pedida, sem markdown e sem explicacoes fora do JSON.',
-  'Use somente os tipos de acao permitidos.',
-  'Use somente os tipos de elemento permitidos.',
-  'Pense apenas em montar o layout do slide com os recursos basicos da plataforma.',
-  'Priorize text, block, image, floatingButton e animacoes basicas quando fizer sentido.',
-  'Nao invente HTML, CSS, DOM, codigo, componentes externos ou ferramentas que nao existam no editor.',
-  'Use o palco 1280x720 como limite absoluto.',
-  'Mantenha todos os elementos dentro da area visivel e com margens seguras.',
-  'Considere o palco como um limite rigido: nenhum x, y, width ou height pode empurrar qualquer parte do elemento para fora da area 1280x720.',
-  'Antes de responder, confira o retangulo final de cada elemento para garantir que ele cabe inteiro no palco.',
-  'Nao empilhe elementos sem necessidade. Evite colocar um card em cima do outro, um quiz em cima de outro ou texto em cima de botoes.',
-  'Mantenha espacamento visual entre os elementos. Como regra pratica, deixe pelo menos 24px entre blocos principais, quizzes, imagens e botoes, salvo quando houver sobreposicao proposital muito clara.',
-  'Se houver dois elementos grandes no mesmo slide, distribua em colunas ou em faixas verticais com respiro suficiente entre eles.',
-  'Nao coloque quiz por cima de block, outro quiz, texto importante ou floatingButton.',
-  'Nao coloque floatingButton em cima de quiz, titulo, area de resposta ou outro botao.',
-  'Quando um elemento ocupar grande area do palco, reposicione os demais para sobrar espaco real, em vez de apenas diminuir um pouco e deixar tudo amontoado.',
-  'Organize o layout com hierarquia clara entre titulo, subtitulo, conteudo e botoes.',
-  'Distribua bem o espaco do palco. Evite concentrar tudo em um lado ou deixar grandes sobreposicoes desnecessarias.',
-  'Quando usar blocos como cards ou paineis, mantenha o texto visualmente dentro deles com respiro interno.',
-  'Sempre que houver texto importante sobre fundo ilustrado ou area visual complexa, prefira colocar um block ou card atras do texto para garantir leitura.',
-  'Quando um texto for titulo, subtitulo, explicacao ou destaque, pense em bloco de apoio, faixa, card ou painel atras dele sempre que isso melhorar legibilidade e acabamento.',
-  'Em elementos text, width e height representam o seletor, mas a tipografia pode ultrapassar esse box se a fonte estiver grande demais.',
-  'Nao reduza apenas o tamanho do seletor de texto sem ajustar fontSize e quantidade de linhas. Sempre garanta que o texto caiba visualmente dentro da area escolhida.',
-  'Se o texto estiver escapando do seletor, aumente width ou height, reduza fontSize, ou quebre o conteudo em mais linhas antes de responder.',
-  'Titulos curtos podem usar fonte maior, mas textos longos precisam de box maior ou fonte menor para nao vazar e nao quebrar o layout.',
-  'Garanta contraste forte entre fundo, blocos e texto.',
-  'Aplique harmonia de cores no slide. Use paletas coerentes entre fundo, blocos, botoes e textos, evitando cores aleatorias sem relacao entre si.',
-  'Prefira combinacoes harmonicas como monocromatica, analoga ou complementar suave. Use uma cor principal, uma cor de apoio e uma cor de destaque.',
-  'Se usar bloco colorido com texto, escolha texto claro sobre bloco escuro ou texto escuro sobre bloco claro com contraste forte.',
-  'Quando usar add_slide, envie slide com pelo menos id ou title.',
-  'Quando usar update_slide, envie slideId e slide com propriedades reais para atualizar.',
-  'Para fundo do slide, use slide.backgroundColor para cor lisa, slide.backgroundImage para URL/data URL existente ou slide.backgroundImagePrompt quando quiser que a plataforma gere a imagem do fundo.',
-  'Nao tente simular fundo do slide criando um block gigante atras de tudo quando o objetivo for trocar o fundo. Para fundo, use as propriedades do proprio slide.',
-  'Quando usar add_element, envie slideId e element completo.',
-  'Quando usar update_element, envie slideId, elementId e element com propriedades reais para atualizar.',
-  'Nao retorne acoes vazias, placeholders ou rascunhos.',
-  'Nao invente slideId. So use ids que ja existam no contexto ou que tenham sido criados antes na mesma resposta.',
-  'Se for criar elementos em um slide novo, primeiro crie o slide com add_slide e depois use esse id nas proximas acoes.',
-  'Nao use elementId sozinho para criar elemento. Em add_element o objeto completo deve vir em element.',
-  'Em text, o texto visivel deve ir em content. Nao use label como substituto de content.',
-  'Use animacoes apenas quando ajudarem na leitura. Prefira fade-in, slide-left, zoom-in, pulse, float ou none.',
-  'Evite sobreposicao excessiva e mantenha o layout simples e aplicavel.',
-  'Use as ferramentas da plataforma de forma intencional: text para conteudo, block para estrutura visual, image para ilustracao, floatingButton para interacao, quiz para avaliacao, detector para area invisivel de gatilho, audio e video quando o pedido realmente exigir.',
-  'Quando o pedido pedir slide interativo ou bem elaborado, combine layout forte com pelo menos uma interacao real usando floatingButton, quiz ou detector.',
-  'Para floatingButton, use actionConfig funcional como nextSlide, jumpSlide, addText, replaceText, addImage, addVideo, addQuiz, moveElement ou playAnimation quando fizer sentido.',
-  'Nao crie floatingButton vazio. Se houver floatingButton, ele deve ter actionConfig util e coerente com o objetivo do slide.',
-  'Para ensinar a plataforma ou criar experiencia interativa, prefira botoes que revelem conteudo, avancem etapa, abram quiz, mudem texto, movam elemento ou naveguem entre slides.',
-  'Ao usar floatingButton, pense no comportamento completo: o que acontece no clique, onde o conteudo aparece e se isso continua legivel no palco.',
-  'Para quizzes, use pergunta, opcoes, alternativa correta e mensagens de sucesso ou erro. Mantenha tamanho suficiente e nao sobreponha quiz com botoes.',
-  'Em quiz, use sempre question como string, options como array simples de strings, correctOption como indice numerico, successMessage, errorMessage, actionLabel, quizBackgroundColor, quizQuestionColor, quizOptionBackgroundColor, quizOptionTextColor, quizButtonBackgroundColor, points e lockOnWrong.',
-  'Nunca retorne options ou quizOptions como objetos. Cada alternativa do quiz deve ser apenas texto puro.',
-  'Se o slide ja possui um elemento quiz normal, nao crie um floatingButton redundante para validar resposta. O proprio quiz ja possui actionLabel e botao interno para isso.',
-  'Use floatingButton apenas quando ele acrescentar algo que o quiz nao faz sozinho, como navegar, revelar conteudo, criar novo quiz, mover elemento, trocar texto ou tocar animacao.',
-  'Quando actionConfig.type for addText, preencha text, insertX, insertY, insertWidth e insertHeight, e opcionalmente textColor, backgroundColor, fontSize, fontFamily, fontWeight, textAlign, hasTextBackground e hasTextBorder.',
-  'Quando actionConfig.type for addQuiz, preencha quizQuestion, quizOptions, quizCorrectOption, successMessage, errorMessage, actionLabel, quizBackgroundColor, quizQuestionColor, quizOptionBackgroundColor, quizOptionTextColor, quizButtonBackgroundColor, points, lockOnWrong, insertX, insertY, insertWidth e insertHeight.',
-  'Quando actionConfig.type for jumpSlide, preencha targetSlideId. Quando for moveElement ou playAnimation, preencha targetElementId. Quando for replaceText, preencha targetElementId e replaceText.',
-  'Em actionConfig.type moveElement, use moveByX positivo para mover para a direita e moveByX negativo para mover para a esquerda.',
-  'Exemplo pratico: para mover 160px para a esquerda, use moveByX: -160. Para mover 160px para a direita, use moveByX: 160.',
-  'Em actionConfig.type moveElement, use moveByY positivo para mover para baixo e moveByY negativo para mover para cima.',
-  'Exemplo pratico: para mover 80px para cima, use moveByY: -80. Para mover 80px para baixo, use moveByY: 80.',
-  'Para detector, pense como uma area invisivel de acerto ou colisao. Use detector apenas quando houver logica de arrastar, encaixar ou disparar algo por sobreposicao.',
-  'Detector e invisivel no viewer. E permitido posicionar block, text, image ou outros elementos visuais por cima dele quando isso fizer parte do layout, porque o detector funciona como area oculta.',
-  'Como o aluno nao enxerga o detector, sempre que o objetivo for indicar onde existe uma area de encaixe, alvo, ponto de clique ou zona de acerto, adicione tambem um elemento visual de apoio, como block, text, image, seta ou rotulo explicativo.',
-  'Nao entregue um detector sozinho quando o aluno precisar perceber aquela area. Use detector + elemento visual orientando a interacao.',
-  'Para image, prefira generationPrompt quando precisar criar uma ilustracao nova coerente com o slide.',
-  'Sempre que for possivel e fizer sentido pedagogico, prefira usar o gerador de imagens da plataforma para ilustrar o conteudo do slide, porque isso deixa a aula mais explicativa e visual.',
-  'Slides de abertura, explicacao, comparacao, processo, ferramenta ou conceito costumam ficar melhores com pelo menos uma imagem gerada ou escolhida de forma coerente.',
-  'Quando a imagem ajudar a explicar melhor, nao entregue o slide apenas com texto. Combine imagem com bloco e texto bem organizados.',
-  'Para block e floatingButton, prefira cores no formato useGradient, gradientStart e gradientEnd. Se quiser cor unica, repita a mesma cor nos dois campos.',
-  'Quando houver varios slides, mantenha continuidade visual e narrativa entre eles.'
+  'O palco tem 1280x720px. Limite rigido: x entre 0 e 1280, y entre 0 e 720.',
+  'Margem segura recomendada: 24px de cada borda.',
+  'Para criar elementos, use "add_element". Para slides, "add_slide".',
+  'Nunca invente IDs. Use IDs descritivos em minusculas (ex: titulo-principal).',
+  'Para texto, defina sempre: x, y, width, height, fontSize, textColor e content.',
+  'Para imagens, prefira "generationPrompt" em vez de URL externa.',
+  'floatingButton exige "actionConfig" com "type" valido (ex: nextSlide, jumpSlide, addText).',
+  'Quiz precisa de: question, options (array de strings), correctOption (numero).',
+  'Se o pedido for simples, faca a acao minima necessaria. Nao crie slides extras nao solicitados.'
 ];
+function normalizeReferenceText(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
 
-function buildPublicAiSettings(row) {
+function tokenizeReferenceText(value = '') {
+  return Array.from(
+    new Set(
+      normalizeReferenceText(value)
+        .split(/[^a-z0-9]+/)
+        .filter((token) => token.length >= 3)
+    )
+  );
+}
+
+function summarizeTemplateTriggerKinds(element = {}) {
+  const triggerSet = new Set();
+  const interactionTriggers = Array.isArray(element.interactionTriggers) ? element.interactionTriggers : [];
+  interactionTriggers.forEach((trigger) => {
+    const type = String(trigger?.actionConfig?.type || '').trim();
+    if (type) {
+      triggerSet.add(type);
+    }
+  });
+  const videoTriggers = Array.isArray(element.videoTriggers) ? element.videoTriggers : [];
+  videoTriggers.forEach((trigger) => {
+    const type = String(trigger?.actionConfig?.type || '').trim();
+    if (type) {
+      triggerSet.add(`video:${type}`);
+    }
+  });
+  if (element.actionConfig?.type) {
+    triggerSet.add(String(element.actionConfig.type).trim());
+  }
+  return Array.from(triggerSet).slice(0, 6);
+}
+
+function inferTemplateSlideArchetype(slide = {}) {
+  const elements = Array.isArray(slide.elements) ? slide.elements : [];
+  const counts = elements.reduce((acc, element) => {
+    const key = String(element?.type || '').trim();
+    if (key) {
+      acc[key] = (acc[key] || 0) + 1;
+    }
+    return acc;
+  }, {});
+  if (counts.detector) {
+    return 'drag-drop';
+  }
+  if (counts.quiz) {
+    return 'quiz';
+  }
+  if (counts.video) {
+    return 'video';
+  }
+  if ((counts.image || 0) >= 1 && (counts.text || 0) >= 2) {
+    return 'hero';
+  }
+  if ((counts.block || 0) >= 3) {
+    return 'cards';
+  }
+  if ((counts.floatingButton || 0) >= 2) {
+    return 'guided-navigation';
+  }
+  return 'content';
+}
+
+function summarizeTemplateSlideReference(slide = {}, index = 0) {
+  const elements = Array.isArray(slide.elements) ? slide.elements : [];
+  const counts = elements.reduce((acc, element) => {
+    const key = String(element?.type || '').trim();
+    if (key) {
+      acc[key] = (acc[key] || 0) + 1;
+    }
+    return acc;
+  }, {});
+  const triggerKinds = Array.from(
+    new Set(elements.flatMap((element) => summarizeTemplateTriggerKinds(element)))
+  ).slice(0, 8);
+  return {
+    order: index + 1,
+    title: truncateText(slide.title || `Slide ${index + 1}`, 60),
+    archetype: inferTemplateSlideArchetype(slide),
+    elementCounts: counts,
+    hasGradientBackground: Boolean(
+      slide.backgroundFillType === 'gradient' || slide.backgroundGradientStart || slide.backgroundGradientEnd
+    ),
+    hasImageBackground: Boolean(slide.backgroundImage),
+    draggableCount: elements.filter((element) => element?.studentCanDrag).length,
+    triggerKinds,
+    highlights: elements
+      .slice(0, 4)
+      .map((element) => ({
+        type: element?.type || '',
+        label: truncateText(
+          element?.content || element?.label || element?.question || element?.id || element?.type || '',
+          44
+        )
+      }))
+  };
+}
+
+async function readTemplateReferenceEntries() {
+  const now = Date.now();
+  if (templateReferenceCache.expiresAt > now && Array.isArray(templateReferenceCache.entries)) {
+    return templateReferenceCache.entries;
+  }
+  let fileNames = [];
+  try {
+    const dirEntries = await fs.readdir(TEMPLATE_STORE_DIR, { withFileTypes: true });
+    fileNames = dirEntries
+      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.json'))
+      .map((entry) => entry.name)
+      .sort((first, second) => first.localeCompare(second, 'pt-BR'));
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      templateReferenceCache.entries = [];
+      templateReferenceCache.expiresAt = now + TEMPLATE_REFERENCE_CACHE_TTL_MS;
+      return [];
+    }
+    throw error;
+  }
+
+  const entries = [];
+  for (const fileName of fileNames) {
+    try {
+      const rawText = await fs.readFile(path.join(TEMPLATE_STORE_DIR, fileName), 'utf8');
+      const payload = JSON.parse(rawText);
+      const templateSource =
+        payload?.kind === 'curso-slide-template'
+          ? payload.template
+          : payload?.template && (payload.template.builderData || payload.template.builder_data)
+            ? payload.template
+            : payload;
+      const builderData = templateSource?.builderData || templateSource?.builder_data || templateSource;
+      const slides = Array.isArray(builderData?.slides) ? builderData.slides : [];
+      if (!slides.length) {
+        continue;
+      }
+      const summarizedSlides = slides
+        .slice(0, MAX_TEMPLATE_SLIDES_PER_REFERENCE)
+        .map((slide, index) => summarizeTemplateSlideReference(slide, index));
+      const aggregateCounts = slides.flatMap((slide) => slide?.elements || []).reduce((acc, element) => {
+        const key = String(element?.type || '').trim();
+        if (key) {
+          acc[key] = (acc[key] || 0) + 1;
+        }
+        return acc;
+      }, {});
+      const capabilityTags = [];
+      if (aggregateCounts.quiz) capabilityTags.push('quiz');
+      if (aggregateCounts.detector) capabilityTags.push('drag-drop');
+      if (aggregateCounts.video) capabilityTags.push('video');
+      if (aggregateCounts.audio) capabilityTags.push('audio');
+      if (aggregateCounts.floatingButton) capabilityTags.push('buttons');
+      if (slides.some((slide) => (slide?.elements || []).some((element) => element?.studentCanDrag))) capabilityTags.push('draggable');
+      if (slides.some((slide) => slide?.backgroundFillType === 'gradient' || slide?.backgroundGradientStart || slide?.backgroundGradientEnd)) {
+        capabilityTags.push('gradient-background');
+      }
+      const textCorpus = [
+        fileName.replace(/\.json$/i, ''),
+        templateSource?.title || '',
+        templateSource?.description || '',
+        payload?.store?.category || '',
+        payload?.store?.badge || '',
+        payload?.store?.summary || '',
+        ...summarizedSlides.map((slide) => `${slide.title} ${slide.archetype} ${slide.triggerKinds.join(' ')}`)
+      ].join(' ');
+      entries.push({
+        key: fileName.replace(/\.json$/i, ''),
+        title: String(templateSource?.title || '').trim() || fileName.replace(/\.json$/i, ''),
+        category: String(payload?.store?.category || '').trim() || 'Geral',
+        summary: truncateText(String(payload?.store?.summary || templateSource?.description || '').trim(), 180),
+        slideCount: slides.length,
+        capabilityTags,
+        structureSignature: summarizedSlides.map((slide) => slide.archetype).join(' -> '),
+        slides: summarizedSlides,
+        searchTokens: tokenizeReferenceText(textCorpus)
+      });
+    } catch (error) {
+      // Ignore malformed template references so generation continues.
+    }
+  }
+
+  templateReferenceCache.entries = entries;
+  templateReferenceCache.expiresAt = now + TEMPLATE_REFERENCE_CACHE_TTL_MS;
+  return entries;
+}
+
+function scoreTemplateReference(entry, request, executionPlan = null, currentPlanItem = null) {
+  const requestTokens = tokenizeReferenceText([
+    request,
+    currentPlanItem?.title || '',
+    currentPlanItem?.goal || '',
+    currentPlanItem?.layoutNotes || '',
+    currentPlanItem?.interactionNotes || ''
+  ].join(' '));
+  let score = 0;
+  requestTokens.forEach((token) => {
+    if (entry.searchTokens.includes(token)) {
+      score += token.length > 6 ? 5 : 3;
+    }
+  });
+  const requestedCount = extractRequestedSlideCount(request);
+  if (requestedCount && Math.abs(entry.slideCount - requestedCount) <= 2) {
+    score += 8;
+  }
+  if (executionPlan?.mode === 'deck' && Array.isArray(executionPlan.slides) && executionPlan.slides.length) {
+    score += Math.max(0, 6 - Math.abs(entry.slideCount - executionPlan.slides.length));
+  }
+  if (/quiz/i.test(request) && entry.capabilityTags.includes('quiz')) score += 6;
+  if (/(arrast|drag|encaix|detector)/i.test(normalizeReferenceText(request)) && entry.capabilityTags.includes('drag-drop')) score += 7;
+  if (/(video|youtube)/i.test(normalizeReferenceText(request)) && entry.capabilityTags.includes('video')) score += 5;
+  if (/(audio|som|narra)/i.test(normalizeReferenceText(request)) && entry.capabilityTags.includes('audio')) score += 4;
+  if (/(boto|button|cta|navega)/i.test(normalizeReferenceText(request)) && entry.capabilityTags.includes('buttons')) score += 4;
+  return score;
+}
+
+async function buildTemplateReferenceContext({ request, executionPlan = null, currentPlanItem = null }) {
+  const catalog = await readTemplateReferenceEntries();
+  if (!catalog.length) {
+    return null;
+  }
+  const ranked = catalog
+    .map((entry) => ({
+      ...entry,
+      matchScore: scoreTemplateReference(entry, request, executionPlan, currentPlanItem)
+    }))
+    .filter((entry) => entry.matchScore > 0)
+    .sort((first, second) => second.matchScore - first.matchScore)
+    .slice(0, MAX_TEMPLATE_REFERENCES)
+    .map((entry) => ({
+      key: entry.key,
+      title: entry.title,
+      category: entry.category,
+      summary: entry.summary,
+      slideCount: entry.slideCount,
+      capabilityTags: entry.capabilityTags,
+      structureSignature: entry.structureSignature,
+      slides: entry.slides,
+      currentSlideHint:
+        currentPlanItem?.order && entry.slides[currentPlanItem.order - 1]
+          ? entry.slides[currentPlanItem.order - 1]
+          : null
+    }));
+  return ranked.length ? ranked : null;
+}
+
+function createAiCapabilityCatalog() {
+  return {
+    stage: DEFAULT_STAGE_SIZE,
+    slideFields: ['id', 'title', 'backgroundColor', 'backgroundImage', 'backgroundImagePrompt'],
+    actionTypes: Array.from(ALLOWED_ACTIONS),
+    animationTypes: TEMPLATE_ANIMATION_TYPES,
+    triggerActionTypes: TEMPLATE_TRIGGER_ACTION_TYPES,
+    detectorAcceptedDragExamples: ['any', 'type:image', 'type:text', 'element:element-id'],
+    elementTypes: {
+      text: ['content', 'x', 'y', 'width', 'height', 'fontSize', 'fontFamily', 'fontWeight', 'textColor', 'textAlign', 'backgroundColor', 'hasTextBackground', 'hasTextBorder', 'hasTextBlock', 'studentCanDrag', 'opacity', 'animationType', 'animationDuration', 'animationDelay', 'animationLoop', 'motionFrames'],
+      block: ['content', 'x', 'y', 'width', 'height', 'shape', 'backgroundColor', 'solidColor', 'useGradient', 'gradientStart', 'gradientEnd', 'textColor', 'fontSize', 'fontFamily', 'fontWeight', 'textAlign', 'textureImage', 'textureFit', 'studentCanDrag', 'opacity', 'animationType', 'motionFrames'],
+      image: ['src', 'generationPrompt', 'x', 'y', 'width', 'height', 'objectFit', 'studentCanDrag', 'opacity', 'animationType', 'motionFrames'],
+      audio: ['src', 'x', 'y', 'width', 'height', 'audioVisible', 'audioLoop', 'opacity'],
+      video: ['src', 'provider', 'embedSrc', 'x', 'y', 'width', 'height', 'opacity', 'videoTriggers'],
+      quiz: ['question', 'options', 'correctOption', 'successMessage', 'errorMessage', 'actionLabel', 'quizBackgroundColor', 'quizQuestionColor', 'quizOptionBackgroundColor', 'quizOptionTextColor', 'quizButtonBackgroundColor', 'points', 'lockOnWrong', 'x', 'y', 'width', 'height'],
+      floatingButton: ['label', 'x', 'y', 'width', 'height', 'shape', 'backgroundColor', 'solidColor', 'useGradient', 'gradientStart', 'gradientEnd', 'textColor', 'fontSize', 'fontFamily', 'fontWeight', 'textAlign', 'opacity', 'animationType', 'interactionTriggers'],
+      detector: ['x', 'y', 'width', 'height', 'interactionTriggers']
+    },
+    triggerSchemas: {
+      interactionTrigger: ['id', 'name', 'enabled', 'actionConfig'],
+      videoTrigger: ['id', 'name', 'enabled', 'time', 'actionConfig'],
+      actionConfig: ['type', 'targetSlideId', 'targetElementId', 'text', 'url', 'generationPrompt', 'insertX', 'insertY', 'insertWidth', 'insertHeight', 'moveByX', 'moveByY', 'moveDuration', 'videoTime', 'replaceMode', 'replaceText', 'replaceCounterStart', 'replaceCounterStep', 'quizQuestion', 'quizOptions', 'quizCorrectOption', 'successMessage', 'errorMessage', 'actionLabel', 'quizBackgroundColor', 'quizQuestionColor', 'quizOptionBackgroundColor', 'quizOptionTextColor', 'quizButtonBackgroundColor', 'points', 'lockOnWrong', 'audioVisible', 'audioLoop', 'playSourceVideoOnValidate', 'detectorAcceptedDrag', 'detectorMinMatchCount', 'detectorTriggerOnce', 'requireAllButtonsInGroup', 'ruleGroup', 'textColor', 'backgroundColor', 'textAlign', 'fontFamily', 'fontWeight', 'fontSize', 'hasTextBackground', 'hasTextBorder', 'hasTextBlock']
+    }
+  };
+}
+
+function buildPublicAiSettings(row, options = {}) {
+  const includeCreditCost = options.includeCreditCost !== false;
   if (!row) {
-    return {
+    const payload = {
       connected: false,
       providerKey: 'deepseek',
       providerLabel: 'DeepSeek',
@@ -138,8 +543,12 @@ function buildPublicAiSettings(row) {
         hasApiKey: false
       }
     };
+    if (includeCreditCost) {
+      payload.aiCreditCostPerCall = 0.5;
+    }
+    return payload;
   }
-  return {
+  const payload = {
     connected: true,
     providerKey: row.provider_key,
     providerLabel: row.provider_label,
@@ -160,6 +569,12 @@ function buildPublicAiSettings(row) {
       hasApiKey: Boolean(row.image_encrypted_api_key)
     }
   };
+  if (includeCreditCost) {
+    payload.aiCreditCostPerCall = Number.isFinite(Number(row.ai_credit_cost_per_call))
+      ? Math.max(0.01, Number(row.ai_credit_cost_per_call))
+      : 0.5;
+  }
+  return payload;
 }
 
 function normalizeImageAttachments(value) {
@@ -238,7 +653,9 @@ function collectTopLevelElementPatch(entry = {}) {
     'successMessage', 'errorMessage', 'actionLabel', 'quizBackgroundColor', 'quizQuestionColor',
     'quizOptionBackgroundColor', 'quizOptionTextColor', 'quizButtonBackgroundColor', 'lockOnWrong',
     'animationLoop', 'motionFrames', 'x', 'y', 'width', 'height', 'rotation', 'zIndex', 'fontSize',
-    'correctOption', 'animationDuration', 'animationDelay', 'points', 'options', 'actionConfig'
+    'correctOption', 'animationDuration', 'animationDelay', 'points', 'options', 'actionConfig',
+    'textAlign', 'opacity', 'objectFit', 'textureImage', 'textureFit', 'audioVisible', 'audioLoop',
+    'interactionTriggers', 'videoTriggers'
   ].forEach((key) => {
     if (key in entry) {
       patch[key] = entry[key];
@@ -350,11 +767,18 @@ function normalizeElementPatch(element) {
   if (typeof element.textColor === 'string') normalized.textColor = element.textColor.trim();
   if (typeof element.fontFamily === 'string') normalized.fontFamily = element.fontFamily;
   if (typeof element.fontWeight === 'string') normalized.fontWeight = element.fontWeight;
+  if (typeof element.textAlign === 'string') normalized.textAlign = element.textAlign.trim();
   if (typeof element.backgroundColor === 'string') normalized.backgroundColor = element.backgroundColor.trim();
   if (typeof element.solidColor === 'string') normalized.solidColor = element.solidColor.trim();
   if (typeof element.gradientStart === 'string') normalized.gradientStart = element.gradientStart.trim();
   if (typeof element.gradientEnd === 'string') normalized.gradientEnd = element.gradientEnd.trim();
   if (typeof element.useGradient === 'boolean') normalized.useGradient = element.useGradient;
+  if (typeof element.opacity === 'number' || Number.isFinite(Number(element.opacity))) normalized.opacity = Number(element.opacity);
+  if (typeof element.objectFit === 'string') normalized.objectFit = element.objectFit.trim();
+  if (typeof element.textureImage === 'string') normalized.textureImage = element.textureImage.trim();
+  if (typeof element.textureFit === 'string') normalized.textureFit = element.textureFit.trim();
+  if (typeof element.audioVisible === 'boolean') normalized.audioVisible = element.audioVisible;
+  if (typeof element.audioLoop === 'boolean') normalized.audioLoop = element.audioLoop;
   if (typeof element.hasTextBackground === 'boolean') normalized.hasTextBackground = element.hasTextBackground;
   if (typeof element.hasTextBorder === 'boolean') normalized.hasTextBorder = element.hasTextBorder;
   if (typeof element.hasTextBlock === 'boolean') normalized.hasTextBlock = element.hasTextBlock;
@@ -395,6 +819,38 @@ function normalizeElementPatch(element) {
   if (Array.isArray(element.options)) {
     normalized.options = normalizeStringList(element.options);
   }
+  if (Array.isArray(element.interactionTriggers)) {
+    normalized.interactionTriggers = element.interactionTriggers
+      .filter((trigger) => trigger && typeof trigger === 'object')
+      .map((trigger, index) => {
+        const normalizedTrigger = {
+          id: typeof trigger.id === 'string' && trigger.id.trim() ? trigger.id.trim() : `trigger-${index + 1}`,
+          name: typeof trigger.name === 'string' ? trigger.name.trim() : `Acao ${index + 1}`,
+          enabled: typeof trigger.enabled === 'boolean' ? trigger.enabled : true,
+          actionConfig: normalizeActionConfig(trigger.actionConfig && typeof trigger.actionConfig === 'object' ? trigger.actionConfig : trigger)
+        };
+        return normalizedTrigger;
+      });
+  }
+  if (Array.isArray(element.videoTriggers)) {
+    normalized.videoTriggers = element.videoTriggers
+      .filter((trigger) => trigger && typeof trigger === 'object')
+      .map((trigger, index) => ({
+        id: typeof trigger.id === 'string' && trigger.id.trim() ? trigger.id.trim() : `video-trigger-${index + 1}`,
+        name: typeof trigger.name === 'string' ? trigger.name.trim() : `Tempo ${index + 1}`,
+        enabled: typeof trigger.enabled === 'boolean' ? trigger.enabled : true,
+        time: Number.isFinite(Number(trigger.time ?? trigger.videoTriggerTime)) ? Number(trigger.time ?? trigger.videoTriggerTime) : 0,
+        actionConfig: normalizeActionConfig(
+          trigger.actionConfig && typeof trigger.actionConfig === 'object'
+            ? trigger.actionConfig
+            : {
+              type: trigger.action || trigger.videoTriggerAction,
+              targetElementId: trigger.targetElementId || trigger.videoTriggerTargetElementId,
+              videoTime: trigger.seekTime ?? trigger.videoTriggerSeekTime
+            }
+        )
+      }));
+  }
   if (element.actionConfig && typeof element.actionConfig === 'object') {
     normalized.actionConfig = normalizeActionConfig(element.actionConfig);
   }
@@ -403,7 +859,7 @@ function normalizeElementPatch(element) {
 
 function normalizeActionConfig(config) {
   const normalized = {};
-  ['type', 'targetSlideId', 'targetElementId', 'text', 'url', 'quizQuestion', 'ruleGroup', 'textColor', 'backgroundColor', 'textAlign', 'fontFamily', 'fontWeight', 'successMessage', 'errorMessage', 'actionLabel', 'quizBackgroundColor', 'quizQuestionColor', 'quizOptionBackgroundColor', 'quizOptionTextColor', 'quizButtonBackgroundColor', 'replaceMode', 'replaceText'].forEach((key) => {
+  ['type', 'targetSlideId', 'targetElementId', 'text', 'url', 'quizQuestion', 'ruleGroup', 'textColor', 'backgroundColor', 'textAlign', 'fontFamily', 'fontWeight', 'successMessage', 'errorMessage', 'actionLabel', 'quizBackgroundColor', 'quizQuestionColor', 'quizOptionBackgroundColor', 'quizOptionTextColor', 'quizButtonBackgroundColor', 'replaceMode', 'replaceText', 'detectorAcceptedDrag'].forEach((key) => {
     if (typeof config[key] === 'string') {
       normalized[key] = config[key];
     }
@@ -414,7 +870,7 @@ function normalizeActionConfig(config) {
   if (typeof config.requireAllButtonsInGroup === 'boolean') {
     normalized.requireAllButtonsInGroup = config.requireAllButtonsInGroup;
   }
-  ['insertX', 'insertY', 'insertWidth', 'insertHeight', 'quizCorrectOption', 'moveByX', 'moveByY', 'moveDuration', 'fontSize', 'points', 'replaceCounterStart', 'replaceCounterStep'].forEach((key) => {
+  ['insertX', 'insertY', 'insertWidth', 'insertHeight', 'quizCorrectOption', 'moveByX', 'moveByY', 'moveDuration', 'fontSize', 'points', 'replaceCounterStart', 'replaceCounterStep', 'videoTime', 'detectorMinMatchCount'].forEach((key) => {
     if (Number.isFinite(Number(config[key]))) {
       normalized[key] = Number(config[key]);
     }
@@ -430,6 +886,18 @@ function normalizeActionConfig(config) {
   }
   if (typeof config.lockOnWrong === 'boolean') {
     normalized.lockOnWrong = config.lockOnWrong;
+  }
+  if (typeof config.detectorTriggerOnce === 'boolean') {
+    normalized.detectorTriggerOnce = config.detectorTriggerOnce;
+  }
+  if (typeof config.audioVisible === 'boolean') {
+    normalized.audioVisible = config.audioVisible;
+  }
+  if (typeof config.audioLoop === 'boolean') {
+    normalized.audioLoop = config.audioLoop;
+  }
+  if (typeof config.playSourceVideoOnValidate === 'boolean') {
+    normalized.playSourceVideoOnValidate = config.playSourceVideoOnValidate;
   }
   if (Array.isArray(config.quizOptions)) {
     normalized.quizOptions = normalizeStringList(config.quizOptions);
@@ -447,8 +915,9 @@ function createSafeId(prefix, value, index = 0) {
   return `${prefix}-${slug || index + 1}`;
 }
 
-function requestSuggestsStoryFlow(request) {
-  return /(slides|varios slides|vários slides|historia|história|jornada|aventura|sequencia|sequência|passo a passo|capitulo|capítulo)/i.test(
+
+function requestExplicitlyForbidsNewSlides(request) {
+  return /\b(nao|não)\s+(?:crie|gere|adicione|faca|faça|monte)\s+(?:outros?|novos?|mais\s+)?slides?\b|\b(?:somente|apenas|so|só)\s+(?:neste|nesse|este|esse|o)\s+slide\b|\bslide\s+atual\b|\bsem\s+criar\s+(?:outros?|novos?)\s+slides?\b/i.test(
     request || ''
   );
 }
@@ -456,6 +925,40 @@ function requestSuggestsStoryFlow(request) {
 function requestSuggestsButtons(request) {
   return /(botao|botão|botoes|botões|acao|ação|interativo|interação|interacao|clicar|clique|naveg)/i.test(
     request || ''
+  );
+}
+
+function requestExplicitlyForbidsNewSlides(request) {
+  return /\b(nao|n\u00e3o)\s+(?:crie|gere|adicione|faca|fa\u00e7a|monte)\s+(?:outros?|novos?|mais\s+)?slides?\b|\b(?:somente|apenas|so|s\u00f3)\s+(?:neste|nesse|este|esse|o)\s+slide\b|\bslide\s+atual\b|\bsem\s+criar\s+(?:outros?|novos?)\s+slides?\b/i.test(
+    request || ''
+  );
+}
+
+
+function requestExplicitlyForbidsNewSlides(request) {
+  const normalized = String(request || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  return (
+    normalized.includes('nao crie outros slides') ||
+    normalized.includes('nao crie mais slides') ||
+    normalized.includes('nao gere outros slides') ||
+    normalized.includes('nao adicione outros slides') ||
+    normalized.includes('slide atual') ||
+    /\b(apenas|somente|so)\b[\s\S]{0,40}\bslide\b/.test(normalized) ||
+    /\bsem\s+criar\s+(outros?|novos?)\s+slides?\b/.test(normalized)
+  );
+}
+
+function requestSuggestsStoryFlow(request) {
+  if (requestExplicitlyForbidsNewSlides(request)) {
+    return false;
+  }
+  return /\b(varios\s+slides?|multiplos\s+slides?|mais\s+de\s+um\s+slide|historia|jornada|aventura|sequencia|passo\s+a\s+passo|capitulo|deck|apresentacao|aula\s+completa)\b/i.test(
+    String(request || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
   );
 }
 
@@ -654,12 +1157,12 @@ function repairButtonActions(actions, existingSlides = []) {
       ...(prefersJump
         ? { targetSlideId: isBackButton ? previousSlideId || nextSlideId : nextSlideId || previousSlideId }
         : {
-            text: buttonConfig.text || 'Novo conteudo desbloqueado.',
-            insertX: Number.isFinite(Number(buttonConfig.insertX)) ? Number(buttonConfig.insertX) : 720,
-            insertY: Number.isFinite(Number(buttonConfig.insertY)) ? Number(buttonConfig.insertY) : 180,
-            insertWidth: Number.isFinite(Number(buttonConfig.insertWidth)) ? Number(buttonConfig.insertWidth) : 340,
-            insertHeight: Number.isFinite(Number(buttonConfig.insertHeight)) ? Number(buttonConfig.insertHeight) : 120
-          })
+          text: buttonConfig.text || 'Novo conteudo desbloqueado.',
+          insertX: Number.isFinite(Number(buttonConfig.insertX)) ? Number(buttonConfig.insertX) : 720,
+          insertY: Number.isFinite(Number(buttonConfig.insertY)) ? Number(buttonConfig.insertY) : 180,
+          insertWidth: Number.isFinite(Number(buttonConfig.insertWidth)) ? Number(buttonConfig.insertWidth) : 340,
+          insertHeight: Number.isFinite(Number(buttonConfig.insertHeight)) ? Number(buttonConfig.insertHeight) : 120
+        })
     };
   });
   return actions;
@@ -691,14 +1194,14 @@ function summarizeSlideRecord(slide, index = 0) {
     elementCount: Array.isArray(slide.elements) ? slide.elements.length : 0,
     elements: Array.isArray(slide.elements)
       ? slide.elements.slice(0, MAX_SUMMARIZED_ELEMENTS_PER_SLIDE).map((element) => ({
-          id: element.id,
-          type: element.type,
-          label: String(element.label || element.content || element.question || '').slice(0, MAX_SUMMARIZED_LABEL_LENGTH),
-          x: Number(element.x) || 0,
-          y: Number(element.y) || 0,
-          width: Number(element.width) || 0,
-          height: Number(element.height) || 0
-        }))
+        id: element.id,
+        type: element.type,
+        label: String(element.label || element.content || element.question || '').slice(0, MAX_SUMMARIZED_LABEL_LENGTH),
+        x: Number(element.x) || 0,
+        y: Number(element.y) || 0,
+        width: Number(element.width) || 0,
+        height: Number(element.height) || 0
+      }))
       : []
   };
 }
@@ -754,9 +1257,9 @@ function truncateText(value, maxLength) {
 function prepareMessagesForProvider(messages = []) {
   const normalizedMessages = Array.isArray(messages)
     ? messages.map((message) => ({
-        role: message?.role || 'user',
-        content: truncateText(message?.content, MAX_PROVIDER_MESSAGE_CHARS)
-      }))
+      role: message?.role || 'user',
+      content: truncateText(message?.content, MAX_PROVIDER_MESSAGE_CHARS)
+    }))
     : [];
 
   const totalChars = normalizedMessages.reduce((sum, message) => sum + String(message.content || '').length, 0);
@@ -1093,30 +1596,150 @@ function normalizeMoveElementDirections(actions, existingSlides = []) {
   return actions;
 }
 
-function postProcessActions(actions, request, existingSlides = []) {
+function normalizePlanItemActions(actions, currentPlanItem, existingSlides = []) {
+  if (!currentPlanItem || !Array.isArray(actions) || !actions.length) {
+    return actions;
+  }
+  const normalizedTitle = String(currentPlanItem.title || '').trim().toLowerCase();
+  const existingMatch = existingSlides.find(
+    (slide) => String(slide?.id || '').trim() === String(currentPlanItem.targetSlideId || '').trim()
+      || (normalizedTitle && String(slide?.title || '').trim().toLowerCase() === normalizedTitle)
+  );
+  let targetSlideId = currentPlanItem.targetSlideId || existingMatch?.id || '';
+  let hasTargetSlideCreation = false;
+  const isActionTargetingAnotherSlide = (action = {}) => {
+    const referencedSlideId = String(action.slideId || '').trim();
+    if (!referencedSlideId) {
+      return false;
+    }
+    const allowedIds = new Set(
+      [
+        targetSlideId,
+        currentPlanItem.targetSlideId,
+        currentPlanItem.id,
+        existingMatch?.id
+      ]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean)
+    );
+    if (!allowedIds.size) {
+      return false;
+    }
+    return !allowedIds.has(referencedSlideId);
+  };
+
+  const rewritten = [];
+  for (const rawAction of actions) {
+    const action = JSON.parse(JSON.stringify(rawAction));
+    if (action.type === 'add_slide') {
+      const actionTitle = String(action.slide?.title || '').trim().toLowerCase();
+      const titleMatches = normalizedTitle && actionTitle === normalizedTitle;
+      if (!targetSlideId) {
+        targetSlideId = String(action.slide?.id || currentPlanItem.id || createSafeId('slide', currentPlanItem.title, 0)).trim();
+      }
+      if (titleMatches || !hasTargetSlideCreation) {
+        action.slide = {
+          ...(action.slide || {}),
+          id: targetSlideId,
+          title: currentPlanItem.title || action.slide?.title || 'Slide'
+        };
+        hasTargetSlideCreation = !existingMatch;
+        rewritten.push(action);
+      }
+      continue;
+    }
+    if (action.type === 'update_slide') {
+      if (isActionTargetingAnotherSlide(action)) {
+        continue;
+      }
+      action.slideId = targetSlideId || action.slideId || existingMatch?.id || '';
+      if (action.slide) {
+        action.slide = {
+          ...action.slide,
+          title: currentPlanItem.title || action.slide.title
+        };
+      }
+      rewritten.push(action);
+      continue;
+    }
+    if (action.type === 'delete_slide') {
+      continue;
+    }
+    if (isActionTargetingAnotherSlide(action)) {
+      continue;
+    }
+    if (action.slideId || action.type === 'add_element' || action.type === 'update_element' || action.type === 'delete_element' || action.type === 'select_element') {
+      action.slideId = targetSlideId || action.slideId || existingMatch?.id || '';
+    }
+    rewritten.push(action);
+  }
+
+  if (!targetSlideId) {
+    targetSlideId = String(currentPlanItem.id || createSafeId('slide', currentPlanItem.title, 0)).trim();
+  }
+
+  if (!existingMatch && !rewritten.some((action) => action.type === 'add_slide')) {
+    rewritten.unshift({
+      type: 'add_slide',
+      reason: `Criar o slide planejado: ${currentPlanItem.title || 'Slide'}.`,
+      slide: {
+        id: targetSlideId,
+        title: currentPlanItem.title || 'Slide',
+        backgroundColor: '#fdfbff'
+      },
+      setActive: true
+    });
+  }
+
+  return rewritten.map((action) => {
+    if (action.slideId && !action.slideId.trim()) {
+      action.slideId = targetSlideId;
+    }
+    if (action.type === 'select_element' && !action.slideId) {
+      action.slideId = targetSlideId;
+    }
+    return action;
+  });
+}
+
+function postProcessActions(actions, request, existingSlides = [], options = {}) {
+  const disableStoryExpansion = options?.disableStoryExpansion === true || requestExplicitlyForbidsNewSlides(request);
+  const currentPlanItem = options?.currentPlanItem || null;
   let nextActions = ensureSlideIds(actions);
   nextActions = reuseInitialBlankSlide(nextActions, existingSlides);
   nextActions = resolveSlideReferenceAliases(nextActions, existingSlides);
   nextActions = resolveElementReferenceAliases(nextActions, existingSlides);
-  nextActions = ensureMinimumStorySlides(nextActions, request, existingSlides);
+  if (!disableStoryExpansion) {
+    nextActions = ensureMinimumStorySlides(nextActions, request, existingSlides);
+  }
   nextActions = ensureSlideIds(nextActions);
   nextActions = reuseInitialBlankSlide(nextActions, existingSlides);
   nextActions = resolveSlideReferenceAliases(nextActions, existingSlides);
   nextActions = resolveElementReferenceAliases(nextActions, existingSlides);
-  nextActions = ensureRequestedSlideCount(nextActions, request, existingSlides);
+  if (!disableStoryExpansion) {
+    nextActions = ensureRequestedSlideCount(nextActions, request, existingSlides);
+  }
   nextActions = ensureSlideIds(nextActions);
   nextActions = resolveSlideReferenceAliases(nextActions, existingSlides);
   nextActions = resolveElementReferenceAliases(nextActions, existingSlides);
-  nextActions = ensureMinimumButtonActions(nextActions, request, existingSlides);
+  if (!disableStoryExpansion) {
+    nextActions = ensureMinimumButtonActions(nextActions, request, existingSlides);
+  }
   nextActions = resolveSlideReferenceAliases(nextActions, existingSlides);
   nextActions = resolveElementReferenceAliases(nextActions, existingSlides);
   nextActions = repairButtonActions(nextActions, existingSlides);
   nextActions = normalizeMoveElementDirections(nextActions, existingSlides);
   nextActions = coercePlatformElementStyles(nextActions);
+  if (disableStoryExpansion && currentPlanItem) {
+    nextActions = normalizePlanItemActions(nextActions, currentPlanItem, existingSlides);
+  }
   return nextActions;
 }
 
-function needsRetry(actions, request, existingSlides = []) {
+function needsRetry(actions, request, existingSlides = [], options = {}) {
+  if (options?.disableStoryExpansion === true || requestExplicitlyForbidsNewSlides(request)) {
+    return !Array.isArray(actions) || !actions.length;
+  }
   const wantsStory = requestSuggestsStoryFlow(request);
   const wantsButtons = requestSuggestsButtons(request) || wantsStory;
   const requestedCount = extractRequestedSlideCount(request);
@@ -1208,424 +1831,167 @@ function sanitizeJsonCandidate(rawContent) {
     .trim();
 }
 
-function createAiPrompt({ request, slides, activeSlideId, stageSize, attachments = [], attachmentInsights = '' }) {
-  const safeStage = stageSize?.width && stageSize?.height ? stageSize : DEFAULT_STAGE_SIZE;
-  const orderedSlides = summarizeSlides(slides, activeSlideId);
-  const compactInstructions = {
-    role: 'slide_builder',
-    rules: [
-      ...BASIC_LAYOUT_RULES,
-      'Retorne um array de acoes.',
-      'Prefira editar slides existentes antes de criar muitos novos, a menos que o pedido exija.',
-      'Se o pedido mencionar varios slides, voce pode criar uma sequencia curta com ids explicitos.',
-      'Para imagens novas, prefira generationPrompt em vez de URL inventada.',
-      'Se houver imagem anexada, use apenas o resumo dela como referencia visual.',
-      'Quando usar floatingButton, configure actionConfig funcional e evite criar botoes decorativos sem efeito.',
-      'Se o slide tiver quiz normal, nao adicione botao extra para validar resposta, porque o quiz ja tem botao interno.',
-      'Se o pedido envolver fundo visual, prefira configurar backgroundColor, backgroundImage ou backgroundImagePrompt diretamente no slide.',
-      'Quando o pedido for para ensinar, apresentar recursos, onboarding, tutorial, descoberta ou produtividade, prefira composicoes mais ricas com cards, destaques, botoes e uma progressao clara entre secoes.',
-      'Quando o pedido pedir algo bem elaborado, use melhor distribuicao do palco, imagens ou ilustracoes relevantes, destaques em bloco e animacoes leves para guiar o olhar.',
-      'Quando houver texto relevante, prefira usar block atras do texto para criar cards, faixas e areas de leitura mais profissionais.',
-      'Quando a imagem ajudar na explicacao, prefira incluir image com generationPrompt ou backgroundImagePrompt no slide.',
-      'Use harmonia de cores entre fundo, blocos, botoes e textos. Escolha uma direcao visual coerente e mantenha consistencia.',
-      'Em text, nao confunda o tamanho do seletor com o tamanho visual final da tipografia. Ajuste width, height e fontSize juntos para o texto nao escapar.',
-      'Se o slide tiver muitos elementos, reorganize em secoes com espacamento claro em vez de sobrepor componentes.',
-      'Nao complique com audio, video ou motion-recording se o pedido nao exigir isso.'
-    ],
-    allowedActionTypes: Array.from(ALLOWED_ACTIONS),
-    allowedElementTypes: Array.from(ALLOWED_ELEMENT_TYPES),
-    jsonExample: [
-      {
-        type: 'add_slide',
-        reason: 'Criar slide de abertura',
-        slide: {
-          id: 'slide-intro',
-          title: 'Introducao',
-          backgroundColor: '#fdfbff',
-          backgroundImagePrompt: 'fundo clean e profissional sobre tecnologia educacional com tons suaves de azul'
-        },
-        setActive: true
-      },
-      {
-        type: 'add_element',
-        slideId: 'slide-intro',
-        reason: 'Adicionar bloco principal',
-        element: {
-          id: 'card-intro',
-          type: 'block',
-          x: 90,
-          y: 110,
-          width: 520,
-          height: 420,
-          useGradient: true,
-          gradientStart: '#1d4ed8',
-          gradientEnd: '#2563eb'
-        }
-      },
-      {
-        type: 'add_element',
-        slideId: 'slide-intro',
-        reason: 'Adicionar titulo',
-        element: {
-          id: 'titulo-intro',
-          type: 'text',
-          content: 'Como usar a plataforma',
-          x: 130,
-          y: 150,
-          width: 420,
-          height: 70,
-          fontSize: 34,
-          fontWeight: '700',
-          textColor: '#ffffff',
-          animationType: 'fade-in',
-          animationDuration: 1
-        }
-      },
-      {
-        type: 'add_element',
-        slideId: 'slide-intro',
-        reason: 'Adicionar botao para revelar uma dica util',
-        element: {
-          id: 'botao-avancar',
-          type: 'floatingButton',
-          label: 'Ver dica',
-          x: 130,
-          y: 460,
-          width: 180,
-          height: 56,
-          useGradient: true,
-          gradientStart: '#f97316',
-          gradientEnd: '#fb923c',
-          actionConfig: {
-            type: 'addText',
-            text: 'A plataforma centraliza aulas, materiais e progresso em um unico fluxo.',
-            textColor: '#1f2340',
-            backgroundColor: '#ffffff',
-            fontSize: 22,
-            fontWeight: '600',
-            hasTextBackground: true,
-            insertX: 660,
-            insertY: 500,
-            insertWidth: 430,
-            insertHeight: 90
-          }
-        }
-      },
-      {
-        type: 'add_element',
-        slideId: 'slide-intro',
-        reason: 'Adicionar quiz curto para interacao',
-        element: {
-          id: 'quiz-intro',
-          type: 'quiz',
-          question: 'Qual recurso ajuda o aluno a navegar entre etapas?',
-          options: ['floatingButton', 'backgroundColor', 'fontWeight'],
-          correctOption: 0,
-          x: 660,
-          y: 150,
-          width: 460,
-          height: 300,
-          successMessage: 'Correto! O botao pode levar para outra etapa.',
-          errorMessage: 'Tente novamente observando os elementos interativos.'
-        }
+function summarizePromptPlanContext(executionPlan = null, currentPlanItem = null) {
+  if (!executionPlan || typeof executionPlan !== 'object') {
+    return null;
+  }
+  return {
+    mode: executionPlan.mode || 'deck',
+    summary: truncateText(executionPlan.summary || '', 200),
+    currentPlanItem: currentPlanItem
+      ? {
+        id: currentPlanItem.id || '',
+        title: truncateText(currentPlanItem.title || '', 80),
+        goal: truncateText(currentPlanItem.goal || '', 180),
+        layoutNotes: truncateText(currentPlanItem.layoutNotes || '', 180),
+        interactionNotes: truncateText(currentPlanItem.interactionNotes || '', 180),
+        order: currentPlanItem.order || null,
+        targetSlideId: currentPlanItem.targetSlideId || null
       }
-    ],
-    userRequest: truncateText(request, MAX_REQUEST_LENGTH),
-    context: {
-      activeSlideId: activeSlideId || null,
-      stageSize: safeStage,
-      slides: orderedSlides,
-      attachmentInsights: truncateText(attachmentInsights, MAX_ATTACHMENT_INSIGHTS_LENGTH),
-      attachmentCount: attachments.length
-    }
+      : null
   };
-  return JSON.stringify(compactInstructions);
-  const instructions = {
-    role: 'slide_builder',
-    rules: [
-      'Responda apenas com JSON valido.',
-      'Retorne um array de acoes.',
-      'Use somente os tipos de acao permitidos.',
-      'Use somente os campos e comportamentos que ja existem na plataforma. Nao invente ferramentas, propriedades, componentes, HTML, CSS, DOM ou codigo.',
-      'Nunca descreva a solucao como mudanca de HTML. Sempre pense em acoes do editor e propriedades do estado dos slides.',
-      'Quando usar add_element, informe slideId e element.',
-      'Nunca retorne add_element vazio. add_element sem slideId ou sem element e invalido.',
-      'Nunca retorne update_element vazio. update_element exige slideId, elementId e element com pelo menos uma propriedade real para atualizar.',
-      'Nunca retorne update_slide vazio. update_slide exige slideId e slide com pelo menos uma propriedade real para atualizar.',
-      'Nunca retorne add_slide vazio. add_slide exige slide com pelo menos id ou title.',
-      'Nao retorne acoes-placeholder, rascunhos ou etapas incompletas. Cada acao precisa estar pronta para aplicar.',
-      'Nao invente slideId. So referencie um slide se ele ja existir no contexto ou se voce o criou antes na mesma resposta com add_slide.',
-      'Se for criar elementos em um slide novo, primeiro crie o slide com add_slide e depois use esse mesmo id nas acoes seguintes.',
-      'Nao use elementId sozinho em add_element. Para criar elemento, descreva o objeto completo em element.',
-      'Em elementos do tipo text, o texto visivel deve ficar em content. label serve apenas como rotulo interno quando fizer sentido.',
-      'Nao use label como substituto de content em text.',
-      'Se voce quiser apenas criar um elemento novo, use add_element. So use update_element quando o alvo ja existir de verdade.',
-      'Se nao tiver certeza de que um elementId ja existe, prefira add_element com element.id explicito em vez de update_element.',
-      'Voce pode criar varios slides em sequencia para contar uma historia, jornada, missao, aula guiada ou aventura educativa.',
-      'Quando criar varios slides, de ids explicitos aos slides para conseguir referenciar a navegacao entre eles com targetSlideId.',
-      'Estruture a historia com continuidade entre os slides: introducao, descoberta, desafio, resposta, recompensa ou conclusao.',
-      'Respeite rigorosamente os limites do palco. Nao posicione elementos fora da area visivel e nao deixe largura, altura, x ou y ultrapassarem o palco.',
-      'Considere o palco padrao como 1280x720 e mantenha margens visuais seguras nas bordas.',
-      'Use o palco 1280x720 como limite absoluto. Organize os elementos pensando nesse espaco inteiro antes de posicionar qualquer item.',
-      'Ao compor layouts, distribua os elementos para evitar sobreposicao excessiva e para manter leitura clara dentro do palco.',
-      'Organize blocos, textos, imagens e botoes com alinhamento profissional: alinhe bordas, respeite uma grade visual, mantenha respiros consistentes e evite elementos desalinhados.',
-      'Quando houver varios blocos, use larguras, alturas e espacamentos coerentes entre si para formar colunas, cards ou secoes bem organizadas.',
-      'Ao posicionar textos, mantenha hierarquia clara entre titulo, subtitulo e corpo. Alinhe o texto ao bloco ou area correspondente e preserve margens internas confortaveis.',
-      'Sempre que houver um bloco servindo de card, painel ou caixa de conteudo, mantenha o texto visualmente dentro desse bloco.',
-      'Nao deixe textos importantes soltos fora dos blocos quando houver um bloco correspondente no layout.',
-      'Ao escolher cor de texto, sempre garanta contraste forte com o fundo. Se o fundo, bloco ou imagem for escuro, use texto claro. Se o fundo, bloco ou imagem for claro, use texto escuro.',
-      'Se houver imagem escura atras do texto, adicione bloco, sobreposicao ou ajuste de cor para manter legibilidade imediata.',
-      'Se um texto estiver associado a um bloco visual, posicione o texto dentro dele com alinhamento equilibrado, sem encostar nas bordas e sem parecer solto no palco.',
-      'Prefira composicoes com simetria parcial ou grade bem resolvida, com leitura limpa e acabamento profissional.',
-      'Priorize slides didaticos e interativos como se fossem pequenas fases de um jogo educativo.',
-      'Explore fortemente floatingButton com actionConfig para criar exploracao, descoberta, progressao, navegacao, escolha e revelacao de conteudo.',
-      'Prefira experiencias em que o aluno clica, escolhe, avanca ou desbloqueia informacoes, em vez de slides puramente estaticos.',
-      'Use blocos e botoes flutuantes como formas geometricas para desenhar composicoes visuais. Os tipos block e floatingButton aceitam shape rectangle, circle, triangle e arrow.',
-      'Combine varios blocos geometricos para montar paineis, cards, setas, destaques, molduras, caminhos, personagens abstratos ou interfaces ludicas.',
-      'Considere que block agora possui editor flutuante proprio e suporta configuracao completa de conteudo, largura, altura, rotacao, camada, shape, gradiente, cor solida, cor do texto e tipografia.',
-      'Para mudar a cor de blocos, botoes e setas, prefira ativar useGradient e preencher gradientStart e gradientEnd.',
-      'Quando o usuario pedir uma cor unica em bloco, botao ou seta, use useGradient true e repita a mesma cor em gradientStart e gradientEnd.',
-      'Quando o usuario pedir para mudar a cor de um bloco existente, prefira update_element com useGradient true, gradientStart e gradientEnd preenchidos.',
-      'Quando o usuario pedir para configurar bloco, card, caixa, painel ou shape, pense no tipo block como um elemento visual configuravel pelo editor flutuante do bloco.',
-      'Ao usar gradiente, escolha combinacoes harmonicas e legiveis. Use contrastes claros entre fundo e texto.',
-      'Se quiser efeito de cor unica, use useGradient true com gradientStart e gradientEnd iguais.',
-      'Aplique principios de harmonia de cores: analogas para suavidade, complementares para destaque, triadicas para energia equilibrada e monocromaticas para clareza.',
-      'Evite paletas aleatorias. Cada slide deve ter direcao visual consistente entre fundo, blocos, botoes e textos.',
-      'Voce pode definir o fundo do slide com slide.backgroundColor para cor lisa ou slide.backgroundImage para imagem de fundo por URL.',
-      'Quando a proposta ficar melhor com ambiente ilustrado, use slide.backgroundImage com URL. Quando precisar de clareza, performance ou visual mais limpo, use slide.backgroundColor.',
-      'Se usar imagem de fundo, mantenha contraste suficiente para texto e elementos interativos. Se necessario, complemente com blocos sobrepostos.',
-      'Se houver imagem anexada pelo usuario, considere esse anexo como referencia visual adicional do pedido.',
-      'Prefira usar o gerador de imagem da plataforma para ilustrar conceitos, ambientar a cena e deixar o slide mais bonito quando isso ajudar na compreensao.',
-      'Nao precisa colocar imagem em todos os slides, mas em slides de abertura, explicacao, comparacao ou ilustracao normalmente vale a pena ter pelo menos uma imagem relevante.',
-      'Quando quiser uma imagem criada pela plataforma, prefira generationPrompt em vez de URL inventada.',
-      'Botoes flutuantes e detectores podem usar actionConfig.type como nextSlide, jumpSlide, addText, replaceText, addImage, addVideo, addQuiz, moveElement ou playAnimation.',
-      'Quando um floatingButton fizer parte do desenho ou da area clicavel, voce pode definir shape rectangle, circle, triangle ou arrow para transformar o proprio botao em forma interativa.',
-      'Quando usar floatingButton, configure targetSlideId, targetElementId, text, url, quizQuestion, quizOptions, quizCorrectOption, moveByX, moveByY, moveDuration e posicao de insercao quando necessario.',
-      'Quando actionConfig.type for addText em floatingButton ou detector, voce pode e deve configurar o texto inserido com text, textColor, backgroundColor, fontSize, fontFamily, fontWeight, textAlign, hasTextBackground, hasTextBorder e hasTextBlock, alem de insertWidth e insertHeight.',
-      'Sempre que o usuario pedir um texto desbloqueado visualmente rico, aplique no addText a mesma logica de personalizacao do editor de texto da plataforma em vez de inserir um texto cru.',
-      'Use actionConfig.type replaceText quando o clique ou detector precisar trocar o conteudo de um texto, bloco ou rotulo de botao ja existente. Nessa acao, preencha targetElementId.',
-      'Em replaceText, use replaceMode replace para trocar todo o conteudo do alvo usando replaceText.',
-      'Em replaceText, use replaceMode counter quando o usuario quiser contador, soma visual, placar, tentativas, pontos ou progresso numerico concatenado. Nesse caso, preencha replaceText como prefixo e ajuste replaceCounterStart e replaceCounterStep quando necessario.',
-      'Quando actionConfig.type for addQuiz em floatingButton ou detector, configure o quiz completo com quizQuestion, quizOptions, quizCorrectOption, successMessage, errorMessage, actionLabel, quizBackgroundColor, quizQuestionColor, quizOptionBackgroundColor, quizOptionTextColor, quizButtonBackgroundColor, points, lockOnWrong, insertWidth e insertHeight.',
-      'Nao crie addQuiz simplificado quando o pedido pedir quiz estilizado ou com comportamento especifico. Use todas as configuracoes necessarias do quiz real da plataforma.',
-      'Use actionConfig.type moveElement quando o clique no floatingButton precisar deslocar image, block ou text ja existente. Nessa acao, preencha targetElementId e quantos pixels mover em moveByX e moveByY.',
-      'moveByX e moveByY aceitam numeros positivos e negativos. Use valores negativos quando o elemento precisar ir para a esquerda ou para cima.',
-      'Use actionConfig.type playAnimation quando o clique no floatingButton ou detector precisar disparar a animacao ja configurada de um image, block ou text. Nessa acao, preencha targetElementId.',
-      'Voce tambem pode criar regras opcionais de botao com actionConfig.requireAllButtonsInGroup true e actionConfig.ruleGroup para que a acao so execute depois de clicar em todos os botoes daquele grupo no mesmo slide.',
-      'O tipo detector representa uma area invisivel no palco. Ele funciona como um bloco invisivel e serve para detectar quando o aluno arrasta um elemento por cima dele.',
-      'Use detector quando o usuario pedir area de encaixe, zona de acerto, alvo invisivel, drop zone, detector de colisao ou gatilho por sobreposicao.',
-      'Detector nao precisa de label nem conteudo. Configure largura, altura, x e y como se fosse um bloco invisivel.',
-      'Quando um detector disparar uma acao, use actionConfig do mesmo jeito que em floatingButton. Ele pode mover um elemento, tocar uma animacao, ir para outro slide ou inserir novo conteudo.',
-      'Os tipos text, block e image aceitam studentCanDrag true quando o aluno deve poder arrastar esse elemento no viewer.',
-      'Use studentCanDrag true apenas quando houver motivo pedagogico ou interativo claro, como arrastar uma resposta, um cartao, uma imagem ou uma etiqueta.',
-      'Quizzes podem usar points para definir pontuacao e lockOnWrong true para bloquear nova tentativa apos erro.',
-      'Ao criar quiz, respeite a altura minima real do componente: 300px com 3 opcoes, 350px com 4 opcoes e adicione 50px de altura para cada opcao extra.',
-      'Nunca coloque quiz por cima de botoes flutuantes e nunca coloque botoes por cima de quizzes.',
-      'Mantenha distancia minima entre quiz e botoes para que a area clicavel de um nao atrapalhe o outro.',
-      'Quando um floatingButton inserir elemento no palco com addText, addImage, addVideo ou addQuiz, posicione o novo elemento em area livre do palco. Nunca coloque o elemento inserido em cima de outros botoes ou quizzes.',
-      'Se faltar espaco, reduza um pouco a fonte ou ajuste largura e altura do elemento inserido, mas ainda respeite o limite do palco e evite sobreposicao com botoes e quizzes.',
-      'Slides podem usar requireQuizCompletion true para bloquear o avancar ate que os quizzes daquele slide sejam respondidos.',
-      'Use nextSlide para progressao linear, jumpSlide para caminhos narrativos, addText/addQuiz/addImage/addVideo para desbloquear conteudo no proprio slide e replaceText para atualizar texto ja existente.',
-      'Ao criar historias com varios slides, inclua botoes que levem o aluno adiante, voltem para revisao ou revelem pistas e desafios.',
-      'Sempre que possivel, faca cada slide ter pelo menos um ponto de interacao claro com botao, quiz ou escolha.',
-      'Se o usuario pedir algo visualmente rico, pense primeiro em layout, formas, cores, hierarquia e interacao; depois no texto.',
-      'Para image, audio e video use apenas URLs ou generationPrompt quando quiser que a plataforma gere uma imagem nova.',
-      'A plataforma possui uma borracha para image e block. Quando o usuario pedir para apagar parte de uma imagem ou bloco, nao invente nova ferramenta: prefira manter o elemento como image ou block e, se precisar orientar a edicao, descreva que a borracha pode apagar partes manualmente com transparencia.',
-      'Quando precisar de uma imagem nova criada por IA, use element.generationPrompt para elementos image, slide.backgroundImagePrompt para fundos ou actionConfig.generationPrompt quando um floatingButton criar imagem no clique.',
-      'Pense no modelo de texto como responsavel por estrategia, estrutura, hierarquia, contraste, posicionamento e layout.',
-      'Quando houver gerador de imagem disponivel, trate o modelo de imagem como responsavel por materializar visualmente a composicao planejada a partir do layout, do pedido e das referencias enviadas.',
-      'Nao invente imagens hospedadas em URLs aleatorias. Quando nao houver URL confiavel, prefira generationPrompt para a plataforma gerar a imagem.',
-      'Nao inclua markdown, comentarios ou explicacoes fora do JSON.',
-      'Prefira editar slides existentes antes de criar muitos novos, a menos que o pedido exija.',
-      'Todos os elementos devem caber em um palco 1280x720 por padrao.',
-      'Para block e floatingButton, represente cores usando o formato nativo da plataforma: useGradient, gradientStart e gradientEnd. Se for cor unica, repita a mesma cor no inicio e no fim.',
-      'Voce pode animar text, block, floatingButton e image com animationType, animationDuration, animationDelay e animationLoop. Use animacoes com moderacao para destacar entradas, saidas e movimentos suaves.',
-      'Os animationType permitidos sao: fade-in, fade-out, slide-left, slide-right, rotate-in, pulse, float, zoom-in, motion-recording e none.',
-      'motion-recording serve para criar movimentacao quadro a quadro em image, block e text.',
-      'Quando usar motion-recording, forneca motionFrames como uma lista ordenada de quadros. Cada quadro pode ter x, y, width, height, rotation e opacity.',
-      'Pense no botao Gravar quadro atual como a captura de uma pose exata do elemento no palco. Cada clique nesse botao registra um frame completo da posicao e da aparencia atual do elemento.',
-      'Para motion-recording, crie pelo menos 2 quadros quando quiser deslocamento real. O primeiro quadro representa o estado inicial e os seguintes representam o caminho da animacao.',
-      'Pense em motion-recording como uma gravacao de poses sucessivas do elemento no palco. O efeito final depende da diferenca gradual entre um quadro e o seguinte.',
-      'Quando o pedido exigir animacao personalizada, criativa ou mais viva do que as animacoes prontas, prefira motion-recording e imagine a sequencia como se estivesse apertando Gravar quadro atual varias vezes ao reposicionar o elemento no palco.',
-      'Ao planejar motion-recording, defina uma pose inicial, grave quadros intermediarios com pequenas mudancas de x, y, width, height, rotation e opacity, e depois grave a pose final.',
-      'Use motion-recording para criar curvas, aproximacoes, balanço, entrada em arco, leve rotacao progressiva, zoom combinado com deslocamento e outras trajetorias que os presets prontos nao conseguem reproduzir.',
-      'Ao montar motionFrames, use o palco 1280x720 como referencia absoluta. Calcule deslocamentos com base nesse espaco total e mantenha o elemento sempre dentro da area visivel.',
-      'Para o movimento parecer natural, distribua os quadros ao longo do palco em passos progressivos, evitando saltos grandes demais entre dois quadros vizinhos.',
-      'Se o usuario pedir um movimento curto e suave, use de 3 a 5 quadros. Se pedir um trajeto mais longo, use de 5 a 8 quadros.',
-      'Como regra pratica, tente fazer cada salto entre quadros representar algo em torno de 4% a 12% da largura do palco no eixo X e 4% a 12% da altura do palco no eixo Y, salvo quando o pedido exigir um salto dramatico.',
-      'Em um palco 1280x720, isso normalmente significa avancos aproximados de 50 a 150 pixels no eixo X e 30 a 85 pixels no eixo Y por quadro em movimentos suaves.',
-      'Se o elemento precisar atravessar grande parte do palco, nao use apenas quadro inicial e quadro final. Crie quadros intermediarios para o cerebro perceber continuidade e direcao.',
-      'Quando quiser que pareca que o elemento acelera ou desacelera, use espacamentos desiguais entre os quadros: menores no inicio e maiores no meio para acelerar, ou maiores no inicio e menores no fim para desacelerar.',
-      'Quando quiser que pareca um movimento linear simples, mantenha diferencas parecidas de x e y entre os quadros consecutivos.',
-      'Voce tambem pode variar width, height e rotation entre os quadros para simular aproximacao, afastamento, inclinacao ou reposicionamento mais vivo, mas faca isso gradualmente.',
-      'Para entrada lateral, comece com o elemento parcialmente fora ou perto da borda segura e aproxime quadro a quadro ate a posicao final. Para subida ou descida, faca o mesmo no eixo Y.',
-      'Para parecer que uma imagem, bloco ou texto esta realmente se movendo, prefira varios quadros pequenos e coerentes em vez de poucos quadros com diferencas bruscas.',
-      'Se o usuario pedir para ensinar a configurar animacao, responda usando motion-recording quando houver movimento no palco e descreva o raciocinio dos quadros em termos de posicao inicial, quadros intermediarios e posicao final.',
-      'Use motion-recording principalmente para deslocamento de imagem, bloco ou texto, entrada dramatica, aproximacao, mudanca de escala, reposicionamento de card ou movimento guiado no palco.',
-      'Nao use motion-recording em quiz, audio, video ou floatingButton.',
-      'Use animacao principalmente em titulo, imagem principal, cards de destaque e botao principal quando isso ajudar a guiar o olhar do aluno.',
-      'Evite animar muitos elementos ao mesmo tempo no mesmo slide. Prefira de 1 a 3 animacoes relevantes por slide.',
-      'Para entrada suave de titulo ou bloco, prefira fade-in ou slide-left. Para imagem hero, prefira zoom-in ou float. Para CTA, prefira pulse ou float. Para destaque dramatico, prefira rotate-in com moderacao.',
-      'Quando usar animationDelay, escalone a entrada visual: por exemplo titulo primeiro, bloco depois, botao por ultimo.',
-      'Use animationLoop true apenas para efeitos sutis e continuos como pulse ou float. Para entradas e saídas, prefira animationLoop false.',
-      'Se quiser manter um elemento animado continuamente, use animationLoop true. Isso funciona melhor com pulse e float em botoes principais, imagens de destaque, cards importantes e elementos que devam permanecer chamando atencao.',
-      'Evite animationLoop true em muitos elementos ao mesmo tempo. Prefira no maximo 1 ou 2 elementos continuamente animados por slide.',
-      'Nao use animationType em quiz, audio ou video.',
-      'Quando o usuario pedir para ensinar ou configurar animacao, prefira responder com a propria configuracao do elemento: escolha animationType adequado, ajuste animationDuration e animationDelay, e use animationLoop apenas quando houver motivo visual.'
-    ],
-    allowedActionTypes: Array.from(ALLOWED_ACTIONS),
-    allowedElementTypes: Array.from(ALLOWED_ELEMENT_TYPES),
-    jsonExample: [
-      {
-        type: 'add_slide',
-        reason: 'Criar slide de abertura',
-        slide: { id: 'slide-intro', title: 'Introducao', backgroundColor: '#fdfbff' },
-        setActive: true
-      },
-      {
-        type: 'update_slide',
-        slideId: 'slide-alvo',
-        reason: 'Aplicar um fundo visual ao slide',
-        slide: {
-          backgroundImage: 'https://images.unsplash.com/photo-1522202176988-66273c2fd55f?auto=format&fit=crop&w=1400&q=80',
-          backgroundColor: '#eef3ff'
-        }
-      },
-      {
-        type: 'update_element',
-        slideId: 'slide-alvo',
-        elementId: 'elemento-bloco',
-        reason: 'Trocar a cor do bloco para destacar a secao',
-        element: {
-          useGradient: true,
-          gradientStart: '#ffd54f',
-          gradientEnd: '#ffd54f',
-          backgroundColor: '#ffd54f',
-          solidColor: '#ffd54f'
-        }
-      },
-      {
-        type: 'add_element',
-        slideId: 'slide-intro',
-        reason: 'Adicionar titulo principal',
-        element: {
-          type: 'text',
-          content: 'Bem-vindo',
-          x: 120,
-          y: 80,
-          width: 500,
-          height: 120,
-          fontSize: 34,
-          fontWeight: '700',
-          textColor: '#171934',
-          animationType: 'fade-in',
-          animationDuration: 1,
-          animationDelay: 0,
-          animationLoop: false
-        }
-      },
-      {
-        type: 'add_element',
-        slideId: 'slide-intro',
-        reason: 'Adicionar imagem principal com entrada suave',
-        element: {
-          type: 'image',
-          x: 760,
-          y: 120,
-          width: 340,
-          height: 240,
-          generationPrompt: 'ilustracao clean e profissional sobre tecnologia educacional',
-          animationType: 'zoom-in',
-          animationDuration: 1.4,
-          animationDelay: 0.2,
-          animationLoop: false
-        }
-      },
-      {
-        type: 'add_element',
-        slideId: 'slide-intro',
-        reason: 'Adicionar botao interativo para revelar o proximo passo',
-        element: {
-          type: 'floatingButton',
-          label: 'Explorar',
-          shape: 'circle',
-          x: 950,
-          y: 560,
-          width: 180,
-          height: 64,
-          fontSize: 20,
-          fontWeight: '700',
-          useGradient: true,
-          gradientStart: '#ff8a5b',
-          gradientEnd: '#ffd166',
-          backgroundColor: '#ff8a5b',
-          solidColor: '#ff8a5b',
-          animationType: 'pulse',
-          animationDuration: 2.4,
-          animationDelay: 0.6,
-          animationLoop: true,
-          actionConfig: {
-            type: 'addText',
-            requireAllButtonsInGroup: true,
-            ruleGroup: 'pistas-secretas',
-            text: 'Parabens! Voce desbloqueou a proxima pista.',
-            insertX: 720,
-            insertY: 180,
-            insertWidth: 360,
-            insertHeight: 120
-          }
-        }
-      },
-      {
-        type: 'add_slide',
-        reason: 'Criar segundo slide para continuar a historia',
-        afterSlideId: 'slide-intro',
-        slide: {
-          id: 'slide-desafio',
-          title: 'Desafio',
-          backgroundColor: '#eef6ff'
-        }
-      },
-      {
-        type: 'add_element',
-        slideId: 'slide-intro',
-        reason: 'Adicionar botao para navegar para o slide de desafio',
-        element: {
-          type: 'floatingButton',
-          label: 'Ir para o desafio',
-          x: 920,
-          y: 80,
-          width: 220,
-          height: 60,
-          fontSize: 18,
-          fontWeight: '700',
-          useGradient: true,
-          gradientStart: '#5b8cff',
-          gradientEnd: '#27d3ec',
-          backgroundColor: '#5b8cff',
-          solidColor: '#5b8cff',
-          actionConfig: {
-            type: 'jumpSlide',
-            targetSlideId: 'slide-desafio'
-          }
-        }
-      }
-    ],
-    userRequest: truncateText(request, MAX_REQUEST_LENGTH),
-    context: {
-      activeSlideId: activeSlideId || null,
-      stageSize: safeStage,
-      slides: orderedSlides,
-      attachmentInsights: truncateText(attachmentInsights, MAX_ATTACHMENT_INSIGHTS_LENGTH),
-      attachmentCount: attachments.length
-    }
-  };
-  return JSON.stringify(instructions);
 }
 
-function createAiStepPrompt({ request, slides, activeSlideId, stageSize, stepIndex = 0, recentActions = [], attachments = [], attachmentInsights = '' }) {
+function createAiPrompt({
+  request,
+  slides,
+  activeSlideId,
+  stageSize,
+  attachments = [],
+  attachmentInsights = '',
+  templateReferences = null,
+  executionPlan = null,
+  currentPlanItem = null
+}) {
   const safeStage = stageSize?.width && stageSize?.height ? stageSize : DEFAULT_STAGE_SIZE;
   const orderedSlides = summarizeSlides(slides, activeSlideId);
+
+  // Regras dinamicas baseadas no contexto (mantivemos sua logica, mas simplificada)
+  const dynamicRules = [];
+  if (executionPlan?.mode === 'simple') {
+    dynamicRules.push('Faca apenas o pedido simples solicitado. Nao crie novos slides.');
+  }
+  
+  // Schema capabilities (o que a IA pode usar)
+  const capabilities = createAiCapabilityCatalog();
+
+  // Estrutura do Prompt
+  const payload = {
+    role: 'slide_builder_agent',
+    objective: 'Generate actions to modify slide deck based on user request.',
+    constraints: [
+        'Output MUST be a valid JSON array of actions.',
+        'Strictly follow the action schemas provided.',
+        'Respect stage bounds (1280x720).'
+    ],
+    context: {
+      currentSlides: orderedSlides,
+      activeSlideId: activeSlideId || null,
+      userRequest: truncateText(request, MAX_REQUEST_LENGTH),
+      attachmentSummary: truncateText(attachmentInsights, MAX_ATTACHMENT_INSIGHTS_LENGTH)
+    },
+    availableActions: capabilities.actionTypes, // Envia lista simples de tipos
+    elementSchema: capabilities.elementTypes,   // Envia os campos permitidos
+    executionPlan: currentPlanItem ? { currentStep: currentPlanItem } : null
+  };
+
+  // Exemplo conciso (Few-shot learning funciona melhor com exemplos pequenos)
+  const exampleAction = {
+    type: 'add_element',
+    slideId: 'slide-intro',
+    reason: 'Exemplo de acao',
+    element: {
+      type: 'text',
+      id: 'txt-titulo',
+      content: 'Texto Gerado',
+      x: 100, y: 100, width: 300, height: 50,
+      fontSize: 24, textColor: '#000000'
+    }
+  };
+
+  // Monta a string final do prompt
+  // Importante: Dizer explicitamente para retornar APENAS o JSON
+  return JSON.stringify({
+    system: `Voce e um motor de edicao de slides. Sua saida e consumida por uma maquina de estados. Nao explique, nao use markdown. Retorne apenas o JSON.
+    Regras: ${BASIC_LAYOUT_RULES.join(' ')}`,
+    payload: payload,
+    exampleOutput: [exampleAction] // Mostra o formato exato esperado
+  });
+}
+
+function summarizeExecutionPlan(executionPlan = null) {
+  if (!executionPlan || typeof executionPlan !== 'object') {
+    return null;
+  }
+  if (executionPlan.mode === 'simple') {
+    return {
+      mode: 'simple',
+      summary: truncateText(executionPlan.summary || '', 240),
+      simpleTask: executionPlan.simpleTask
+        ? {
+          title: truncateText(executionPlan.simpleTask.title || '', 120),
+          goal: truncateText(executionPlan.simpleTask.goal || '', 220),
+          deliverable: truncateText(executionPlan.simpleTask.deliverable || '', 120)
+        }
+        : null
+    };
+  }
+  return {
+    mode: executionPlan.mode || 'deck',
+    summary: truncateText(executionPlan.summary || '', 240),
+    slides: Array.isArray(executionPlan.slides)
+      ? executionPlan.slides.slice(0, MAX_PLAN_SLIDES).map((item, index) => ({
+        id: item?.id || `slide-plan-${index + 1}`,
+        title: truncateText(item?.title || `Slide ${index + 1}`, 80),
+        goal: truncateText(item?.goal || '', 160)
+      }))
+      : []
+  };
+}
+
+function createAiStepPrompt({
+  request,
+  slides,
+  activeSlideId,
+  stageSize,
+  stepIndex = 0,
+  recentActions = [],
+  attachments = [],
+  attachmentInsights = '',
+  templateReferences = null,
+  executionPlan = null,
+  currentPlanItem = null
+}) {
+  const safeStage = stageSize?.width && stageSize?.height ? stageSize : DEFAULT_STAGE_SIZE;
+  const orderedSlides = summarizeSlides(slides, activeSlideId);
+  const contextualInstructions = [];
+
+  if (executionPlan?.mode === 'simple') {
+    contextualInstructions.push(
+      'O pedido foi classificado como simples. Entregue apenas a parte pedida pelo usuario.',
+      'Nao crie aula completa, nao invente varios slides e nao extrapole o escopo.',
+      'Se bastar uma unica acao util, responda essa acao e depois done true nas proximas respostas.'
+    );
+  }
+
+  if (executionPlan?.mode === 'deck' && currentPlanItem) {
+    contextualInstructions.push(
+      `Voce esta executando apenas o item atual do plano: ${truncateText(currentPlanItem.title || `Slide ${currentPlanItem.order || ''}`, 80)}.`,
+      'Trabalhe somente neste slide/etapa atual. Nao comece o proximo slide enquanto este ainda nao estiver pronto.',
+      'Responda done true quando o slide atual estiver suficientemente completo para esta etapa do plano, nao quando a aula inteira terminar.',
+      'Se o slide atual ainda nao existir, sua primeira acao deve criar ou reutilizar esse slide antes de montar os elementos.',
+      'Se voce responder com acao para outro slide, essa acao sera descartada.',
+      'Evite alterar slides fora do item atual, exceto quando um botao deste slide precisar apontar para um proximo slide ja planejado.'
+    );
+  }
+  if (templateReferences?.length) {
+    contextualInstructions.push(
+      'Considere templateReferences como referencias compactas de templates validados da loja.',
+      'Se houver currentSlideHint, use esse hint como base do layout e da interacao deste passo.',
+      'Prefira adaptar estruturas existentes dos templates em vez de recriar tudo do zero.'
+    );
+  }
+
   return JSON.stringify({
     role: 'slide_builder_stepwise',
     task: truncateText(request, MAX_REQUEST_LENGTH),
@@ -1661,15 +2027,20 @@ function createAiStepPrompt({ request, slides, activeSlideId, stageSize, stepInd
       'Se usar detector, lembre que ele e invisivel para o aluno. Adicione um elemento visual de apoio quando a area precisar ser percebida.',
       'Use os recursos da plataforma de forma intencional: block para estrutura, text para conteudo, image para ilustracao, floatingButton para acao, quiz para avaliacao e detector para gatilhos invisiveis.',
       'Quando a imagem ajudar a explicar melhor, prefira incluir image com generationPrompt ou fundo com backgroundImagePrompt.',
-      'Se houver imagem anexada, use apenas o resumo dela no contexto como referencia visual do pedido.'
+      'Se houver imagem anexada, use apenas o resumo dela no contexto como referencia visual do pedido.',
+      ...contextualInstructions
     ],
     allowedActionTypes: Array.from(ALLOWED_ACTIONS),
     allowedElementTypes: Array.from(ALLOWED_ELEMENT_TYPES),
+    capabilities: createAiCapabilityCatalog(),
     context: {
       activeSlideId: activeSlideId || null,
       stageSize: safeStage,
       slides: orderedSlides,
       recentActions,
+      executionPlan: summarizeExecutionPlan(executionPlan),
+      currentPlanItem: currentPlanItem || null,
+      templateReferences,
       attachmentInsights: truncateText(attachmentInsights, MAX_ATTACHMENT_INSIGHTS_LENGTH),
       attachmentCount: attachments.length
     }
@@ -1745,7 +2116,48 @@ function createAiStepPrompt({ request, slides, activeSlideId, stageSize, stepInd
   });
 }
 
-function createAiReviewPrompt({ request, slides, activeSlideId, stageSize, attachments = [], attachmentInsights = '' }) {
+function createAiExecutionPlanPrompt({
+  request,
+  slides,
+  activeSlideId,
+  stageSize,
+  attachments = [],
+  attachmentInsights = '',
+  templateReferences = null
+}) {
+  const safeStage = stageSize?.width && stageSize?.height ? stageSize : DEFAULT_STAGE_SIZE;
+  const orderedSlides = summarizeSlides(slides, activeSlideId);
+  const requestedSlideCount = extractRequestedSlideCount(request);
+  return JSON.stringify({
+    role: 'slide_builder_planner',
+    task: truncateText(request, MAX_REQUEST_LENGTH),
+    instructions: [
+      'Responda com um unico objeto JSON valido e sem markdown.',
+      'Planeje primeiro e nao retorne acoes nesta etapa.',
+      'Se o pedido for simples, isolado ou pontual, retorne {"mode":"simple","summary":"...","simpleTask":{"title":"...","goal":"...","deliverable":"..."}}.',
+      'Considere simples quando o usuario quiser apenas um elemento, uma imagem, um bloco, um ajuste pontual, um unico pedaço de conteudo ou algo para completar um slide ja existente.',
+      'Nao transforme um pedido simples em aula completa, sequencia de slides ou layout inteiro.',
+      'Se o pedido realmente exigir varios slides, retorne {"mode":"deck","summary":"...","slides":[...]} com um item por slide planejado.',
+      'Em mode deck, cada item de slides deve ter id, title, goal, layoutNotes e interactionNotes.',
+      'Pense como um construtor em etapas: primeiro separe o conteudo por slides e depois a execucao vai montar um slide por vez.',
+      'Se o pedido mencionar quantidade de slides, respeite essa quantidade no plano.',
+      'Se houver apenas um slide vazio no editor, o primeiro item do plano pode reutilizar esse slide em vez de criar outro.',
+      'Se templateReferences estiver presente, use essas referencias para inspirar a progressao narrativa, a distribuicao de tipos de slide e a complexidade de cada etapa sem copiar o conteudo literal.',
+      'Nao inclua campos desnecessarios, comentarios ou texto fora do JSON.'
+    ],
+    context: {
+      requestedSlideCount,
+      activeSlideId: activeSlideId || null,
+      stageSize: safeStage,
+      slides: orderedSlides,
+      templateReferences,
+      attachmentInsights: truncateText(attachmentInsights, MAX_ATTACHMENT_INSIGHTS_LENGTH),
+      attachmentCount: attachments.length
+    }
+  });
+}
+
+function createAiReviewPrompt({ request, slides, activeSlideId, stageSize, attachments = [], attachmentInsights = '', templateReferences = null }) {
   const safeStage = stageSize?.width && stageSize?.height ? stageSize : DEFAULT_STAGE_SIZE;
   const orderedSlides = summarizeSlides(slides, activeSlideId);
   return JSON.stringify({
@@ -1767,6 +2179,7 @@ function createAiReviewPrompt({ request, slides, activeSlideId, stageSize, attac
       'Cheque se moveElement usa a direcao correta: moveByX positivo para direita, negativo para esquerda, moveByY positivo para baixo e negativo para cima.',
       'Se a proposta disser para mover para a esquerda e o valor estiver positivo, considere isso errado. Esquerda precisa de valor negativo, como -160.',
       'Cheque se faltou imagem gerada quando uma ilustracao ajudaria claramente a explicar melhor o slide.',
+      'Se templateReferences estiver presente, cheque se a composicao final aproveitou bem a estrutura validada sem copiar o texto literal.',
       'Se ainda houver um ajuste importante, retorne um unico objeto JSON no formato {"done": false, "action": {...}, "message": "..."}',
       'Se o resultado estiver bom, retorne {"done": true, "message": "..."}',
       'Proponha no maximo uma acao corretiva.',
@@ -1776,6 +2189,7 @@ function createAiReviewPrompt({ request, slides, activeSlideId, stageSize, attac
       activeSlideId: activeSlideId || null,
       stageSize: safeStage,
       slides: orderedSlides,
+      templateReferences,
       attachmentInsights: truncateText(attachmentInsights, MAX_ATTACHMENT_INSIGHTS_LENGTH),
       attachmentCount: attachments.length
     }
@@ -1861,8 +2275,24 @@ function applyActionToPlanningState(planningState, action, index = 0) {
       break;
     }
     case 'update_slide': {
-      const targetSlide = findPlanningSlide(planningState, action.slideId);
+      let targetSlide = findPlanningSlide(planningState, action.slideId);
+      if (!targetSlide && action.slide) {
+        targetSlide = {
+          id: action.slideId || action.slide.id || createSafeId('slide', action.slide.title, index),
+          title: action.slide.title || `Slide ${planningState.slides.length + 1}`,
+          elements: [],
+          backgroundImage: action.slide.backgroundImage || null,
+          backgroundColor: action.slide.backgroundColor || '#fdfbff'
+        };
+        const afterIndex = planningState.slides.findIndex((entry) => entry.id === action.afterSlideId);
+        if (afterIndex >= 0) {
+          planningState.slides.splice(afterIndex + 1, 0, targetSlide);
+        } else {
+          planningState.slides.push(targetSlide);
+        }
+      }
       if (targetSlide && action.slide) {
+        action.slideId = targetSlide.id;
         Object.assign(targetSlide, { ...action.slide, id: targetSlide.id });
         if (action.setActive) {
           planningState.activeSlideId = targetSlide.id;
@@ -2107,6 +2537,110 @@ async function generateBackgroundMaskWithNanoBanana({ imageSettings, attachment 
   };
 }
 
+function parseNanoBananaJsonReply(text = '') {
+  const raw = String(text || '').trim();
+  if (!raw) {
+    throw new Error('A Nano Banana nao retornou texto para a comparacao.');
+  }
+  const fencedMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = (fencedMatch?.[1] || raw).trim();
+  const start = candidate.indexOf('{');
+  const end = candidate.lastIndexOf('}');
+  const jsonText = start >= 0 && end > start ? candidate.slice(start, end + 1) : candidate;
+  try {
+    return JSON.parse(jsonText);
+  } catch {
+    const matchedMatch = raw.match(/\bmatched\b\s*[:=]\s*(true|false|1|0|"true"|"false")/i);
+    const confidenceMatch = raw.match(/\bconfidence\b\s*[:=]\s*("?)(0(?:\.\d+)?|1(?:\.0+)?)\1/i);
+    const reasonMatch = raw.match(/\breason\b\s*[:=]\s*("?)([^"\n}]+)\1/i);
+    if (!matchedMatch) {
+      throw new Error('A Nano Banana nao retornou JSON valido para a comparacao.');
+    }
+    return {
+      matched: /true|1/i.test(matchedMatch[1]),
+      confidence: confidenceMatch ? Number(confidenceMatch[2]) : 0,
+      reason: reasonMatch ? reasonMatch[2].trim() : ''
+    };
+  }
+}
+
+function buildImageFingerprint(attachment) {
+  if (!attachment?.data) {
+    return '';
+  }
+  return crypto.createHash('sha256').update(String(attachment.data).trim()).digest('hex');
+}
+
+function areImageAttachmentsIdentical(referenceAttachment, submittedAttachment) {
+  if (!referenceAttachment?.data || !submittedAttachment?.data) {
+    return false;
+  }
+  return buildImageFingerprint(referenceAttachment) === buildImageFingerprint(submittedAttachment);
+}
+
+async function compareImagesWithNanoBanana({ imageSettings, referenceAttachment, submittedAttachment }) {
+  const normalizedAttachments = normalizeImageAttachments([referenceAttachment, submittedAttachment]);
+  if (normalizedAttachments.length < 2) {
+    throw new Error('Envie a imagem de referencia e a imagem do aluno para comparar.');
+  }
+  if (!imageSettings?.image_encrypted_api_key || imageSettings.image_is_enabled === false) {
+    throw new Error('Configure e ative a Nano Banana no painel admin antes de comparar imagens.');
+  }
+  const [referenceImage, submittedImage] = normalizedAttachments;
+  if (areImageAttachmentsIdentical(referenceImage, submittedImage)) {
+    return {
+      matched: true,
+      confidence: 1,
+      reason: 'As imagens sao exatamente iguais.',
+      rawText: 'LOCAL_EXACT_MATCH'
+    };
+  }
+  const body = await callGoogleGenerateContent({
+    settings: imageSettings,
+    parts: [
+      {
+        text: [
+          'Voce vai comparar duas imagens para validar uma atividade de aluno.',
+          'A primeira imagem e a REFERENCIA definida pelo criador da aula.',
+          'A segunda imagem e a RESPOSTA enviada pelo aluno.',
+          'Considere matched=true quando a segunda imagem representar o mesmo item, objeto, cena, documento, composicao, estrutura, desenho, diagrama ou conteudo visual principal da referencia, mesmo com diferencas de arquivo, resolucao, corte, compressao, iluminacao, cores, enquadramento, fundo, escala, rotacao leve, perspectiva, anotacoes pequenas ou captura por print/foto.',
+          'Considere matched=true quando as duas imagens tiverem o mesmo significado visual para fins pedagogicos, ainda que nao sejam pixel a pixel iguais.',
+          'Considere matched=false quando a resposta mostrar outro conteudo principal, outro objeto, outra cena, outro documento, estiver generica demais, ambigua demais ou sem semelhanca suficiente.',
+          'Retorne SOMENTE JSON valido no formato {"matched":boolean,"confidence":number,"reason":"texto curto"}.',
+          'confidence deve ir de 0 a 1.',
+          'reason deve ser curto, objetivo e em portugues.'
+        ].join(' ')
+      },
+      {
+        text: 'Imagem 1: referencia.'
+      },
+      {
+        inline_data: {
+          mime_type: referenceImage.mimeType,
+          data: referenceImage.data
+        }
+      },
+      {
+        text: 'Imagem 2: resposta do aluno.'
+      },
+      {
+        inline_data: {
+          mime_type: submittedImage.mimeType,
+          data: submittedImage.data
+        }
+      }
+    ]
+  });
+  const textReply = extractGoogleText(body);
+  const parsed = parseNanoBananaJsonReply(textReply);
+  return {
+    matched: Boolean(parsed?.matched),
+    confidence: Math.max(0, Math.min(1, Number(parsed?.confidence) || 0)),
+    reason: truncateText(String(parsed?.reason || '').trim(), 240),
+    rawText: textReply
+  };
+}
+
 async function describeAttachmentsWithNanoBanana({ imageSettings, attachments = [] }) {
   const normalizedAttachments = normalizeImageAttachments(attachments);
   if (!normalizedAttachments.length || !imageSettings?.image_encrypted_api_key || imageSettings.image_is_enabled === false) {
@@ -2295,6 +2829,152 @@ async function parseStepResponse(settingsRow, messages, rawContent) {
   }
 }
 
+function parsePlanPayload(rawContent) {
+  const content = sanitizeJsonCandidate(rawContent);
+  const payload = JSON.parse(content);
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('A IA nao retornou um objeto JSON valido para o planejamento.');
+  }
+  return payload;
+}
+
+async function parsePlanResponse(settingsRow, messages, rawContent) {
+  try {
+    return parsePlanPayload(rawContent);
+  } catch (error) {
+    const repairedContent = await callCompatibleChatApi({
+      settings: settingsRow,
+      messages: [
+        ...messages,
+        {
+          role: 'assistant',
+          content: truncateText(rawContent, MAX_REPAIR_ECHO_CHARS)
+        },
+        {
+          role: 'user',
+          content:
+            'Sua resposta veio em formato invalido. Reescreva como um unico objeto JSON valido no formato {"mode":"simple",...} ou {"mode":"deck",...} sem markdown. Nao use texto antes ou depois do JSON.'
+        }
+      ],
+      temperature: 0
+    });
+    return parsePlanPayload(repairedContent);
+  }
+}
+
+function normalizeExecutionPlan(planPayload, request, existingSlides = [], activeSlideId = null) {
+  const requestedSlideCount = extractRequestedSlideCount(request);
+  const normalizedSummary = truncateText(planPayload?.summary || request || '', 280);
+  const initialTargetSlideId = activeSlideId || existingSlides[0]?.id || null;
+  const shouldPreferSimple =
+    requestExplicitlyForbidsNewSlides(request) ||
+    !requestedSlideCount &&
+    !requestSuggestsStoryFlow(request) &&
+    String(planPayload?.mode || '').trim().toLowerCase() !== 'deck';
+
+  if (shouldPreferSimple) {
+    const simpleTask = planPayload?.simpleTask && typeof planPayload.simpleTask === 'object' ? planPayload.simpleTask : {};
+    return {
+      mode: 'simple',
+      summary: normalizedSummary,
+      simpleTask: {
+        id: 'simple-task',
+        title: truncateText(simpleTask.title || 'Pedido simples', 80),
+        goal: truncateText(simpleTask.goal || request || 'Entregar somente o que foi pedido.', 220),
+        deliverable: truncateText(simpleTask.deliverable || 'single_change', 80),
+        targetSlideId: typeof simpleTask.targetSlideId === 'string' && simpleTask.targetSlideId.trim()
+          ? simpleTask.targetSlideId.trim()
+          : initialTargetSlideId
+      }
+    };
+  }
+
+  const rawSlides = Array.isArray(planPayload?.slides) ? planPayload.slides : [];
+  const fallbackCount = requestedSlideCount || Math.max(1, Math.min(MAX_PLAN_SLIDES, rawSlides.length || 1));
+  const normalizedSlides = rawSlides
+    .slice(0, requestedSlideCount || MAX_PLAN_SLIDES)
+    .filter((entry) => entry && typeof entry === 'object')
+    .map((entry, index) => {
+      const title = truncateText(entry.title || getDefaultRequestedSlideTitle(index), 80) || `Slide ${index + 1}`;
+      return {
+        id: String(entry.id || createSafeId('slide', title, index)).trim() || createSafeId('slide', title, index),
+        title,
+        goal: truncateText(entry.goal || entry.objective || request || `Desenvolver o slide ${index + 1}.`, 220),
+        layoutNotes: truncateText(entry.layoutNotes || entry.layout || '', 220),
+        interactionNotes: truncateText(entry.interactionNotes || entry.interaction || '', 220),
+        order: index + 1,
+        targetSlideId:
+          typeof entry.targetSlideId === 'string' && entry.targetSlideId.trim()
+            ? entry.targetSlideId.trim()
+            : index === 0 && isBlankInitialSlide(existingSlides)
+              ? initialTargetSlideId
+              : null
+      };
+    });
+
+  while (normalizedSlides.length < fallbackCount) {
+    const index = normalizedSlides.length;
+    const title = getDefaultRequestedSlideTitle(index);
+    normalizedSlides.push({
+      id: createSafeId('slide', title, index),
+      title,
+      goal: `Desenvolver o slide ${index + 1} com base no pedido do usuario.`,
+      layoutNotes: '',
+      interactionNotes: '',
+      order: index + 1,
+      targetSlideId: index === 0 && isBlankInitialSlide(existingSlides) ? initialTargetSlideId : null
+    });
+  }
+
+  return {
+    mode: 'deck',
+    summary: normalizedSummary,
+    slides: normalizedSlides.slice(0, MAX_PLAN_SLIDES)
+  };
+}
+
+async function proposeSlideExecutionPlan({
+  settingsRow,
+  request,
+  slides,
+  activeSlideId,
+  stageSize,
+  attachments = []
+}) {
+  const normalizedAttachments = normalizeImageAttachments(attachments);
+  const attachmentInsights = await describeAttachmentsWithNanoBanana({
+    imageSettings: settingsRow,
+    attachments: normalizedAttachments
+  });
+  const templateReferences = await buildTemplateReferenceContext({ request });
+  const baseMessages = [
+    {
+      role: 'system',
+      content: settingsRow.system_prompt || DEFAULT_SYSTEM_PROMPT
+    },
+    {
+      role: 'user',
+      content: createUserMessageContent(
+        createAiExecutionPlanPrompt({
+          request,
+          slides,
+          activeSlideId,
+          stageSize,
+          attachments: normalizedAttachments,
+          attachmentInsights,
+          templateReferences
+        })
+      )
+    }
+  ];
+  const rawContent = await callCompatibleChatApi({
+    settings: settingsRow,
+    messages: baseMessages
+  });
+  const parsed = await parsePlanResponse(settingsRow, baseMessages, rawContent);
+  return normalizeExecutionPlan(parsed, request, slides, activeSlideId);
+}
+
 async function collectStepwiseActions({
   settingsRow,
   request,
@@ -2302,7 +2982,10 @@ async function collectStepwiseActions({
   activeSlideId,
   stageSize,
   attachments = [],
-  attachmentInsights = ''
+  attachmentInsights = '',
+  executionPlan = null,
+  currentPlanItem = null,
+  templateReferences = null
 }) {
   const planningState = {
     slides: clonePlanningSlides(slides),
@@ -2320,7 +3003,10 @@ async function collectStepwiseActions({
       stepIndex,
       recentActions: collectedActions.slice(-8),
       attachments,
-      attachmentInsights
+      attachmentInsights,
+      executionPlan,
+      currentPlanItem,
+      templateReferences
     });
 
     if (stepResult.done) {
@@ -2346,7 +3032,8 @@ async function collectStepwiseActions({
     reviewMode: true,
     recentActions: collectedActions.slice(-8),
     attachments,
-    attachmentInsights
+    attachmentInsights,
+    templateReferences
   });
 
   if (!reviewResult.done && reviewResult.action) {
@@ -2356,11 +3043,26 @@ async function collectStepwiseActions({
   return collectedActions;
 }
 
-async function proposeSlideActions({ settingsRow, request, slides, activeSlideId, stageSize, attachments = [] }) {
+async function proposeSlideActions({
+  settingsRow,
+  request,
+  slides,
+  activeSlideId,
+  stageSize,
+  attachments = [],
+  executionPlan = null,
+  currentPlanItem = null
+}) {
   const normalizedAttachments = normalizeImageAttachments(attachments);
+  const disableStoryExpansion = Boolean(executionPlan?.mode === 'deck' && currentPlanItem);
   const attachmentInsights = await describeAttachmentsWithNanoBanana({
     imageSettings: settingsRow,
     attachments: normalizedAttachments
+  });
+  const templateReferences = await buildTemplateReferenceContext({
+    request,
+    executionPlan,
+    currentPlanItem
   });
   const baseMessages = [
     {
@@ -2376,7 +3078,10 @@ async function proposeSlideActions({ settingsRow, request, slides, activeSlideId
           activeSlideId,
           stageSize,
           attachments: normalizedAttachments,
-          attachmentInsights
+          attachmentInsights,
+          templateReferences,
+          executionPlan,
+          currentPlanItem
         })
       )
     }
@@ -2387,9 +3092,12 @@ async function proposeSlideActions({ settingsRow, request, slides, activeSlideId
     messages: baseMessages
   });
   const firstParsed = await parseActionsFromModelContent(settingsRow, baseMessages, firstContent);
-  let actions = postProcessActions(normalizeActionList(firstParsed), request, slides);
+  let actions = postProcessActions(normalizeActionList(firstParsed), request, slides, {
+    disableStoryExpansion,
+    currentPlanItem
+  });
 
-  if (needsRetry(actions, request, slides)) {
+  if (needsRetry(actions, request, slides, { disableStoryExpansion })) {
     const retryContent = await callCompatibleChatApi({
       settings: settingsRow,
       messages: [
@@ -2406,7 +3114,10 @@ async function proposeSlideActions({ settingsRow, request, slides, activeSlideId
       ]
     });
     const retryParsed = await parseActionsFromModelContent(settingsRow, baseMessages, retryContent);
-    actions = postProcessActions(normalizeActionList(retryParsed), request, slides);
+    actions = postProcessActions(normalizeActionList(retryParsed), request, slides, {
+      disableStoryExpansion,
+      currentPlanItem
+    });
   }
 
   return enrichActionsWithGeneratedImages(actions, settingsRow, normalizedAttachments, {
@@ -2435,7 +3146,14 @@ async function proposeSlideActionsSafely(args) {
       activeSlideId: args?.activeSlideId || null,
       stageSize: args?.stageSize || null,
       attachments: normalizedAttachments,
-      attachmentInsights
+      attachmentInsights,
+      executionPlan: args?.executionPlan || null,
+      currentPlanItem: args?.currentPlanItem || null,
+      templateReferences: await buildTemplateReferenceContext({
+        request: args?.request,
+        executionPlan: args?.executionPlan || null,
+        currentPlanItem: args?.currentPlanItem || null
+      })
     });
     if (!fallbackActions.length) {
       throw error;
@@ -2454,16 +3172,27 @@ async function proposeNextSlideAction({
   reviewMode = false,
   recentActions = [],
   attachments = [],
-  attachmentInsights = ''
+  attachmentInsights = '',
+  templateReferences = null,
+  executionPlan = null,
+  currentPlanItem = null
 }) {
   const normalizedAttachments = normalizeImageAttachments(attachments);
   const resolvedAttachmentInsights =
     typeof attachmentInsights === 'string' && attachmentInsights.trim()
       ? attachmentInsights.trim()
       : await describeAttachmentsWithNanoBanana({
-          imageSettings: settingsRow,
-          attachments: normalizedAttachments
-        });
+        imageSettings: settingsRow,
+        attachments: normalizedAttachments
+      });
+  const resolvedTemplateReferences =
+    Array.isArray(templateReferences) && templateReferences.length
+      ? templateReferences
+      : await buildTemplateReferenceContext({
+        request,
+        executionPlan,
+        currentPlanItem
+      });
   const normalizedRecentActions = normalizeRecentActionPayload(recentActions);
   const baseMessages = [
     {
@@ -2475,23 +3204,27 @@ async function proposeNextSlideAction({
       content: createUserMessageContent(
         reviewMode
           ? createAiReviewPrompt({
-              request,
-              slides,
-              activeSlideId,
-              stageSize,
-              attachments: normalizedAttachments,
-              attachmentInsights: resolvedAttachmentInsights
-            })
+            request,
+            slides,
+            activeSlideId,
+            stageSize,
+            attachments: normalizedAttachments,
+            attachmentInsights: resolvedAttachmentInsights,
+            templateReferences: resolvedTemplateReferences
+          })
           : createAiStepPrompt({
-              request,
-              slides,
-              activeSlideId,
-              stageSize,
-              stepIndex,
-              recentActions: normalizedRecentActions,
-              attachments: normalizedAttachments,
-              attachmentInsights: resolvedAttachmentInsights
-            })
+            request,
+            slides,
+            activeSlideId,
+            stageSize,
+            stepIndex,
+            recentActions: normalizedRecentActions,
+            attachments: normalizedAttachments,
+            attachmentInsights: resolvedAttachmentInsights,
+            templateReferences: resolvedTemplateReferences,
+            executionPlan,
+            currentPlanItem
+          })
       )
     }
   ];
@@ -2580,8 +3313,10 @@ module.exports = {
   buildPublicAiSettings,
   normalizeActionList,
   proposeNextSlideAction,
+  proposeSlideExecutionPlan,
   proposeSlideActions: proposeSlideActionsSafely,
   generateBackgroundMaskWithNanoBanana,
+  compareImagesWithNanoBanana,
   testAiConnection,
   __test: {
     extractJsonContent,
@@ -2589,11 +3324,17 @@ module.exports = {
     sanitizeJsonCandidate,
     tryParseJsonCandidate,
     extractJsonArraySubstring,
+    parsePlanPayload,
     parseStepPayload,
     summarizeSlides,
     truncateText,
     applyActionToPlanningState,
     isRecoverableJsonError,
-    extractMaskColor
+    requestSuggestsStoryFlow,
+    requestExplicitlyForbidsNewSlides,
+    postProcessActions,
+    extractMaskColor,
+    parseNanoBananaJsonReply,
+    areImageAttachmentsIdentical
   }
 };

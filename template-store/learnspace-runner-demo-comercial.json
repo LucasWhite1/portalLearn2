@@ -6,8 +6,7 @@
   "store": {
     "category": "Game demo",
     "badge": "Vendas",
-    "summary": "Jogo em 3 fases estilo runner para apresentar o sistema com pontos, deteccao, drag and drop, botoes e CTA final.",
-    "accentColor": "#ff7c66"
+    "summary": "Jogo em 3 fases estilo runner para apresentar o sistema com pontos, deteccao, drag and drop, botoes e CTA final."
   },
   "template": {
     "title": "LearnSpace Runner - demo comercial",

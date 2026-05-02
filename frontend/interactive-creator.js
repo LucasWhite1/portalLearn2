@@ -1,58 +1,66 @@
-const resolveApiBase = () => {
-  if (window.__API_BASE__) {
-    return window.__API_BASE__;
-  }
-  if (window.location.protocol === 'file:') {
-    return 'http://localhost:4000';
-  }
-  if (['localhost', '127.0.0.1'].includes(window.location.hostname) && window.location.port !== '4000') {
-    return `${window.location.protocol}//${window.location.hostname}:4000`;
-  }
-  return window.location.origin;
-};
+import {
+  API_BASE,
+  STORAGE_KEY,
+  USER_ROLE_KEY,
+  AI_PROPOSAL_HISTORY_KEY,
+  BUILDER_DRAFT_STORAGE_KEY,
+  DEFAULT_STAGE_SIZE,
+  getToken
+} from './modules/constants.js';
+import { authorizedFetch, handleLogout } from './modules/api.js';
+import {
+  normalizeTemplateStageSize as normalizeTemplateStageSizeModule,
+  normalizeTemplateModuleSettings as normalizeTemplateModuleSettingsModule,
+  normalizeSlideBackgroundFill as normalizeSlideBackgroundFillModule
+} from './modules/normalize.js';
+import {
+  deepClone,
+  escapeHtml,
+  escapeAttribute,
+  truncateText,
+  createSlug,
+  isTypingTarget,
+  renderPlainTextHtml,
+  getYouTubeEmbedUrl
+} from './modules/utils.js';
 
-const API_BASE = resolveApiBase();
 const backgroundRemovalModulePromise = import('./image-background-removal.js');
 const eraserUtilsPromise = import('./eraser-utils.js');
 
-const STORAGE_KEY = 'curso-platform-token';
-const USER_ROLE_KEY = 'curso-platform-role';
-const AI_PROPOSAL_HISTORY_KEY = 'curso-platform-ai-proposal-history';
-
-const DEFAULT_STAGE_SIZE = { width: 1280, height: 720 };
-
-const getToken = () => localStorage.getItem(STORAGE_KEY);
-
-const authorizedFetch = async (path, options = {}) => {
-  const token = getToken();
-  if (!token) {
-    throw new Error('Sem token válido');
-  }
-  const headers = {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${token}`,
-    ...(options.headers || {})
-  };
-  const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
-  if (response.status === 401) {
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem(USER_ROLE_KEY);
-    window.location.href = 'login.html';
-    throw new Error('Sessão expirada');
-  }
-  return response;
-};
-
-const handleLogout = async () => {
+const normalizeTemplateStageSize = (stageSize) =>
+  normalizeTemplateStageSizeModule(stageSize, DEFAULT_STAGE_SIZE);
+const normalizeTemplateModuleSettings = (moduleSettings) =>
+  normalizeTemplateModuleSettingsModule(moduleSettings);
+const normalizeSlideBackgroundFill = (slide = {}) =>
+  normalizeSlideBackgroundFillModule(slide);
+const getCurrentUserData = () => {
   try {
-    await authorizedFetch('/api/auth/logout', { method: 'POST' });
+    return JSON.parse(localStorage.getItem('curso-platform-user') || '{}');
   } catch (error) {
-    console.warn('Logout falhou', error);
-  } finally {
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem(USER_ROLE_KEY);
-    window.location.href = 'login.html';
+    return {};
   }
+};
+const saveCurrentUserData = (nextData) => {
+  localStorage.setItem('curso-platform-user', JSON.stringify({
+    ...getCurrentUserData(),
+    ...nextData
+  }));
+};
+const formatCreditNumber = (value) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return '0';
+  return numeric.toLocaleString('pt-BR', {
+    minimumFractionDigits: numeric % 1 === 0 ? 0 : 1,
+    maximumFractionDigits: 2
+  });
+};
+const formatStorageAmount = (bytes) => {
+  const numeric = Number(bytes);
+  if (!Number.isFinite(numeric) || numeric <= 0) return '0 MB';
+  if (numeric >= 1024 * 1024 * 1024) {
+    return `${(numeric / (1024 * 1024 * 1024)).toLocaleString('pt-BR', { maximumFractionDigits: 2 })} GB`;
+  }
+  return `${(numeric / (1024 * 1024)).toLocaleString('pt-BR', { maximumFractionDigits: 2 })} MB`;
 };
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
@@ -68,7 +76,8 @@ const builderState = {
   stageSize: { width: 0, height: 0 },
   moduleSettings: {
     lockNextModuleUntilCompleted: false,
-    isPublic: false
+    isPublic: false,
+    coverImage: ''
   }
 };
 
@@ -83,6 +92,13 @@ let previewStageBtn;
 let moduleCourseSelect;
 let moduleTitleInput;
 let moduleDescriptionInput;
+let moduleCoverModeSelect;
+let moduleCoverUrlInput;
+let applyModuleCoverBtn;
+let clearModuleCoverBtn;
+let moduleCoverPreview;
+let moduleCoverPreviewTitle;
+let moduleCoverPreviewMeta;
 let moduleLockNextToggle;
 let modulePublicToggle;
 let modulePublicLinkInput;
@@ -106,6 +122,7 @@ let slideBgUploadBtn;
 let slideBgStatus;
 let backgroundEditorCard;
 let backgroundMediaTypeSelect;
+let backgroundBatchToggle;
 let backgroundMediaUrlInput;
 let backgroundMediaLocalBtn;
 let backgroundMediaApplyBtn;
@@ -118,17 +135,24 @@ let stageBgColorInput;
 let slideRequireQuizToggle;
 let selectedElementId = null;
 let lastPublicModuleLink = null;
+let draggingSlideId = null;
+let slideDropTargetId = null;
+let slideDropPlacement = 'after';
+let suppressSlideChipClick = false;
 let selectedElementTypeLabel;
 let elementWidthInput;
 let elementHeightInput;
 let elementRotationInput;
 let elementLayerInput;
+let elementOpacityInput;
+let elementOpacityValue;
 let elementTextColorInput;
 let elementFontSizeInput;
 let elementFontFamilySelect;
 let elementFontWeightSelect;
 let elementBgColorInput;
 let elementStudentDragToggle;
+let elementInitiallyHiddenToggle;
 let removeImageBackgroundBtn;
 let elementAnimationTypeSelect;
 let elementAnimationDurationInput;
@@ -198,6 +222,9 @@ let imageElementRotationInput;
 let imageElementObjectFitSelect;
 let imageElementStudentDragToggle;
 let imageReplaceSourceBtn;
+let imageSourceModeSelect;
+let imageSourceUrlInput;
+let imageApplySourceBtn;
 let quizQuestionInput;
 let quizOptionsInput;
 let quizCorrectAnswerSelect;
@@ -214,10 +241,36 @@ let quizLockOnWrongToggle;
 let floatingButtonEditorCard;
 let floatingEditorBadge;
 let floatingEditorTitle;
+let floatingButtonLabelInput;
+let floatingInputPlaceholderInput;
+let floatingInputSubmitLabelInput;
+let floatingInputCompareTextInput;
+let floatingInputCompareCaseToggle;
+let floatingInputCompareImageToggle;
+let floatingInputCompareImageUrlInput;
+let floatingInputCompareImageFileInput;
+let floatingInputCompareImageClearBtn;
+let floatingInputCompareImagePreview;
+let floatingInputSuccessInput;
+let floatingInputErrorInput;
+let floatingInputAllowImageToggle;
+let floatingInputAllowAudioToggle;
+let floatingInputBackgroundColorInput;
+let floatingInputLabelColorInput;
+let floatingInputTextColorInput;
+let floatingInputButtonBackgroundColorInput;
+let floatingInputButtonTextColorInput;
+let floatingTriggerTimeInput;
+let floatingTriggerList;
+let floatingAddTriggerBtn;
+let floatingDuplicateTriggerBtn;
+let floatingRemoveTriggerBtn;
+let floatingActionTypeLabel;
 let floatingActionTypeSelect;
 let floatingTargetSlideSelect;
 let floatingTargetElementSelect;
 let floatingPickTargetElementBtn;
+let builderProfessorCreditsStatus;
 let floatingRequireAllToggle;
 let floatingRuleGroupInput;
 let floatingActionTextLabel;
@@ -263,16 +316,99 @@ let floatingQuizButtonBackgroundColorInput;
 let floatingQuizPointsInput;
 let floatingQuizLockOnWrongToggle;
 let videoEditorCard;
+let videoTriggerList;
+let videoAddTriggerBtn;
+let videoDuplicateTriggerBtn;
+let videoRemoveTriggerBtn;
 let videoTriggerTimeInput;
 let videoTriggerActionSelect;
 let videoTriggerSeekTimeInput;
 let videoTriggerTargetElementSelect;
+let videoTriggerTargetSlideSelect;
+let videoTriggerUrlInput;
+let videoTriggerActionTextLabel;
+let videoTriggerActionTextInput;
+let videoTriggerReplaceModeSelect;
+let videoTriggerReplaceCounterStartInput;
+let videoTriggerReplaceCounterStepInput;
+let videoTriggerAudioVisibleToggle;
+let videoTriggerAudioLoopToggle;
+let videoTriggerTextColorInput;
+let videoTriggerTextBgColorInput;
+let videoTriggerTextFontSizeInput;
+let videoTriggerTextFontFamilySelect;
+let videoTriggerTextFontWeightSelect;
+let videoTriggerTextAlignSelect;
+let videoTriggerTextBackgroundToggle;
+let videoTriggerTextBorderToggle;
+let videoTriggerInsertXInput;
+let videoTriggerInsertYInput;
+let videoTriggerInsertWidthInput;
+let videoTriggerInsertHeightInput;
+let videoPickPlacementBtn;
+let videoPlacementHint;
+let videoTriggerMoveXInput;
+let videoTriggerMoveYInput;
+let videoTriggerMoveDurationInput;
+let videoTriggerQuizQuestionInput;
+let videoTriggerQuizOptionsInput;
+let videoTriggerQuizCorrectSelect;
+let videoTriggerQuizSuccessInput;
+let videoTriggerQuizErrorInput;
+let videoTriggerQuizActionLabelInput;
+let videoTriggerQuizBackgroundColorInput;
+let videoTriggerQuizQuestionColorInput;
+let videoTriggerQuizOptionBackgroundColorInput;
+let videoTriggerQuizOptionTextColorInput;
+let videoTriggerQuizButtonBackgroundColorInput;
+let videoTriggerQuizPointsInput;
+let videoTriggerQuizLockOnWrongToggle;
+let videoTriggerQuizPlaySourceVideoToggle;
+let videoCaptionEnabledToggle;
+let videoCaptionPositionSelect;
+let videoCaptionWidthInput;
+let videoCaptionFontSizeInput;
+let videoCaptionTextColorInput;
+let videoCaptionBackgroundColorInput;
+let videoCaptionAccentColorInput;
+let videoCaptionUppercaseToggle;
+let videoCaptionSegmentList;
+let videoCaptionSegmentEmpty;
+let videoCaptionSegmentStartInput;
+let videoCaptionSegmentEndInput;
+let videoCaptionSegmentTextInput;
+let videoCaptionSegmentAddBtn;
+let videoCaptionSegmentRemoveBtn;
+let videoGenerateCaptionsBtn;
+let videoExtractAudioBtn;
+let videoSourceModeSelect;
+let videoSourceUrlInput;
+let videoApplySourceBtn;
 let audioElementWidthInput;
 let audioElementHeightInput;
 let audioElementRotationInput;
 let audioElementVisibleToggle;
 let audioElementLoopToggle;
+let audioCaptionEnabledToggle;
+let audioCaptionPositionSelect;
+let audioCaptionWidthInput;
+let audioCaptionFontSizeInput;
+let audioCaptionTextColorInput;
+let audioCaptionBackgroundColorInput;
+let audioCaptionAccentColorInput;
+let audioCaptionUppercaseToggle;
+let audioCaptionSegmentList;
+let audioCaptionSegmentEmpty;
+let audioCaptionSegmentStartInput;
+let audioCaptionSegmentEndInput;
+let audioCaptionSegmentTextInput;
+let audioCaptionSegmentAddBtn;
+let audioCaptionSegmentRemoveBtn;
+let audioGenerateCaptionsBtn;
 let audioReplaceSourceBtn;
+let audioSourceModeSelect;
+let audioSourceUrlInput;
+let audioApplySourceBtn;
 let eraserEditorCard;
 let eraserModeSelect;
 let eraserShapeSelect;
@@ -281,6 +417,12 @@ let eraserSizeNumberInput;
 let eraserClosePathBtn;
 let eraserClearBtn;
 let eraserApplyBtn;
+let penEditorCard;
+let penColorInput;
+let penSizeInput;
+let penSizeNumberInput;
+let penStartDrawingBtn;
+let penClearPreviewBtn;
 let addMotionFrameBtn;
 let updateMotionFrameBtn;
 let removeMotionFrameBtn;
@@ -319,6 +461,7 @@ const STAGE_EDITOR_DEFAULT_POSITIONS = {
   video: { x: 88, y: 142 },
   background: { x: 112, y: 136 },
   eraser: { x: 68, y: 146 },
+  pen: { x: 92, y: 152 },
   animation: { x: 80, y: 146 }
 };
 const stageEditorPositions = JSON.parse(JSON.stringify(STAGE_EDITOR_DEFAULT_POSITIONS));
@@ -330,8 +473,15 @@ let editingModuleCourseId = null;
 let isPickingFloatingInsertPosition = false;
 let isPickingFloatingTargetElement = false;
 let currentStageEditor = 'none';
+let activeElementMenuTriggerId = null;
+let elementMenuHideTimer = null;
+let selectedFloatingTriggerId = null;
+let selectedVideoTriggerId = null;
+let selectedVideoCaptionSegmentIndex = 0;
+let selectedAudioCaptionSegmentIndex = 0;
 
-const FLOATING_INSERT_ACTIONS = ['addText', 'addImage', 'addVideo', 'addQuiz'];
+const FLOATING_INSERT_ACTIONS = ['addText', 'addImage', 'addAudio', 'addVideo', 'addQuiz'];
+const MAX_ELEMENT_TRIGGER_COUNT = 40;
 const STUDENT_DRAGGABLE_TYPES = new Set(['text', 'block', 'image']);
 const REPLACEABLE_TEXT_TYPES = new Set(['text', 'block', 'floatingButton']);
 const DETECTOR_ACCEPT_ANY = 'any';
@@ -347,6 +497,12 @@ const historyState = {
   debounceTimer: null
 };
 
+const autosaveState = {
+  localTimer: null,
+  remoteTimer: null
+};
+let draftRestoreCompleted = false;
+
 const aiAssistantState = {
   settings: null,
   pendingActions: [],
@@ -358,20 +514,28 @@ const aiAssistantState = {
   stepIndex: 0,
   feedbackEntries: [],
   recentActions: [],
+  generatedActions: [],
   attachments: [],
   proposalHistory: [],
   lastPrompt: '',
-  debugInfo: null
+  debugInfo: null,
+  executionPlan: null
 };
 
 const previewState = {
   active: false,
   slides: [],
   activeSlideId: null,
+  slideEnteredAt: 0,
+  activeTimedSlideId: null,
+  timedSlideTriggerTimers: [],
+  timedSlideTriggers: new Map(),
   clickedRuleButtons: new Map(),
   triggeredDetectors: new Set(),
   replaceCounters: new Map(),
-  hiddenElements: new Map()
+  hiddenElements: new Map(),
+  mediaState: new Map(),
+  timedVideoTriggers: new Map()
 };
 const previewAnimationState = new Map();
 let lastPreviewAnimationSlideId = null;
@@ -385,8 +549,10 @@ const MOTION_ANIMATION_TYPE = 'motion-recording';
 const DEFAULT_MOTION_FRAME = Object.freeze({ opacity: 1 });
 let selectedMotionFrameIndex = -1;
 
-const ERASER_SUPPORTED_TYPES = new Set(['image', 'block']);
+const ERASER_SUPPORTED_TYPES = new Set(['image', 'block', 'pen']);
 const ERASER_BRUSH_SHAPES = new Set(['circle', 'square', 'diamond']);
+const PEN_MIN_BRUSH_SIZE = 2;
+const PEN_MAX_BRUSH_SIZE = 48;
 const eraserState = {
   active: false,
   loading: false,
@@ -401,6 +567,14 @@ const eraserState = {
   lassoPoints: [],
   hoverPoint: null
 };
+const penState = {
+  active: false,
+  drawing: false,
+  overlay: null,
+  canvas: null,
+  points: [],
+  hoverPoint: null
+};
 
 const AI_REFERENCE_PROMPT =
   'Use a imagem de referência como inspiração e crie um slide com layout profissional: alinhe os blocos em grade, mantenha espaçamentos consistentes, deixe o título bem hierarquizado, alinhe os textos com margens internas equilibradas, use uma imagem ilustrativa por URL e adicione um botão interativo elegante. Quando fizer sentido, configure blocos com shape e gradiente, e use animacao em image ou block com fade, pulse, float, zoom ou motion-recording com quadros para criar movimentacao guiada.';
@@ -412,48 +586,496 @@ const createId = (prefix = 'id') => `${prefix}-${Math.random().toString(36).slic
 
 const getPreviewActiveSlide = () => previewState.slides.find((slide) => slide.id === previewState.activeSlideId) || null;
 
+const createDefaultCaptionStyle = (type = 'video') => ({
+  position: 'bottom',
+  fontSize: type === 'video' ? 28 : 20,
+  textColor: '#ffffff',
+  backgroundColor: '#0f172acc',
+  accentColor: type === 'video' ? '#facc15' : '#38bdf8',
+  uppercase: false
+});
+
+const normalizeCaptionEntries = (entries = []) =>
+  (Array.isArray(entries) ? entries : [])
+    .map((entry) => ({
+      start: Math.max(0, Number(entry?.start) || 0),
+      end: Math.max(0, Number(entry?.end) || 0),
+      text: typeof entry?.text === 'string' ? entry.text.trim() : ''
+    }))
+    .filter((entry) => entry.text && entry.end > entry.start);
+
+const normalizeCaptionStyle = (style = {}, type = 'video') => {
+  const defaults = createDefaultCaptionStyle(type);
+  const position = ['top', 'center', 'bottom'].includes(String(style?.position || ''))
+    ? String(style.position)
+    : defaults.position;
+  const stageX = Number(style?.stageX);
+  const stageY = Number(style?.stageY);
+  return {
+    position,
+    fontSize: Math.max(12, Number(style?.fontSize) || defaults.fontSize),
+    textColor: typeof style?.textColor === 'string' && style.textColor ? style.textColor : defaults.textColor,
+    backgroundColor:
+      typeof style?.backgroundColor === 'string' && style.backgroundColor ? style.backgroundColor : defaults.backgroundColor,
+    accentColor: typeof style?.accentColor === 'string' && style.accentColor ? style.accentColor : defaults.accentColor,
+    uppercase: Boolean(style?.uppercase),
+    width: style?.width !== undefined && style?.width !== '' && style?.width !== null ? Math.max(40, Number(style.width) || 40) : null,
+    freePosition: Boolean(style?.freePosition),
+    stageX: Number.isFinite(stageX) ? stageX : null,
+    stageY: Number.isFinite(stageY) ? stageY : null
+  };
+};
+
+const normalizeMediaCaptionConfig = (element, type = 'video') => {
+  if (!element || !['audio', 'video'].includes(element.type)) {
+    return;
+  }
+  element.captions = normalizeCaptionEntries(element.captions);
+  element.captionsEnabled = typeof element.captionsEnabled === 'boolean' ? element.captionsEnabled : false;
+  element.captionStyle = normalizeCaptionStyle(element.captionStyle, type);
+  element.transcriptText = typeof element.transcriptText === 'string' ? element.transcriptText : '';
+  element.captionsGeneratedAt = typeof element.captionsGeneratedAt === 'string' ? element.captionsGeneratedAt : '';
+};
+
+const sortCaptionEntries = (entries = []) =>
+  normalizeCaptionEntries(entries).sort((a, b) => {
+    const startDiff = (Number(a?.start) || 0) - (Number(b?.start) || 0);
+    if (Math.abs(startDiff) > 0.0001) return startDiff;
+    return (Number(a?.end) || 0) - (Number(b?.end) || 0);
+  });
+
+const getCaptionSegmentEditorState = (type) =>
+  type === 'video'
+    ? {
+      listNode: videoCaptionSegmentList,
+      emptyNode: videoCaptionSegmentEmpty,
+      startInput: videoCaptionSegmentStartInput,
+      endInput: videoCaptionSegmentEndInput,
+      textInput: videoCaptionSegmentTextInput,
+      removeBtn: videoCaptionSegmentRemoveBtn,
+      getIndex: () => selectedVideoCaptionSegmentIndex,
+      setIndex: (value) => {
+        selectedVideoCaptionSegmentIndex = value;
+      }
+    }
+    : {
+      listNode: audioCaptionSegmentList,
+      emptyNode: audioCaptionSegmentEmpty,
+      startInput: audioCaptionSegmentStartInput,
+      endInput: audioCaptionSegmentEndInput,
+      textInput: audioCaptionSegmentTextInput,
+      removeBtn: audioCaptionSegmentRemoveBtn,
+      getIndex: () => selectedAudioCaptionSegmentIndex,
+      setIndex: (value) => {
+        selectedAudioCaptionSegmentIndex = value;
+      }
+    };
+
+const getValidCaptionSegmentIndex = (type, element) => {
+  const state = getCaptionSegmentEditorState(type);
+  const total = Array.isArray(element?.captions) ? element.captions.length : 0;
+  if (!total) {
+    state.setIndex(0);
+    return -1;
+  }
+  const nextIndex = clamp(Number(state.getIndex()) || 0, 0, total - 1);
+  state.setIndex(nextIndex);
+  return nextIndex;
+};
+
+const renderCaptionSegmentEditor = (type, element) => {
+  const state = getCaptionSegmentEditorState(type);
+  if (!state.listNode || !state.startInput || !state.endInput || !state.textInput || !state.emptyNode) {
+    return;
+  }
+  const entries = Array.isArray(element?.captions) ? element.captions : [];
+  const selectedIndex = getValidCaptionSegmentIndex(type, element);
+  state.listNode.innerHTML = entries
+    .map((entry, index) => {
+      const isActive = index === selectedIndex;
+      const title = truncateText(entry.text || '', 54) || `Trecho ${index + 1}`;
+      return `
+        <button type="button" class="trigger-chip${isActive ? ' active' : ''}" data-caption-segment-type="${type}" data-caption-segment-index="${index}">
+          <span>
+            <span class="trigger-chip-title">${escapeHtml(title)}</span>
+            <small class="trigger-chip-meta">${escapeHtml(`${Number(entry.start || 0).toFixed(1)}s ate ${Number(entry.end || 0).toFixed(1)}s`)}</small>
+          </span>
+        </button>
+      `;
+    })
+    .join('');
+  state.emptyNode.classList.toggle('hidden', entries.length > 0);
+  state.removeBtn && (state.removeBtn.disabled = entries.length === 0 || selectedIndex < 0);
+  const selectedEntry = selectedIndex >= 0 ? entries[selectedIndex] : null;
+  state.startInput.disabled = !selectedEntry;
+  state.endInput.disabled = !selectedEntry;
+  state.textInput.disabled = !selectedEntry;
+  state.startInput.value = selectedEntry ? String(Number(selectedEntry.start || 0).toFixed(1)) : '0';
+  state.endInput.value = selectedEntry ? String(Number(selectedEntry.end || 0).toFixed(1)) : '1';
+  syncTextInputValue(state.textInput, selectedEntry?.text || '');
+};
+
+const applyCaptionSegmentFieldChanges = (type) => {
+  const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId && child.type === type);
+  if (!element) {
+    return;
+  }
+  normalizeMediaCaptionConfig(element, type);
+  const state = getCaptionSegmentEditorState(type);
+  const selectedIndex = getValidCaptionSegmentIndex(type, element);
+  if (selectedIndex < 0 || !element.captions[selectedIndex]) {
+    return;
+  }
+  const entry = element.captions[selectedIndex];
+  const nextStart = Math.max(0, Number(state.startInput?.value) || 0);
+  const rawEnd = Math.max(0, Number(state.endInput?.value) || 0);
+  const nextEnd = Math.max(nextStart + 0.1, rawEnd);
+  const nextText = String(state.textInput?.value || '').trim();
+  entry.start = nextStart;
+  entry.end = nextEnd;
+  entry.text = nextText || entry.text || `Trecho ${selectedIndex + 1}`;
+  element.captions = sortCaptionEntries(element.captions);
+  const resortedIndex = element.captions.findIndex((item) =>
+    item.text === entry.text && Math.abs(item.start - nextStart) < 0.0001 && Math.abs(item.end - nextEnd) < 0.0001
+  );
+  state.setIndex(resortedIndex >= 0 ? resortedIndex : 0);
+  renderCaptionSegmentEditor(type, element);
+  renderSlide();
+  scheduleHistoryCommit();
+};
+
+const applyCaptionSegmentTextDraft = (type) => {
+  const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId && child.type === type);
+  if (!element) {
+    return;
+  }
+  const state = getCaptionSegmentEditorState(type);
+  const selectedIndex = getValidCaptionSegmentIndex(type, element);
+  if (selectedIndex < 0 || !element.captions[selectedIndex]) {
+    return;
+  }
+  element.captions[selectedIndex].text = String(state.textInput?.value || '');
+  renderSlide();
+  scheduleHistoryCommit();
+};
+
+const addCaptionSegment = (type) => {
+  const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId && child.type === type);
+  if (!element) {
+    return;
+  }
+  normalizeMediaCaptionConfig(element, type);
+  const entries = Array.isArray(element.captions) ? element.captions : [];
+  const lastEntry = entries[entries.length - 1] || null;
+  const nextStart = lastEntry ? Number(lastEntry.end || 0) + 0.1 : 0;
+  const nextEntry = {
+    start: Number(nextStart.toFixed(1)),
+    end: Number((nextStart + 1.5).toFixed(1)),
+    text: `Novo trecho ${entries.length + 1}`
+  };
+  element.captions = sortCaptionEntries([...entries, nextEntry]);
+  const state = getCaptionSegmentEditorState(type);
+  state.setIndex(element.captions.findIndex((entry) => entry.text === nextEntry.text && entry.start === nextEntry.start));
+  element.captionsEnabled = true;
+  renderCaptionSegmentEditor(type, element);
+  updateElementInspector(element);
+  renderSlide();
+  commitHistoryState();
+};
+
+const removeCaptionSegment = (type) => {
+  const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId && child.type === type);
+  if (!element) {
+    return;
+  }
+  const state = getCaptionSegmentEditorState(type);
+  const selectedIndex = getValidCaptionSegmentIndex(type, element);
+  if (selectedIndex < 0) {
+    return;
+  }
+  element.captions.splice(selectedIndex, 1);
+  element.captions = sortCaptionEntries(element.captions);
+  if (!element.captions.length) {
+    element.captionsEnabled = false;
+  }
+  state.setIndex(Math.max(0, selectedIndex - 1));
+  renderCaptionSegmentEditor(type, element);
+  updateElementInspector(element);
+  renderSlide();
+  commitHistoryState();
+};
+
+const getMediaCaptionSegmentAtTime = (element, currentTime) => {
+  if (currentTime < 0) return null;
+  const safeTime = Math.max(0, Number(currentTime) || 0);
+  return (element?.captions || []).find((entry) => safeTime >= entry.start && safeTime <= entry.end) || null;
+};
+
+const applyCaptionOverlayState = (overlayNode, element, currentTime, options = {}) => {
+  if (!overlayNode || !element?.captionsEnabled || !(element.captions || []).length) {
+    if (overlayNode) {
+      overlayNode.textContent = '';
+      overlayNode.classList.add('is-hidden');
+    }
+    return;
+  }
+  const activeSegment = getMediaCaptionSegmentAtTime(element, currentTime);
+  if (!activeSegment) {
+    if (options.keepVisibleWhenIdle) {
+      const fallbackSegment = element.captions.find((entry) => entry?.text) || null;
+      if (fallbackSegment) {
+        const fallbackStyle = normalizeCaptionStyle(element.captionStyle, element.type);
+        overlayNode.textContent = fallbackStyle.uppercase ? fallbackSegment.text.toUpperCase() : fallbackSegment.text;
+        overlayNode.dataset.position = fallbackStyle.position;
+        overlayNode.style.setProperty('--caption-font-size', `${fallbackStyle.fontSize}px`);
+        overlayNode.style.setProperty('--caption-color', fallbackStyle.textColor);
+        overlayNode.style.setProperty('--caption-bg', fallbackStyle.backgroundColor);
+        overlayNode.style.setProperty('--caption-accent', fallbackStyle.accentColor);
+        if (fallbackStyle.width) {
+          overlayNode.style.setProperty('--caption-width', fallbackStyle.width + 'px');
+        } else {
+          overlayNode.style.removeProperty('--caption-width');
+        }
+        overlayNode.classList.toggle('is-uppercase', Boolean(fallbackStyle.uppercase));
+        overlayNode.classList.add('is-placeholder');
+        overlayNode.classList.remove('is-hidden');
+        return;
+      }
+    }
+    overlayNode.textContent = '';
+    overlayNode.classList.add('is-hidden');
+    return;
+  }
+  const style = normalizeCaptionStyle(element.captionStyle, element.type);
+  overlayNode.textContent = style.uppercase ? activeSegment.text.toUpperCase() : activeSegment.text;
+  overlayNode.dataset.position = style.position;
+  overlayNode.style.setProperty('--caption-font-size', `${style.fontSize}px`);
+  overlayNode.style.setProperty('--caption-color', style.textColor);
+  overlayNode.style.setProperty('--caption-bg', style.backgroundColor);
+  overlayNode.style.setProperty('--caption-accent', style.accentColor);
+  if (style.width) {
+    overlayNode.style.setProperty('--caption-width', style.width + 'px');
+  } else {
+    overlayNode.style.removeProperty('--caption-width');
+  }
+  overlayNode.classList.toggle('is-uppercase', Boolean(style.uppercase));
+  overlayNode.classList.remove('is-placeholder');
+  overlayNode.classList.remove('is-hidden');
+};
+
+const getPreviewMediaNode = (node) => {
+  if (!node) return null;
+  if (node instanceof HTMLAudioElement || node instanceof HTMLVideoElement) {
+    return node;
+  }
+  return node.querySelector?.('audio, video') || null;
+};
+
+const getCaptionStageSize = (stageNode = slideCanvas) => {
+  if (stageNode instanceof HTMLElement) {
+    const width = Number(stageNode.clientWidth) || Number(stageNode.offsetWidth) || 0;
+    const height = Number(stageNode.clientHeight) || Number(stageNode.offsetHeight) || 0;
+    if (width > 0 && height > 0) {
+      return { width, height };
+    }
+  }
+  return getStageDimensions();
+};
+
+const getCaptionOverlayPosition = (element, overlayNode, stageNode = slideCanvas) => {
+  const stage = getCaptionStageSize(stageNode);
+  const style = normalizeCaptionStyle(element.captionStyle, element.type);
+  const overlayWidth = Math.max(40, overlayNode.offsetWidth || style.width || Math.min(Number(element.width) || 260, stage.width));
+  const overlayHeight = Math.max(24, overlayNode.offsetHeight || Math.round(style.fontSize * 2.2));
+  const stageMaxX = Math.max(0, stage.width - overlayWidth);
+  const stageMaxY = Math.max(0, stage.height - overlayHeight);
+  if (style.freePosition && Number.isFinite(style.stageX) && Number.isFinite(style.stageY)) {
+    return {
+      x: clamp(style.stageX, 0, stageMaxX),
+      y: clamp(style.stageY, 0, stageMaxY)
+    };
+  }
+  const elementX = Number(element.x) || 0;
+  const elementY = Number(element.y) || 0;
+  const elementWidth = Math.max(overlayWidth, Number(element.width) || overlayWidth);
+  const elementHeight = Math.max(overlayHeight, Number(element.height) || overlayHeight);
+  const centeredX = elementX + Math.max(0, (elementWidth - overlayWidth) / 2);
+  let defaultY = elementY + Math.max(0, elementHeight - overlayHeight - 14);
+  if (style.position === 'top') {
+    defaultY = elementY + 14;
+  } else if (style.position === 'center') {
+    defaultY = elementY + Math.max(0, (elementHeight - overlayHeight) / 2);
+  }
+  return {
+    x: clamp(centeredX, 0, stageMaxX),
+    y: clamp(defaultY, 0, stageMaxY)
+  };
+};
+
+const positionCaptionOverlayNode = (overlayNode, element, stageNode = slideCanvas) => {
+  if (!overlayNode || !element) {
+    return;
+  }
+  const position = getCaptionOverlayPosition(element, overlayNode, stageNode);
+  overlayNode.style.left = `${position.x}px`;
+  overlayNode.style.top = `${position.y}px`;
+};
+
+const createMediaCaptionOverlayNode = (element, mediaNode, options = {}) => {
+  if (!element || !(element.captions || []).length) {
+    return null;
+  }
+  const {
+    stageNode = slideCanvas,
+    interactive = false,
+    keepVisibleWhenIdle = false,
+    onCommit = null,
+    onSelect = null
+  } = options;
+  const overlayNode = document.createElement('div');
+  overlayNode.className = `builder-media-caption is-hidden${interactive ? ' is-interactive' : ''}`;
+  overlayNode.dataset.captionForElementId = element.id;
+  const syncOverlay = () => {
+    const currentTime = mediaNode && !mediaNode.paused ? mediaNode.currentTime : -1;
+    applyCaptionOverlayState(overlayNode, element, currentTime, { keepVisibleWhenIdle });
+    positionCaptionOverlayNode(overlayNode, element, stageNode);
+  };
+  if (mediaNode) {
+    mediaNode.addEventListener('timeupdate', syncOverlay);
+    mediaNode.addEventListener('seeking', syncOverlay);
+    mediaNode.addEventListener('seeked', syncOverlay);
+    mediaNode.addEventListener('pause', syncOverlay);
+    mediaNode.addEventListener('play', syncOverlay);
+    mediaNode.addEventListener('ended', () => {
+      applyCaptionOverlayState(overlayNode, element, -1, { keepVisibleWhenIdle });
+      positionCaptionOverlayNode(overlayNode, element, stageNode);
+    });
+    mediaNode.addEventListener('loadedmetadata', syncOverlay);
+  }
+  syncOverlay();
+  requestAnimationFrame(syncOverlay);
+  if (interactive) {
+    let pointerId;
+    let offsetX = 0;
+    let offsetY = 0;
+    let dragStarted = false;
+    const endDrag = () => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', endDrag);
+      document.removeEventListener('pointercancel', endDrag);
+      if (pointerId !== undefined) {
+        overlayNode.releasePointerCapture(pointerId);
+        pointerId = undefined;
+      }
+      overlayNode.classList.remove('is-dragging');
+      overlayNode.style.cursor = 'grab';
+      if (dragStarted && typeof onCommit === 'function') {
+        onCommit();
+      }
+      dragStarted = false;
+    };
+    const onMove = (event) => {
+      event.preventDefault();
+      const pointer = getStagePointerPosition(event);
+      const stage = getCaptionStageSize(stageNode);
+      const overlayWidth = overlayNode.offsetWidth || 0;
+      const overlayHeight = overlayNode.offsetHeight || 0;
+      const nextX = clamp(pointer.x - offsetX, 0, Math.max(0, stage.width - overlayWidth));
+      const nextY = clamp(pointer.y - offsetY, 0, Math.max(0, stage.height - overlayHeight));
+      dragStarted = true;
+      element.captionStyle = normalizeCaptionStyle({
+        ...element.captionStyle,
+        freePosition: true,
+        stageX: nextX,
+        stageY: nextY
+      }, element.type);
+      overlayNode.style.left = `${nextX}px`;
+      overlayNode.style.top = `${nextY}px`;
+      updateElementInspector(element);
+    };
+    overlayNode.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const pointer = getStagePointerPosition(event);
+      const currentPosition = getCaptionOverlayPosition(element, overlayNode, stageNode);
+      offsetX = pointer.x - currentPosition.x;
+      offsetY = pointer.y - currentPosition.y;
+      dragStarted = false;
+      pointerId = event.pointerId;
+      overlayNode.setPointerCapture(pointerId);
+      overlayNode.classList.add('is-dragging');
+      overlayNode.style.cursor = 'grabbing';
+      document.addEventListener('pointermove', onMove);
+      document.addEventListener('pointerup', endDrag);
+      document.addEventListener('pointercancel', endDrag);
+    });
+    overlayNode.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (typeof onSelect === 'function') {
+        onSelect();
+      }
+    });
+  }
+  return overlayNode;
+};
+
+const wrapMediaNodeWithCaptions = (mediaNode, element) => {
+  const shell = document.createElement('div');
+  shell.className = 'builder-media-shell';
+  if (element?.type === 'audio' && !element.audioVisible && !element.captionsEnabled) {
+    shell.style.display = 'none';
+  }
+  shell.appendChild(mediaNode);
+  return shell;
+};
+
 const normalizeAudioElement = (element) => {
   if (!element || element.type !== 'audio') {
     return;
   }
+  normalizeMediaCaptionConfig(element, 'audio');
   element.audioVisible = typeof element.audioVisible === 'boolean' ? element.audioVisible : true;
   element.audioLoop = Boolean(element.audioLoop);
   element.width = Math.max(180, Number(element.width) || 260);
   element.height = Math.max(54, Number(element.height) || 70);
 };
 
-const createSlug = (value = '') =>
-  value
-    .toString()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/(^-|-$)/g, '');
-
-const escapeHtml = (value = '') =>
-  String(value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-
-const renderPlainTextHtml = (value = '') =>
-  escapeHtml(String(value || ''))
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n')
-    .replace(/\n/g, '<br>');
-
-const truncateText = (value = '', maxLength = 120) => {
-  const normalized = String(value || '').trim();
-  if (!normalized || normalized.length <= maxLength) {
-    return normalized;
-  }
-  return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+const normalizeInputCompareValue = (value = '', caseSensitive = false) => {
+  const base = String(value ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+  return caseSensitive ? base : base.toLowerCase();
 };
 
-const deepClone = (value) => JSON.parse(JSON.stringify(value));
+const normalizeInputElement = (element) => {
+  if (!element || element.type !== 'input') {
+    return;
+  }
+  element.placeholder = typeof element.placeholder === 'string' && element.placeholder ? element.placeholder : 'Digite sua resposta';
+  element.submitLabel = typeof element.submitLabel === 'string' && element.submitLabel ? element.submitLabel : 'Enviar resposta';
+  element.compareText = typeof element.compareText === 'string' ? element.compareText : '';
+  element.compareCaseSensitive = Boolean(element.compareCaseSensitive);
+  element.compareImageEnabled = Boolean(element.compareImageEnabled);
+  element.compareImageReference = typeof element.compareImageReference === 'string' ? element.compareImageReference : '';
+  element.successMessage = typeof element.successMessage === 'string' && element.successMessage ? element.successMessage : 'Resposta enviada com sucesso.';
+  element.errorMessage = typeof element.errorMessage === 'string' && element.errorMessage ? element.errorMessage : 'A palavra não confere. Tente novamente.';
+  element.allowImage = typeof element.allowImage === 'boolean' ? element.allowImage : true;
+  if (element.compareImageEnabled) {
+    element.allowImage = true;
+  }
+  element.allowAudio = Boolean(element.allowAudio);
+  element.backgroundColor = typeof element.backgroundColor === 'string' ? element.backgroundColor : '#ffffff';
+  element.labelColor = typeof element.labelColor === 'string' ? element.labelColor : '#9ca3af';
+  element.inputTextColor = typeof element.inputTextColor === 'string' ? element.inputTextColor : '#0f142c';
+  element.submitButtonColor = typeof element.submitButtonColor === 'string' ? element.submitButtonColor : '#6d63ff';
+  element.submitButtonTextColor = typeof element.submitButtonTextColor === 'string' ? element.submitButtonTextColor : '#ffffff';
+  const defaultHeight = element.compareImageEnabled && element.compareImageReference ? 190 : 88;
+  const minHeight = element.compareImageEnabled && element.compareImageReference ? 150 : 76;
+  const rawWidth = Number(element.width);
+  element.width = (!Number.isNaN(rawWidth) && rawWidth > 0) ? rawWidth : 360;
+  const rawHeight = Number(element.height);
+  element.height = (!Number.isNaN(rawHeight) && rawHeight > 0) ? rawHeight : defaultHeight;
+};
+
 const ANIMATABLE_ELEMENT_TYPES = new Set(['text', 'block', 'floatingButton', 'image']);
 const ANIMATION_PRESETS = new Set(['none', 'fade-in', 'fade-out', 'slide-left', 'slide-right', 'rotate-in', 'pulse', 'float', 'zoom-in', MOTION_ANIMATION_TYPE]);
 
@@ -698,7 +1320,7 @@ const getMotionFrameSnapshot = (element) => ({
   width: Math.max(MIN_ELEMENT_SIZE, Number(element?.width) || MIN_ELEMENT_SIZE),
   height: Math.max(MIN_ELEMENT_SIZE, Number(element?.height) || MIN_ELEMENT_SIZE),
   rotation: ((Number(element?.rotation) || 0) % 360 + 360) % 360,
-  opacity: DEFAULT_MOTION_FRAME.opacity
+  opacity: getElementBaseOpacity(element)
 });
 
 const getElementRenderState = (element) => {
@@ -712,7 +1334,7 @@ const getElementRenderState = (element) => {
     width: Number(element?.width) || 0,
     height: Number(element?.height) || 0,
     rotation: Number(element?.rotation) || 0,
-    opacity: DEFAULT_MOTION_FRAME.opacity
+    opacity: getElementBaseOpacity(element)
   };
 };
 
@@ -762,6 +1384,7 @@ const applyElementAnimationStyles = (node, element, options = {}) => {
     'element-animation-float',
     'element-animation-zoom-in'
   );
+  node.style.opacity = String(getElementBaseOpacity(element));
 
   if (!ANIMATABLE_ELEMENT_TYPES.has(element.type)) {
     node.style.animation = '';
@@ -780,6 +1403,7 @@ const applyElementAnimationStyles = (node, element, options = {}) => {
   if (animationType === MOTION_ANIMATION_TYPE) {
     node.style.animation = '';
     if (node.dataset.elementId && !previewState.active) {
+      node.style.opacity = String(getElementBaseOpacity(element));
       node.style.transform = rotation ? `rotate(${rotation}deg)` : '';
       return;
     }
@@ -838,19 +1462,6 @@ const buildTemplateFileName = (title = '') => {
   return `${slug}.json`;
 };
 
-const normalizeTemplateStageSize = (stageSize) => {
-  const width = Number(stageSize?.width);
-  const height = Number(stageSize?.height);
-  if (Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0) {
-    return { width, height };
-  }
-  return { ...DEFAULT_STAGE_SIZE };
-};
-
-const normalizeTemplateModuleSettings = (moduleSettings) => ({
-  lockNextModuleUntilCompleted: Boolean(moduleSettings?.lockNextModuleUntilCompleted),
-  isPublic: Boolean(moduleSettings?.isPublic)
-});
 
 const getPublicModuleViewerUrl = (moduleId) => {
   const url = new URL('module-viewer.html', window.location.href);
@@ -908,7 +1519,7 @@ const copyPublicModuleLink = async () => {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(url);
     } else if (modulePublicLinkInput) {
-      modulePublicLinkInput.focus();
+      modulePublicLinkInput.focus({ preventScroll: true });
       modulePublicLinkInput.select();
       document.execCommand('copy');
       modulePublicLinkInput.setSelectionRange(0, 0);
@@ -921,22 +1532,74 @@ const copyPublicModuleLink = async () => {
   }
 };
 
-const normalizeSlideBackgroundFill = (slide = {}) => {
-  const fillType = slide.backgroundFillType === 'gradient' ? 'gradient' : 'solid';
-  const solidColor = typeof slide.backgroundColor === 'string' && slide.backgroundColor.trim() ? slide.backgroundColor.trim() : '#fdfbff';
-  const gradientStart =
-    typeof slide.backgroundGradientStart === 'string' && slide.backgroundGradientStart.trim()
-      ? slide.backgroundGradientStart.trim()
-      : '#fdfbff';
-  const gradientEnd =
-    typeof slide.backgroundGradientEnd === 'string' && slide.backgroundGradientEnd.trim()
-      ? slide.backgroundGradientEnd.trim()
-      : '#dfe7ff';
-  slide.backgroundFillType = fillType;
-  slide.backgroundColor = solidColor;
-  slide.backgroundGradientStart = gradientStart;
-  slide.backgroundGradientEnd = gradientEnd;
-  return slide;
+const getModuleCoverValue = () => String(builderState.moduleSettings?.coverImage || '').trim();
+
+const syncModuleCoverPreview = () => {
+  const coverImage = getModuleCoverValue();
+  const title = moduleTitleInput?.value?.trim() || 'Sem capa';
+  if (moduleCoverPreview) {
+    moduleCoverPreview.style.backgroundImage = coverImage
+      ? `linear-gradient(155deg, rgba(16, 20, 52, 0.18), rgba(16, 20, 52, 0.02)), url("${coverImage}")`
+      : '';
+  }
+  if (moduleCoverPreviewTitle) {
+    moduleCoverPreviewTitle.textContent = coverImage ? title : 'Sem capa';
+  }
+  if (moduleCoverPreviewMeta) {
+    moduleCoverPreviewMeta.textContent = coverImage
+      ? 'Preview que o aluno verá ao navegar pelos módulos do curso.'
+      : 'Adicione uma imagem para destacar este módulo no portal do aluno.';
+  }
+  if (clearModuleCoverBtn) {
+    clearModuleCoverBtn.disabled = !coverImage;
+  }
+};
+
+const updateModuleCoverModeUi = () => {
+  document.getElementById('moduleCoverUrlField')?.classList.toggle('hidden', (moduleCoverModeSelect?.value || 'local') !== 'url');
+};
+
+const applyModuleCover = async (preferredMode = '') => {
+  const mode = preferredMode || moduleCoverModeSelect?.value || 'local';
+  let nextCover = '';
+  if (mode === 'url') {
+    nextCover = moduleCoverUrlInput?.value?.trim() || '';
+    if (!nextCover) {
+      alert('Informe a URL da capa.');
+      return;
+    }
+  } else {
+    try {
+      nextCover = await readLocalFile(localImageInput, 'image');
+      if (!nextCover) {
+        return;
+      }
+    } catch (error) {
+      alert(error.message || 'Não foi possível carregar a capa escolhida.');
+      return;
+    }
+  }
+  builderState.moduleSettings = {
+    ...(builderState.moduleSettings || {}),
+    coverImage: nextCover
+  };
+  if (moduleCoverUrlInput && mode === 'url') {
+    moduleCoverUrlInput.value = nextCover;
+  }
+  syncModuleCoverPreview();
+  commitHistoryState();
+};
+
+const clearModuleCover = () => {
+  builderState.moduleSettings = {
+    ...(builderState.moduleSettings || {}),
+    coverImage: ''
+  };
+  if (moduleCoverUrlInput) {
+    moduleCoverUrlInput.value = '';
+  }
+  syncModuleCoverPreview();
+  commitHistoryState();
 };
 
 const getSlideBackgroundStyles = (slide = {}) => {
@@ -996,6 +1659,13 @@ const normalizeTemplateSlides = (slides) => {
     slide.elements.forEach((element) => {
       if (element?.actionConfig?.targetSlideId && slideIdMap.has(element.actionConfig.targetSlideId)) {
         element.actionConfig.targetSlideId = slideIdMap.get(element.actionConfig.targetSlideId);
+      }
+      if (Array.isArray(element?.interactionTriggers)) {
+        element.interactionTriggers.forEach((trigger) => {
+          if (trigger?.actionConfig?.targetSlideId && slideIdMap.has(trigger.actionConfig.targetSlideId)) {
+            trigger.actionConfig.targetSlideId = slideIdMap.get(trigger.actionConfig.targetSlideId);
+          }
+        });
       }
     });
   });
@@ -1078,7 +1748,11 @@ const applyImportedTemplate = (templatePayload) => {
   if (modulePublicToggle) {
     modulePublicToggle.checked = Boolean(builderState.moduleSettings.isPublic);
   }
+  if (moduleCoverUrlInput) {
+    moduleCoverUrlInput.value = builderState.moduleSettings.coverImage || '';
+  }
   syncPublicModuleLinkUi();
+  syncModuleCoverPreview();
 
   renderSlideList();
   renderSlide();
@@ -1171,9 +1845,8 @@ const renderTemplateStoreList = () => {
   });
 
   if (!filteredTemplates.length) {
-    templateStoreList.innerHTML = `<p class="muted" style="margin:0;">${
-      query ? 'Nenhum template encontrado para esta busca.' : 'Nenhum template publicado na loja ainda.'
-    }</p>`;
+    templateStoreList.innerHTML = `<p class="muted" style="margin:0;">${query ? 'Nenhum template encontrado para esta busca.' : 'Nenhum template publicado na loja ainda.'
+      }</p>`;
     return;
   }
 
@@ -1332,12 +2005,16 @@ const getDefaultElementSize = (type) => {
       return { width: 260, height: 150 };
     case 'image':
       return { width: 280, height: 180 };
+    case 'pen':
+      return { width: 220, height: 120 };
     case 'audio':
       return { width: 260, height: 70 };
     case 'video':
       return { width: 320, height: 190 };
     case 'quiz':
       return { width: 420, height: 300 };
+    case 'input':
+      return { width: 420, height: 260 };
     case 'floatingButton':
       return { width: 170, height: 60 };
     case 'text':
@@ -1375,6 +2052,19 @@ const getElementBox = (element) => ({
   height: Math.max(MIN_ELEMENT_SIZE, Number(element?.height) || MIN_ELEMENT_SIZE)
 });
 
+const escapeAttributeSelectorValue = (value) => {
+  const normalized = String(value || '');
+  if (typeof window !== 'undefined' && window.CSS?.escape) {
+    return window.CSS.escape(normalized);
+  }
+  return normalized.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+};
+
+const getElementBaseOpacity = (element) => {
+  const value = Number(element?.opacity);
+  return Number.isFinite(value) ? clamp(value, 0, 1) : 1;
+};
+
 const findContainingBlockForText = (textElement, slide = getActiveSlide()) => {
   if (!textElement || textElement.type !== 'text' || !slide?.elements?.length) {
     return null;
@@ -1391,19 +2081,62 @@ const findContainingBlockForText = (textElement, slide = getActiveSlide()) => {
 };
 
 const getStageRelativeElementBox = (element) => {
-  const node = slideCanvas?.querySelector(`[data-element-id="${element?.id || ''}"]`);
+  const node = slideCanvas?.querySelector(`[data-element-id="${escapeAttributeSelectorValue(element?.id || '')}"]`);
   const canvasRect = slideCanvas?.getBoundingClientRect();
   const nodeRect = node?.getBoundingClientRect?.();
   if (node && canvasRect && nodeRect) {
     const scale = getStageScale();
+    const measuredWidth = Math.max(nodeRect.width, node.scrollWidth || 0, node.offsetWidth || 0);
+    const measuredHeight = Math.max(nodeRect.height, node.scrollHeight || 0, node.offsetHeight || 0);
     return {
       left: (nodeRect.left - canvasRect.left) / scale,
       top: (nodeRect.top - canvasRect.top) / scale,
-      width: nodeRect.width / scale,
-      height: nodeRect.height / scale
+      width: measuredWidth / scale,
+      height: measuredHeight / scale
     };
   }
   return getElementBox(element);
+};
+
+const getStageRelativeCaptionBox = (element) => {
+  const node = slideCanvas?.querySelector(`[data-caption-for-element-id="${escapeAttributeSelectorValue(element?.id || '')}"]`);
+  const canvasRect = slideCanvas?.getBoundingClientRect();
+  const nodeRect = node?.getBoundingClientRect?.();
+  if (node && canvasRect && nodeRect) {
+    const scale = getStageScale();
+    const measuredWidth = Math.max(nodeRect.width, node.scrollWidth || 0, node.offsetWidth || 0);
+    const measuredHeight = Math.max(nodeRect.height, node.scrollHeight || 0, node.offsetHeight || 0);
+    return {
+      left: (nodeRect.left - canvasRect.left) / scale,
+      top: (nodeRect.top - canvasRect.top) / scale,
+      width: measuredWidth / scale,
+      height: measuredHeight / scale
+    };
+  }
+  return null;
+};
+
+const expandElementToRenderedContent = (element, node) => {
+  if (!element || !node || !['text', 'block', 'floatingButton'].includes(element.type)) {
+    return false;
+  }
+  const innerNode = node.querySelector('.builder-block-element, .floating-button-element, .builder-text-element') || node;
+  const measuredWidth = Math.ceil(Math.max(innerNode.scrollWidth || 0, innerNode.offsetWidth || 0));
+  const measuredHeight = Math.ceil(Math.max(innerNode.scrollHeight || 0, innerNode.offsetHeight || 0));
+  const nextWidth = Math.max(MIN_ELEMENT_SIZE, measuredWidth);
+  const nextHeight = Math.max(MIN_ELEMENT_SIZE, measuredHeight);
+  let changed = false;
+  if (nextWidth > (Number(element.width) || 0) + 1) {
+    element.width = nextWidth;
+    node.style.width = `${nextWidth}px`;
+    changed = true;
+  }
+  if (nextHeight > (Number(element.height) || 0) + 1) {
+    element.height = nextHeight;
+    node.style.height = `${nextHeight}px`;
+    changed = true;
+  }
+  return changed;
 };
 
 const updateTextAlignmentControls = (element) => {
@@ -1450,6 +2183,8 @@ const getStageEditorCard = (editorType) => {
       return backgroundEditorCard;
     case 'eraser':
       return eraserEditorCard;
+    case 'pen':
+      return penEditorCard;
     case 'animation':
       return animationEditorCard;
     default:
@@ -1547,6 +2282,7 @@ const getTextDecorationFlags = (source = {}, fallback = DEFAULT_INSERT_TEXT_STYL
 
 const normalizeRuntimeActionConfig = (config = {}) => ({
   ...config,
+  url: typeof config.url === 'string' ? config.url : '',
   text: typeof config.text === 'string' && config.text ? config.text : 'Novo texto',
   replaceMode:
     config.replaceMode === REPLACE_COUNTER_MODE || config.replaceMode === REPLACE_TEXT_MODE ? config.replaceMode : REPLACE_TEXT_MODE,
@@ -1573,6 +2309,97 @@ const normalizeRuntimeActionConfig = (config = {}) => ({
   })()
 });
 
+const createDefaultActionConfig = () => ({
+  type: 'none',
+  targetSlideId: '',
+  targetElementId: '',
+  ruleGroup: '',
+  requireAllButtonsInGroup: false,
+  text: 'Novo texto',
+  url: '',
+  textColor: DEFAULT_INSERT_TEXT_STYLE.textColor,
+  backgroundColor: DEFAULT_INSERT_TEXT_STYLE.backgroundColor,
+  textAlign: DEFAULT_INSERT_TEXT_STYLE.textAlign,
+  fontFamily: DEFAULT_INSERT_TEXT_STYLE.fontFamily,
+  fontWeight: DEFAULT_INSERT_TEXT_STYLE.fontWeight,
+  fontSize: DEFAULT_INSERT_TEXT_STYLE.fontSize,
+  hasTextBackground: DEFAULT_INSERT_TEXT_STYLE.hasTextBackground,
+  hasTextBorder: DEFAULT_INSERT_TEXT_STYLE.hasTextBorder,
+  hasTextBlock: DEFAULT_INSERT_TEXT_STYLE.hasTextBlock,
+  insertX: 120,
+  insertY: 120,
+  insertWidth: 280,
+  insertHeight: 180,
+  moveByX: 160,
+  moveByY: 0,
+  moveDuration: 0.8,
+  videoTime: 0,
+  replaceMode: REPLACE_TEXT_MODE,
+  replaceText: '',
+  replaceCounterStart: 1,
+  replaceCounterStep: 1,
+  detectorAcceptedDrag: DETECTOR_ACCEPT_ANY,
+  detectorMinMatchCount: 1,
+  detectorTriggerOnce: false,
+  quizQuestion: 'Nova pergunta',
+  quizOptions: createDefaultQuizOptions(),
+  quizCorrectOption: 0,
+  successMessage: 'Resposta correta!',
+  errorMessage: 'Resposta incorreta. Tente novamente.',
+  actionLabel: 'Validar resposta',
+  quizBackgroundColor: '#ffffff',
+  quizQuestionColor: '#171934',
+  quizOptionBackgroundColor: '#f4f6ff',
+  quizOptionTextColor: '#25284c',
+  quizButtonBackgroundColor: '#6d63ff',
+  points: 1,
+  lockOnWrong: false,
+  playSourceVideoOnValidate: false,
+  audioVisible: true,
+  audioLoop: false
+});
+
+const createInteractionTrigger = (elementType = 'floatingButton', source = {}) => {
+  const config = {
+    ...createDefaultActionConfig(),
+    ...(source.actionConfig && typeof source.actionConfig === 'object' ? source.actionConfig : source)
+  };
+  return {
+    id: typeof source.id === 'string' && source.id.trim() ? source.id.trim() : createId(elementType === 'detector' ? 'detector-trigger' : 'trigger'),
+    name:
+      typeof source.name === 'string' && source.name.trim()
+        ? source.name.trim()
+        : elementType === 'detector'
+          ? 'Gatilho'
+          : elementType === 'timedTrigger'
+            ? 'Tempo'
+            : 'Ação',
+    enabled: typeof source.enabled === 'boolean' ? source.enabled : true,
+    time: Math.max(0, Number(source.time ?? source.triggerTime) || 0),
+    actionConfig: normalizeRuntimeActionConfig(config)
+  };
+};
+
+const createVideoTrigger = (source = {}) => {
+  const actionConfig = normalizeRuntimeActionConfig({
+    ...createDefaultActionConfig(),
+    ...(source.actionConfig && typeof source.actionConfig === 'object'
+      ? source.actionConfig
+      : {
+        type: source.action || source.videoTriggerAction || 'none',
+        targetElementId: source.targetElementId || source.videoTriggerTargetElementId || '',
+        videoTime: source.seekTime ?? source.videoTriggerSeekTime ?? 0
+      })
+  });
+  return {
+    id: typeof source.id === 'string' && source.id.trim() ? source.id.trim() : createId('video-trigger'),
+    name: typeof source.name === 'string' && source.name.trim() ? source.name.trim() : 'Tempo',
+    enabled: typeof source.enabled === 'boolean' ? source.enabled : true,
+    time: Math.max(0, Number(source.time ?? source.videoTriggerTime) || 0),
+    actionConfig
+  };
+};
+
 const getQuizMinimumHeight = (options = []) => {
   const count = Math.max(3, Array.isArray(options) ? options.length : 0);
   return 300 + Math.max(0, count - 3) * 50;
@@ -1595,78 +2422,242 @@ const normalizeQuizElement = (element) => {
   element.quizButtonBackgroundColor = element.quizButtonBackgroundColor || '#6d63ff';
   element.points = Math.max(1, Number(element.points) || 1);
   element.lockOnWrong = Boolean(element.lockOnWrong);
-  element.width = Math.max(420, Number(element.width) || 420);
+  const rawQuizWidth = Number(element.width);
+  element.width = (!Number.isNaN(rawQuizWidth) && rawQuizWidth > 0) ? rawQuizWidth : 420;
   element.height = Math.max(getQuizMinimumHeight(element.options), Number(element.height) || 0);
 };
 
 const normalizeFloatingActionConfig = (element) => {
-  if (!element || !['floatingButton', 'detector'].includes(element.type)) {
+  if (!element || !['floatingButton', 'detector', 'timedTrigger', 'input'].includes(element.type)) {
     return;
   }
-  const config = element.actionConfig || {};
-  const textFlags = getTextDecorationFlags(config, DEFAULT_INSERT_TEXT_STYLE);
-  config.type = config.type || 'none';
-  config.targetSlideId = config.targetSlideId || '';
-  config.targetElementId = config.targetElementId || '';
-  config.ruleGroup = config.ruleGroup || '';
-  config.requireAllButtonsInGroup = Boolean(config.requireAllButtonsInGroup);
-  config.text = config.text || 'Novo texto';
-  config.url = config.url || '';
-  config.audioVisible = typeof config.audioVisible === 'boolean' ? config.audioVisible : true;
-  config.audioLoop = Boolean(config.audioLoop);
-  config.textColor = config.textColor || DEFAULT_INSERT_TEXT_STYLE.textColor;
-  config.backgroundColor = config.backgroundColor || DEFAULT_INSERT_TEXT_STYLE.backgroundColor;
-  config.textAlign = config.textAlign || DEFAULT_INSERT_TEXT_STYLE.textAlign;
-  config.fontFamily = config.fontFamily || DEFAULT_INSERT_TEXT_STYLE.fontFamily;
-  config.fontWeight = config.fontWeight || DEFAULT_INSERT_TEXT_STYLE.fontWeight;
-  config.fontSize = Number.isFinite(Number(config.fontSize)) ? Number(config.fontSize) : DEFAULT_INSERT_TEXT_STYLE.fontSize;
-  config.hasTextBackground = textFlags.hasTextBackground;
-  config.hasTextBorder = textFlags.hasTextBorder;
-  config.hasTextBlock = textFlags.legacyBlock;
-  config.insertX = Number.isFinite(Number(config.insertX)) ? Number(config.insertX) : 120;
-  config.insertY = Number.isFinite(Number(config.insertY)) ? Number(config.insertY) : 120;
-  config.insertWidth = Number.isFinite(Number(config.insertWidth)) ? Number(config.insertWidth) : 280;
-  config.insertHeight = Number.isFinite(Number(config.insertHeight)) ? Number(config.insertHeight) : 180;
-  config.moveByX = Number.isFinite(Number(config.moveByX)) ? Number(config.moveByX) : 160;
-  config.moveByY = Number.isFinite(Number(config.moveByY)) ? Number(config.moveByY) : 0;
-  config.moveDuration = Number.isFinite(Number(config.moveDuration)) ? Number(config.moveDuration) : 0.8;
-  config.videoTime = Number.isFinite(Number(config.videoTime)) ? Number(config.videoTime) : 0;
-  config.replaceMode = getReplaceTextMode(config.replaceMode);
-  config.replaceText = typeof config.replaceText === 'string' ? config.replaceText : '';
-  config.replaceCounterStart = Number.isFinite(Number(config.replaceCounterStart)) ? Number(config.replaceCounterStart) : 1;
-  config.replaceCounterStep = Number.isFinite(Number(config.replaceCounterStep)) ? Number(config.replaceCounterStep) : 1;
-  config.quizQuestion = config.quizQuestion || 'Nova pergunta';
-  config.quizOptions = Array.isArray(config.quizOptions) && config.quizOptions.length ? config.quizOptions : createDefaultQuizOptions();
-  config.quizCorrectOption = Math.min(Math.max(Number(config.quizCorrectOption) || 0, 0), config.quizOptions.length - 1);
-  config.successMessage = config.successMessage || 'Resposta correta!';
-  config.errorMessage = config.errorMessage || 'Resposta incorreta. Tente novamente.';
-  config.actionLabel = config.actionLabel || 'Validar resposta';
-  config.quizBackgroundColor = config.quizBackgroundColor || '#ffffff';
-  config.quizQuestionColor = config.quizQuestionColor || '#171934';
-  config.quizOptionBackgroundColor = config.quizOptionBackgroundColor || '#f4f6ff';
-  config.quizOptionTextColor = config.quizOptionTextColor || '#25284c';
-  config.quizButtonBackgroundColor = config.quizButtonBackgroundColor || '#6d63ff';
-  config.points = Math.max(1, Number(config.points) || 1);
-  config.lockOnWrong = Boolean(config.lockOnWrong);
-  config.detectorAcceptedDrag = normalizeDetectorAcceptedDragValue(config.detectorAcceptedDrag);
-  config.detectorMinMatchCount = Math.max(1, Number(config.detectorMinMatchCount) || 1);
-  config.detectorTriggerOnce = Boolean(config.detectorTriggerOnce);
-  element.actionConfig = config;
+  const legacyConfig = element.actionConfig && typeof element.actionConfig === 'object' ? element.actionConfig : {};
+  const sourceTriggers = Array.isArray(element.interactionTriggers) ? element.interactionTriggers : [];
+  const normalizedTriggers = (sourceTriggers.length ? sourceTriggers : [{ actionConfig: legacyConfig }])
+    .slice(0, MAX_ELEMENT_TRIGGER_COUNT)
+    .map((trigger, index) => {
+      const normalized = createInteractionTrigger(element.type, trigger);
+      const config = normalized.actionConfig || {};
+      normalized.time = Math.max(0, Number(normalized.time) || 0);
+      const textFlags = getTextDecorationFlags(config, DEFAULT_INSERT_TEXT_STYLE);
+      config.type = config.type || 'none';
+      config.targetSlideId = config.targetSlideId || '';
+      config.targetElementId = config.targetElementId || '';
+      config.ruleGroup = config.ruleGroup || '';
+      config.requireAllButtonsInGroup = Boolean(config.requireAllButtonsInGroup);
+      config.text = config.text || 'Novo texto';
+      config.url = config.url || '';
+      config.audioVisible = typeof config.audioVisible === 'boolean' ? config.audioVisible : true;
+      config.audioLoop = Boolean(config.audioLoop);
+      config.textColor = config.textColor || DEFAULT_INSERT_TEXT_STYLE.textColor;
+      config.backgroundColor = config.backgroundColor || DEFAULT_INSERT_TEXT_STYLE.backgroundColor;
+      config.textAlign = config.textAlign || DEFAULT_INSERT_TEXT_STYLE.textAlign;
+      config.fontFamily = config.fontFamily || DEFAULT_INSERT_TEXT_STYLE.fontFamily;
+      config.fontWeight = config.fontWeight || DEFAULT_INSERT_TEXT_STYLE.fontWeight;
+      config.fontSize = Number.isFinite(Number(config.fontSize)) ? Number(config.fontSize) : DEFAULT_INSERT_TEXT_STYLE.fontSize;
+      config.hasTextBackground = textFlags.hasTextBackground;
+      config.hasTextBorder = textFlags.hasTextBorder;
+      config.hasTextBlock = textFlags.legacyBlock;
+      config.insertX = Number.isFinite(Number(config.insertX)) ? Number(config.insertX) : 120;
+      config.insertY = Number.isFinite(Number(config.insertY)) ? Number(config.insertY) : 120;
+      config.insertWidth = Number.isFinite(Number(config.insertWidth)) ? Number(config.insertWidth) : 280;
+      config.insertHeight = Number.isFinite(Number(config.insertHeight)) ? Number(config.insertHeight) : 180;
+      config.moveByX = Number.isFinite(Number(config.moveByX)) ? Number(config.moveByX) : 160;
+      config.moveByY = Number.isFinite(Number(config.moveByY)) ? Number(config.moveByY) : 0;
+      config.moveDuration = Number.isFinite(Number(config.moveDuration)) ? Number(config.moveDuration) : 0.8;
+      config.videoTime = Number.isFinite(Number(config.videoTime)) ? Number(config.videoTime) : 0;
+      config.replaceMode = getReplaceTextMode(config.replaceMode);
+      config.replaceText = typeof config.replaceText === 'string' ? config.replaceText : '';
+      config.replaceCounterStart = Number.isFinite(Number(config.replaceCounterStart)) ? Number(config.replaceCounterStart) : 1;
+      config.replaceCounterStep = Number.isFinite(Number(config.replaceCounterStep)) ? Number(config.replaceCounterStep) : 1;
+      config.quizQuestion = config.quizQuestion || 'Nova pergunta';
+      config.quizOptions = Array.isArray(config.quizOptions) && config.quizOptions.length ? config.quizOptions : createDefaultQuizOptions();
+      config.quizCorrectOption = Math.min(Math.max(Number(config.quizCorrectOption) || 0, 0), config.quizOptions.length - 1);
+      config.successMessage = config.successMessage || 'Resposta correta!';
+      config.errorMessage = config.errorMessage || 'Resposta incorreta. Tente novamente.';
+      config.actionLabel = config.actionLabel || 'Validar resposta';
+      config.quizBackgroundColor = config.quizBackgroundColor || '#ffffff';
+      config.quizQuestionColor = config.quizQuestionColor || '#171934';
+      config.quizOptionBackgroundColor = config.quizOptionBackgroundColor || '#f4f6ff';
+      config.quizOptionTextColor = config.quizOptionTextColor || '#25284c';
+      config.quizButtonBackgroundColor = config.quizButtonBackgroundColor || '#6d63ff';
+      config.points = Math.max(1, Number(config.points) || 1);
+      config.lockOnWrong = Boolean(config.lockOnWrong);
+      config.detectorAcceptedDrag = normalizeDetectorAcceptedDragValue(config.detectorAcceptedDrag);
+      config.detectorMinMatchCount = Math.max(1, Number(config.detectorMinMatchCount) || 1);
+      config.detectorTriggerOnce = Boolean(config.detectorTriggerOnce);
+      normalized.name =
+        normalized.name || `${element.type === 'detector' ? 'Gatilho' : element.type === 'timedTrigger' ? 'Tempo' : element.type === 'input' ? 'Envio' : 'Ação'} ${index + 1}`;
+      normalized.actionConfig = config;
+      return normalized;
+    });
+  element.interactionTriggers = normalizedTriggers.length ? normalizedTriggers : [createInteractionTrigger(element.type)];
+  element.actionConfig = element.interactionTriggers[0].actionConfig;
 };
 
-const VIDEO_TRIGGER_ACTIONS = new Set(['none', 'pauseVideo', 'playVideo', 'seekVideo']);
-const VIDEO_TRIGGER_TARGET_ACTIONS = new Set(['playAudio', 'showElement', 'hideElement']);
+const openExternalRedirect = (value) => {
+  const nextValue = String(value || '').trim();
+  if (!nextValue) {
+    return false;
+  }
+  try {
+    const parsed = new URL(nextValue, window.location.href);
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return false;
+    }
+    const popup = window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
+    if (!popup) {
+      window.location.href = parsed.toString();
+    }
+    return true;
+  } catch (error) {
+    return false;
+  }
+};
+
+const VIDEO_TRIGGER_ACTIONS = new Set([
+  'none',
+  'nextSlide',
+  'jumpSlide',
+  'redirect',
+  'addText',
+  'replaceText',
+  'addImage',
+  'addAudio',
+  'addVideo',
+  'addQuiz',
+  'playAudio',
+  'pauseVideo',
+  'playVideo',
+  'seekVideo',
+  'showElement',
+  'hideElement',
+  'moveElement',
+  'playAnimation'
+]);
+const VIDEO_TRIGGER_TARGET_ACTIONS = new Set([
+  'replaceText',
+  'playAudio',
+  'pauseVideo',
+  'playVideo',
+  'seekVideo',
+  'showElement',
+  'hideElement',
+  'moveElement',
+  'playAnimation'
+]);
 
 const normalizeVideoTriggerConfig = (element) => {
   if (!element || element.type !== 'video') {
     return;
   }
-  element.videoTriggerTime = Number.isFinite(Number(element.videoTriggerTime)) ? Number(element.videoTriggerTime) : 0;
-  element.videoTriggerAction = VIDEO_TRIGGER_ACTIONS.has(String(element.videoTriggerAction || 'none'))
-    ? String(element.videoTriggerAction || 'none')
-    : 'none';
-  element.videoTriggerSeekTime = Number.isFinite(Number(element.videoTriggerSeekTime)) ? Number(element.videoTriggerSeekTime) : 0;
-  element.videoTriggerTargetElementId = typeof element.videoTriggerTargetElementId === 'string' ? element.videoTriggerTargetElementId : '';
+  normalizeMediaCaptionConfig(element, 'video');
+  element.width = Math.max(220, Number(element.width) || 320);
+  element.height = Math.max(140, Number(element.height) || 190);
+  const sourceTriggers = Array.isArray(element.videoTriggers) ? element.videoTriggers : [];
+  const normalizedTriggers = (sourceTriggers.length
+    ? sourceTriggers
+    : [
+      {
+        time: element.videoTriggerTime,
+        action: element.videoTriggerAction,
+        seekTime: element.videoTriggerSeekTime,
+        targetElementId: element.videoTriggerTargetElementId
+      }
+    ])
+    .slice(0, MAX_ELEMENT_TRIGGER_COUNT)
+    .map((trigger, index) => {
+      const normalized = createVideoTrigger(trigger);
+      const actionType = VIDEO_TRIGGER_ACTIONS.has(String(normalized.actionConfig?.type || 'none'))
+        ? String(normalized.actionConfig?.type || 'none')
+        : 'none';
+      normalized.time = Math.max(0, Number(normalized.time) || 0);
+      normalized.name = normalized.name || `Tempo ${index + 1}`;
+      normalized.actionConfig.type = actionType;
+      normalized.actionConfig.targetSlideId =
+        typeof normalized.actionConfig.targetSlideId === 'string' ? normalized.actionConfig.targetSlideId : '';
+      normalized.actionConfig.targetElementId =
+        typeof normalized.actionConfig.targetElementId === 'string' ? normalized.actionConfig.targetElementId : '';
+      normalized.actionConfig.url = typeof normalized.actionConfig.url === 'string' ? normalized.actionConfig.url : '';
+      normalized.actionConfig.text = normalized.actionConfig.text || 'Novo texto';
+      normalized.actionConfig.audioVisible =
+        typeof normalized.actionConfig.audioVisible === 'boolean' ? normalized.actionConfig.audioVisible : true;
+      normalized.actionConfig.audioLoop = Boolean(normalized.actionConfig.audioLoop);
+      normalized.actionConfig.textColor = normalized.actionConfig.textColor || DEFAULT_INSERT_TEXT_STYLE.textColor;
+      normalized.actionConfig.backgroundColor = normalized.actionConfig.backgroundColor || DEFAULT_INSERT_TEXT_STYLE.backgroundColor;
+      normalized.actionConfig.textAlign = normalized.actionConfig.textAlign || DEFAULT_INSERT_TEXT_STYLE.textAlign;
+      normalized.actionConfig.fontFamily = normalized.actionConfig.fontFamily || DEFAULT_INSERT_TEXT_STYLE.fontFamily;
+      normalized.actionConfig.fontWeight = normalized.actionConfig.fontWeight || DEFAULT_INSERT_TEXT_STYLE.fontWeight;
+      normalized.actionConfig.fontSize = Number.isFinite(Number(normalized.actionConfig.fontSize))
+        ? Number(normalized.actionConfig.fontSize)
+        : DEFAULT_INSERT_TEXT_STYLE.fontSize;
+      const textFlags = getTextDecorationFlags(normalized.actionConfig, DEFAULT_INSERT_TEXT_STYLE);
+      normalized.actionConfig.hasTextBackground = textFlags.hasTextBackground;
+      normalized.actionConfig.hasTextBorder = textFlags.hasTextBorder;
+      normalized.actionConfig.hasTextBlock = textFlags.legacyBlock;
+      normalized.actionConfig.insertX = Number.isFinite(Number(normalized.actionConfig.insertX))
+        ? Number(normalized.actionConfig.insertX)
+        : 120;
+      normalized.actionConfig.insertY = Number.isFinite(Number(normalized.actionConfig.insertY))
+        ? Number(normalized.actionConfig.insertY)
+        : 120;
+      normalized.actionConfig.insertWidth = Number.isFinite(Number(normalized.actionConfig.insertWidth))
+        ? Number(normalized.actionConfig.insertWidth)
+        : 280;
+      normalized.actionConfig.insertHeight = Number.isFinite(Number(normalized.actionConfig.insertHeight))
+        ? Number(normalized.actionConfig.insertHeight)
+        : 180;
+      normalized.actionConfig.moveByX = Number.isFinite(Number(normalized.actionConfig.moveByX))
+        ? Number(normalized.actionConfig.moveByX)
+        : 160;
+      normalized.actionConfig.moveByY = Number.isFinite(Number(normalized.actionConfig.moveByY))
+        ? Number(normalized.actionConfig.moveByY)
+        : 0;
+      normalized.actionConfig.moveDuration = Number.isFinite(Number(normalized.actionConfig.moveDuration))
+        ? Number(normalized.actionConfig.moveDuration)
+        : 0.8;
+      normalized.actionConfig.videoTime = Number.isFinite(Number(normalized.actionConfig.videoTime))
+        ? Number(normalized.actionConfig.videoTime)
+        : 0;
+      normalized.actionConfig.replaceMode = getReplaceTextMode(normalized.actionConfig.replaceMode);
+      normalized.actionConfig.replaceText =
+        typeof normalized.actionConfig.replaceText === 'string' ? normalized.actionConfig.replaceText : '';
+      normalized.actionConfig.replaceCounterStart = Number.isFinite(Number(normalized.actionConfig.replaceCounterStart))
+        ? Number(normalized.actionConfig.replaceCounterStart)
+        : 1;
+      normalized.actionConfig.replaceCounterStep = Number.isFinite(Number(normalized.actionConfig.replaceCounterStep))
+        ? Number(normalized.actionConfig.replaceCounterStep)
+        : 1;
+      normalized.actionConfig.quizQuestion = normalized.actionConfig.quizQuestion || 'Nova pergunta';
+      normalized.actionConfig.quizOptions =
+        Array.isArray(normalized.actionConfig.quizOptions) && normalized.actionConfig.quizOptions.length
+          ? normalized.actionConfig.quizOptions
+          : createDefaultQuizOptions();
+      normalized.actionConfig.quizCorrectOption = Math.min(
+        Math.max(Number(normalized.actionConfig.quizCorrectOption) || 0, 0),
+        normalized.actionConfig.quizOptions.length - 1
+      );
+      normalized.actionConfig.successMessage = normalized.actionConfig.successMessage || 'Resposta correta!';
+      normalized.actionConfig.errorMessage = normalized.actionConfig.errorMessage || 'Resposta incorreta. Tente novamente.';
+      normalized.actionConfig.actionLabel = normalized.actionConfig.actionLabel || 'Validar resposta';
+      normalized.actionConfig.quizBackgroundColor = normalized.actionConfig.quizBackgroundColor || '#ffffff';
+      normalized.actionConfig.quizQuestionColor = normalized.actionConfig.quizQuestionColor || '#171934';
+      normalized.actionConfig.quizOptionBackgroundColor = normalized.actionConfig.quizOptionBackgroundColor || '#f4f6ff';
+      normalized.actionConfig.quizOptionTextColor = normalized.actionConfig.quizOptionTextColor || '#25284c';
+      normalized.actionConfig.quizButtonBackgroundColor = normalized.actionConfig.quizButtonBackgroundColor || '#6d63ff';
+      normalized.actionConfig.points = Math.max(1, Number(normalized.actionConfig.points) || 1);
+      normalized.actionConfig.lockOnWrong = Boolean(normalized.actionConfig.lockOnWrong);
+      normalized.actionConfig.playSourceVideoOnValidate = Boolean(normalized.actionConfig.playSourceVideoOnValidate);
+      return normalized;
+    });
+  element.videoTriggers = normalizedTriggers.filter((trigger) => trigger.enabled || trigger.time > 0 || trigger.actionConfig.type !== 'none');
+  if (!element.videoTriggers.length) {
+    element.videoTriggers = [createVideoTrigger()];
+  }
+  element.videoTriggerTime = element.videoTriggers[0].time;
+  element.videoTriggerAction = element.videoTriggers[0].actionConfig.type;
+  element.videoTriggerSeekTime = element.videoTriggers[0].actionConfig.videoTime;
+  element.videoTriggerTargetElementId = element.videoTriggers[0].actionConfig.targetElementId;
 };
 
 const normalizeDetectorAcceptedDragValue = (value) => {
@@ -1775,6 +2766,66 @@ const markPreviewDetectorTriggered = (slide, detector) => {
 
 const getReplaceTextMode = (value) => (value === REPLACE_COUNTER_MODE ? REPLACE_COUNTER_MODE : REPLACE_TEXT_MODE);
 
+const syncTextInputValue = (control, nextValue = '') => {
+  if (!control) {
+    return;
+  }
+  if (document.activeElement === control) {
+    return;
+  }
+  const normalizedValue = String(nextValue ?? '');
+  if (control.value !== normalizedValue) {
+    control.value = normalizedValue;
+  }
+};
+
+const renderFloatingInputCompareImagePreview = (referenceImage = '') => {
+  if (!floatingInputCompareImagePreview) {
+    return;
+  }
+  const nextValue = String(referenceImage || '').trim();
+  if (!nextValue) {
+    floatingInputCompareImagePreview.innerHTML = '';
+    floatingInputCompareImagePreview.classList.add('hidden');
+    return;
+  }
+  floatingInputCompareImagePreview.innerHTML = `<img src="${escapeAttribute(nextValue)}" alt="Imagem de referência" class="input-compare-reference-preview-image" />`;
+  floatingInputCompareImagePreview.classList.remove('hidden');
+};
+
+const updateElementMenuTriggerVisibility = () => {
+  if (!slideCanvas) {
+    return;
+  }
+  slideCanvas.querySelectorAll('.element-menu-trigger').forEach((trigger) => {
+    const isVisible = trigger.dataset.elementMenuTrigger === activeElementMenuTriggerId;
+    trigger.classList.toggle('is-visible', isVisible);
+    trigger.setAttribute('aria-hidden', isVisible ? 'false' : 'true');
+    trigger.tabIndex = isVisible ? 0 : -1;
+  });
+};
+
+const showElementMenuTrigger = (elementId) => {
+  clearTimeout(elementMenuHideTimer);
+  elementMenuHideTimer = null;
+  if (activeElementMenuTriggerId === elementId) {
+    updateElementMenuTriggerVisibility();
+    return;
+  }
+  activeElementMenuTriggerId = elementId || null;
+  updateElementMenuTriggerVisibility();
+};
+
+const scheduleHideElementMenuTrigger = (elementId) => {
+  clearTimeout(elementMenuHideTimer);
+  elementMenuHideTimer = setTimeout(() => {
+    if (!elementId || activeElementMenuTriggerId === elementId) {
+      activeElementMenuTriggerId = null;
+      updateElementMenuTriggerVisibility();
+    }
+  }, 90);
+};
+
 const setElementTextualContent = (element, value) => {
   if (!element || !REPLACEABLE_TEXT_TYPES.has(element.type)) {
     return false;
@@ -1813,9 +2864,9 @@ const executePreviewReplaceTextAction = (sourceElement, safeConfig, slide) => {
 
 const getPreviewRuleStateKey = (slideId, ruleGroup) => `${slideId || 'slide'}::${ruleGroup || 'group'}`;
 
-const registerPreviewFloatingRuleClick = (slide, element) => {
-  const config = element?.actionConfig || {};
-  if (!slide || !element?.id || !config.requireAllButtonsInGroup) {
+const registerPreviewFloatingRuleClick = (slide, element, trigger) => {
+  const config = trigger?.actionConfig || {};
+  if (!slide || !element?.id || !trigger?.id || !config.requireAllButtonsInGroup) {
     return { ready: true, remaining: 0 };
   }
   const ruleGroup = String(config.ruleGroup || '').trim();
@@ -1825,7 +2876,10 @@ const registerPreviewFloatingRuleClick = (slide, element) => {
   const requiredButtons = (slide.elements || []).filter((item) => {
     if (item?.type !== 'floatingButton' || !item?.id) return false;
     normalizeFloatingActionConfig(item);
-    return item.actionConfig.requireAllButtonsInGroup && String(item.actionConfig.ruleGroup || '').trim() === ruleGroup;
+    return (item.interactionTriggers || []).some((candidateTrigger) => {
+      const candidateConfig = candidateTrigger?.actionConfig || {};
+      return candidateConfig.requireAllButtonsInGroup && String(candidateConfig.ruleGroup || '').trim() === ruleGroup;
+    });
   });
   if (requiredButtons.length < 2) {
     return { ready: false, remaining: 1, invalid: true };
@@ -1847,22 +2901,247 @@ const syncPreviewFloatingRuleButtonState = (slide, elementId) => {
   if (!element || !node) {
     return;
   }
-  const config = element.actionConfig || {};
-  const ruleGroup = String(config.ruleGroup || '').trim();
-  const stateKey = getPreviewRuleStateKey(slide.id, ruleGroup);
-  const clickedIds = previewState.clickedRuleButtons.get(stateKey) || new Set();
-  node.classList.toggle('floating-button-completed', clickedIds.has(elementId));
+  normalizeFloatingActionConfig(element);
+  const isCompleted = (element.interactionTriggers || []).some((trigger) => {
+    const ruleGroup = String(trigger?.actionConfig?.ruleGroup || '').trim();
+    if (!ruleGroup || !trigger?.actionConfig?.requireAllButtonsInGroup) {
+      return false;
+    }
+    const stateKey = getPreviewRuleStateKey(slide.id, ruleGroup);
+    const clickedIds = previewState.clickedRuleButtons.get(stateKey) || new Set();
+    return clickedIds.has(elementId);
+  });
+  node.classList.toggle('floating-button-completed', isCompleted);
 };
 
 const getSelectedActionTriggerElement = () => {
   const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId);
-  return ['floatingButton', 'detector'].includes(element?.type) ? element : null;
+  return ['floatingButton', 'detector', 'timedTrigger', 'input'].includes(element?.type) ? element : null;
+};
+
+const getSelectedFloatingTrigger = (element = getSelectedActionTriggerElement()) => {
+  if (!element) {
+    return null;
+  }
+  normalizeFloatingActionConfig(element);
+  if (!selectedFloatingTriggerId || !element.interactionTriggers.some((trigger) => trigger.id === selectedFloatingTriggerId)) {
+    selectedFloatingTriggerId = element.interactionTriggers[0]?.id || null;
+  }
+  return element.interactionTriggers.find((trigger) => trigger.id === selectedFloatingTriggerId) || element.interactionTriggers[0] || null;
+};
+
+const getSelectedVideoTrigger = (element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId && child.type === 'video')) => {
+  if (!element) {
+    return null;
+  }
+  normalizeVideoTriggerConfig(element);
+  if (!selectedVideoTriggerId || !element.videoTriggers.some((trigger) => trigger.id === selectedVideoTriggerId)) {
+    selectedVideoTriggerId = element.videoTriggers[0]?.id || null;
+  }
+  return element.videoTriggers.find((trigger) => trigger.id === selectedVideoTriggerId) || element.videoTriggers[0] || null;
+};
+
+const getVideoTriggerTargetCandidateIds = (actionType = 'none', sourceElement = null) =>
+  getFloatingTargetCandidateIds(actionType, sourceElement);
+
+const resolveVideoTriggerActionTargetElementId = (element, trigger) => {
+  const actionType = trigger?.actionConfig?.type || 'none';
+  const configuredTargetId = trigger?.actionConfig?.targetElementId || '';
+  if (configuredTargetId) {
+    return configuredTargetId;
+  }
+  if (['pauseVideo', 'playVideo', 'seekVideo'].includes(actionType)) {
+    return element?.id || '';
+  }
+  return '';
+};
+
+const addFloatingTrigger = () => {
+  const element = getSelectedActionTriggerElement();
+  if (!element) {
+    return;
+  }
+  normalizeFloatingActionConfig(element);
+  if ((element.interactionTriggers || []).length >= MAX_ELEMENT_TRIGGER_COUNT) {
+    alert(`Limite de ${MAX_ELEMENT_TRIGGER_COUNT} gatilhos por elemento atingido.`);
+    return;
+  }
+  const trigger = createInteractionTrigger(element.type, {
+    name:
+      element.type === 'detector'
+        ? `Gatilho ${(element.interactionTriggers || []).length + 1}`
+        : element.type === 'timedTrigger'
+          ? `Tempo ${(element.interactionTriggers || []).length + 1}`
+          : element.type === 'input'
+            ? `Envio ${(element.interactionTriggers || []).length + 1}`
+            : `Ação ${(element.interactionTriggers || []).length + 1}`
+  });
+  element.interactionTriggers.push(trigger);
+  selectedFloatingTriggerId = trigger.id;
+  renderSlide();
+  updateFloatingButtonEditorVisibility(element, { forceOpen: true });
+  scheduleHistoryCommit();
+};
+
+const duplicateFloatingTrigger = () => {
+  const element = getSelectedActionTriggerElement();
+  const trigger = getSelectedFloatingTrigger(element);
+  if (!element || !trigger) {
+    return;
+  }
+  if ((element.interactionTriggers || []).length >= MAX_ELEMENT_TRIGGER_COUNT) {
+    alert(`Limite de ${MAX_ELEMENT_TRIGGER_COUNT} gatilhos por elemento atingido.`);
+    return;
+  }
+  const clone = createInteractionTrigger(element.type, {
+    ...JSON.parse(JSON.stringify(trigger)),
+    name: `${trigger.name || (element.type === 'timedTrigger' ? 'Tempo' : 'Ação')} copia`
+  });
+  element.interactionTriggers.push(clone);
+  selectedFloatingTriggerId = clone.id;
+  renderSlide();
+  updateFloatingButtonEditorVisibility(element, { forceOpen: true });
+  scheduleHistoryCommit();
+};
+
+const removeFloatingTrigger = () => {
+  const element = getSelectedActionTriggerElement();
+  const trigger = getSelectedFloatingTrigger(element);
+  if (!element || !trigger) {
+    return;
+  }
+  normalizeFloatingActionConfig(element);
+  if ((element.interactionTriggers || []).length <= 1) {
+    element.interactionTriggers = [createInteractionTrigger(element.type)];
+  } else {
+    element.interactionTriggers = element.interactionTriggers.filter((item) => item.id !== trigger.id);
+  }
+  selectedFloatingTriggerId = element.interactionTriggers[0]?.id || null;
+  element.actionConfig = element.interactionTriggers[0]?.actionConfig || createDefaultActionConfig();
+  renderSlide();
+  updateFloatingButtonEditorVisibility(element, { forceOpen: true });
+  scheduleHistoryCommit();
+};
+
+const addVideoTrigger = () => {
+  const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId && child.type === 'video');
+  if (!element) {
+    return;
+  }
+  normalizeVideoTriggerConfig(element);
+  if ((element.videoTriggers || []).length >= MAX_ELEMENT_TRIGGER_COUNT) {
+    alert(`Limite de ${MAX_ELEMENT_TRIGGER_COUNT} gatilhos por vídeo atingido.`);
+    return;
+  }
+  const trigger = createVideoTrigger({ name: `Tempo ${(element.videoTriggers || []).length + 1}` });
+  element.videoTriggers.push(trigger);
+  selectedVideoTriggerId = trigger.id;
+  updateVideoEditorVisibility(element, { forceOpen: true });
+  scheduleHistoryCommit();
+};
+
+const duplicateVideoTrigger = () => {
+  const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId && child.type === 'video');
+  const trigger = getSelectedVideoTrigger(element);
+  if (!element || !trigger) {
+    return;
+  }
+  if ((element.videoTriggers || []).length >= MAX_ELEMENT_TRIGGER_COUNT) {
+    alert(`Limite de ${MAX_ELEMENT_TRIGGER_COUNT} gatilhos por vídeo atingido.`);
+    return;
+  }
+  const clone = createVideoTrigger({
+    ...JSON.parse(JSON.stringify(trigger)),
+    name: `${trigger.name || 'Tempo'} copia`
+  });
+  element.videoTriggers.push(clone);
+  selectedVideoTriggerId = clone.id;
+  updateVideoEditorVisibility(element, { forceOpen: true });
+  scheduleHistoryCommit();
+};
+
+const removeVideoTrigger = () => {
+  const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId && child.type === 'video');
+  const trigger = getSelectedVideoTrigger(element);
+  if (!element || !trigger) {
+    return;
+  }
+  normalizeVideoTriggerConfig(element);
+  if ((element.videoTriggers || []).length <= 1) {
+    element.videoTriggers = [createVideoTrigger()];
+  } else {
+    element.videoTriggers = element.videoTriggers.filter((item) => item.id !== trigger.id);
+  }
+  selectedVideoTriggerId = element.videoTriggers[0]?.id || null;
+  updateVideoEditorVisibility(element, { forceOpen: true });
+  scheduleHistoryCommit();
+};
+
+const clearPreviewTimedSlideTriggerTimers = () => {
+  (previewState.timedSlideTriggerTimers || []).forEach((timerId) => window.clearTimeout(timerId));
+  previewState.timedSlideTriggerTimers = [];
+};
+
+const getPreviewTimedSlideTriggerKey = (slideId, triggerId) => `${slideId || 'slide'}::${triggerId || 'trigger'}`;
+
+const shouldRerenderAfterTimedAction = (actionType = 'none') =>
+  !['playAudio', 'playVideo', 'pauseVideo', 'seekVideo', 'moveElement', 'playAnimation'].includes(actionType);
+
+const schedulePreviewTimedSlideTriggers = (slide) => {
+  if (!previewState.active || !slide?.id) {
+    clearPreviewTimedSlideTriggerTimers();
+    previewState.activeTimedSlideId = null;
+    previewState.slideEnteredAt = 0;
+    return;
+  }
+  if (previewState.activeTimedSlideId !== slide.id) {
+    clearPreviewTimedSlideTriggerTimers();
+    previewState.activeTimedSlideId = slide.id;
+    previewState.slideEnteredAt = Date.now();
+  } else if ((previewState.timedSlideTriggerTimers || []).length) {
+    return;
+  }
+  const elapsedMs = Math.max(0, Date.now() - (previewState.slideEnteredAt || Date.now()));
+  const triggers = (slide.elements || [])
+    .filter((element) => element?.type === 'timedTrigger')
+    .flatMap((element) => {
+      normalizeFloatingActionConfig(element);
+      return (element.interactionTriggers || [])
+        .filter((trigger) => trigger?.enabled !== false && (trigger.actionConfig?.type || 'none') !== 'none')
+        .map((trigger) => ({ element, trigger }));
+    });
+  triggers.forEach(({ element, trigger }) => {
+    const stateKey = getPreviewTimedSlideTriggerKey(slide.id, trigger.id);
+    if (previewState.timedSlideTriggers.get(stateKey) === true) {
+      return;
+    }
+    const delay = Math.max(0, Math.round(Math.max(0, Number(trigger.time) || 0) * 1000 - elapsedMs));
+    const timerId = window.setTimeout(() => {
+      previewState.timedSlideTriggerTimers = (previewState.timedSlideTriggerTimers || []).filter((item) => item !== timerId);
+      const activeSlide = getPreviewActiveSlide();
+      if (!previewState.active || activeSlide?.id !== slide.id) {
+        return;
+      }
+      if (previewState.timedSlideTriggers.get(stateKey) === true) {
+        return;
+      }
+      previewState.timedSlideTriggers.set(stateKey, true);
+      const didExecute = executePreviewActionConfig(element, trigger.actionConfig || {}, activeSlide);
+      if (!didExecute) {
+        return;
+      }
+      if (activeSlide.id !== getPreviewActiveSlide()?.id || shouldRerenderAfterTimedAction(trigger.actionConfig?.type || 'none')) {
+        renderSlide();
+      }
+    }, delay);
+    previewState.timedSlideTriggerTimers.push(timerId);
+  });
 };
 
 const getFloatingInsertPreviewRect = (config) => {
   const { width: stageWidth, height: stageHeight } = getStageDimensions();
-  const width = Math.max(40, Number(config?.insertWidth) || 280);
-  const height = Math.max(40, Number(config?.insertHeight) || 180);
+  const width = Number.isFinite(Number(config?.insertWidth)) ? Number(config.insertWidth) : 280;
+  const height = Number.isFinite(Number(config?.insertHeight)) ? Number(config.insertHeight) : 180;
   const maxX = Math.max(0, stageWidth - width);
   const maxY = Math.max(0, stageHeight - height);
   return {
@@ -1880,18 +3159,26 @@ const getFloatingTargetCandidateIds = (actionType = 'none', sourceElement = null
     : actionType === 'playAudio'
       ? ['audio']
       : ['showElement', 'hideElement'].includes(actionType)
-        ? ['text', 'block', 'image', 'audio', 'video', 'quiz', 'floatingButton', 'detector', 'animatedArrow']
-    : actionType === 'moveElement'
-      ? ['text', 'block', 'image']
-      : actionType === 'replaceText'
-        ? Array.from(REPLACEABLE_TEXT_TYPES)
-        : actionType === 'playAnimation'
-          ? Array.from(ANIMATABLE_ELEMENT_TYPES)
-          : [];
+        ? ['text', 'block', 'image', 'audio', 'video', 'quiz', 'floatingButton', 'input', 'detector', 'animatedArrow']
+        : actionType === 'moveElement'
+          ? ['text', 'block', 'image', 'input']
+          : actionType === 'replaceText'
+            ? Array.from(REPLACEABLE_TEXT_TYPES)
+            : actionType === 'playAnimation'
+              ? Array.from(ANIMATABLE_ELEMENT_TYPES)
+              : [];
+  const allowSourceElementAsTarget =
+    (['playVideo', 'pauseVideo', 'seekVideo'].includes(actionType) &&
+      sourceElement?.type === 'video' &&
+      sourceElement?.provider !== 'youtube') ||
+    (actionType === 'playAudio' && sourceElement?.type === 'audio');
   return new Set(
     (slide?.elements || [])
       .filter((item) => {
-        if (!item?.id || !allowedTypes.includes(item.type) || item.id === sourceElement?.id) {
+        if (!item?.id || !allowedTypes.includes(item.type)) {
+          return false;
+        }
+        if (item.id === sourceElement?.id && !allowSourceElementAsTarget) {
           return false;
         }
         if (allowedTypes.includes('video') && item.type === 'video' && item.provider === 'youtube') {
@@ -1903,10 +3190,13 @@ const getFloatingTargetCandidateIds = (actionType = 'none', sourceElement = null
   );
 };
 
+const canActionTriggerElementPlaceInsertedContent = (element, actionType = 'none') =>
+  ['floatingButton', 'detector', 'timedTrigger', 'input'].includes(element?.type) && FLOATING_INSERT_ACTIONS.includes(actionType);
+
 const updateFloatingPlacementControls = (element) => {
-  const isFloatingButton = element?.type === 'floatingButton';
-  const actionType = element?.actionConfig?.type || 'none';
-  const supportsPlacement = isFloatingButton && FLOATING_INSERT_ACTIONS.includes(actionType);
+  const selectedTrigger = getSelectedFloatingTrigger(element);
+  const actionType = selectedTrigger?.actionConfig?.type || 'none';
+  const supportsPlacement = canActionTriggerElementPlaceInsertedContent(element, actionType);
   const supportsTargetPicking = ['moveElement', 'playAnimation', 'replaceText', 'playAudio', 'playVideo', 'pauseVideo', 'seekVideo', 'showElement', 'hideElement'].includes(actionType);
   document.getElementById('floatingPlacementToolsField')?.classList.toggle('hidden', !supportsPlacement);
   if (floatingPickPlacementBtn) {
@@ -1921,6 +3211,26 @@ const updateFloatingPlacementControls = (element) => {
   }
   if (floatingPlacementHint) {
     floatingPlacementHint.textContent = supportsPlacement
+      ? isPickingFloatingInsertPosition
+        ? 'Clique no palco para definir a posição do item.'
+        : 'A prévia mostra onde o item vai aparecer.'
+      : 'Escolha uma ação que adicione item para marcar a posição.';
+  }
+};
+
+const updateVideoPlacementControls = (element) => {
+  const isVideo = element?.type === 'video';
+  const selectedTrigger = getSelectedVideoTrigger(element);
+  const actionType = selectedTrigger?.actionConfig?.type || 'none';
+  const supportsPlacement = isVideo && FLOATING_INSERT_ACTIONS.includes(actionType);
+  document.getElementById('videoPlacementToolsField')?.classList.toggle('hidden', !supportsPlacement);
+  if (videoPickPlacementBtn) {
+    videoPickPlacementBtn.textContent = isPickingFloatingInsertPosition && supportsPlacement ? 'Clique no palco...' : 'Marcar no palco';
+    videoPickPlacementBtn.classList.toggle('active', isPickingFloatingInsertPosition && supportsPlacement);
+    videoPickPlacementBtn.disabled = !supportsPlacement;
+  }
+  if (videoPlacementHint) {
+    videoPlacementHint.textContent = supportsPlacement
       ? isPickingFloatingInsertPosition
         ? 'Clique no palco para definir a posição do item.'
         : 'A prévia mostra onde o item vai aparecer.'
@@ -1962,13 +3272,16 @@ const updateFloatingPlacementPreview = () => {
   slideCanvas.querySelectorAll('.floating-target-candidate').forEach((node) => node.classList.remove('floating-target-candidate'));
   const element = getSelectedActionTriggerElement();
   if (!element) {
-    isPickingFloatingInsertPosition = false;
+    if (currentStageEditor !== 'video') {
+      isPickingFloatingInsertPosition = false;
+    }
     isPickingFloatingTargetElement = false;
     updateFloatingPlacementControls(null);
     return;
   }
   normalizeFloatingActionConfig(element);
-  const actionType = element.actionConfig?.type || 'none';
+  const selectedTrigger = getSelectedFloatingTrigger(element);
+  const actionType = selectedTrigger?.actionConfig?.type || 'none';
   if (!FLOATING_INSERT_ACTIONS.includes(actionType)) {
     isPickingFloatingInsertPosition = false;
   }
@@ -1977,7 +3290,7 @@ const updateFloatingPlacementPreview = () => {
   }
   if (FLOATING_INSERT_ACTIONS.includes(actionType)) {
     const preview = document.createElement('div');
-    const rect = getFloatingInsertPreviewRect(element.actionConfig);
+    const rect = getFloatingInsertPreviewRect(selectedTrigger?.actionConfig);
     preview.className = `floating-placement-preview${isPickingFloatingInsertPosition ? ' picking' : ''}`;
     preview.dataset.label = `Prévia ${rect.width}x${rect.height}`;
     preview.style.left = `${rect.x}px`;
@@ -1992,6 +3305,36 @@ const updateFloatingPlacementPreview = () => {
     node.classList.toggle('floating-target-candidate', isPickingFloatingTargetElement && candidateIds.has(targetId));
   });
   updateFloatingPlacementControls(element);
+};
+
+const updateVideoPlacementPreview = () => {
+  if (!slideCanvas) return;
+  slideCanvas.querySelectorAll('.video-placement-preview').forEach((node) => node.remove());
+  const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId && child.type === 'video');
+  if (!element || currentStageEditor !== 'video') {
+    updateVideoPlacementControls(null);
+    return;
+  }
+  normalizeVideoTriggerConfig(element);
+  const selectedTrigger = getSelectedVideoTrigger(element);
+  const actionType = selectedTrigger?.actionConfig?.type || 'none';
+  if (!FLOATING_INSERT_ACTIONS.includes(actionType)) {
+    if (isPickingFloatingInsertPosition) {
+      isPickingFloatingInsertPosition = false;
+    }
+    updateVideoPlacementControls(element);
+    return;
+  }
+  const preview = document.createElement('div');
+  const rect = getFloatingInsertPreviewRect(selectedTrigger?.actionConfig);
+  preview.className = `floating-placement-preview video-placement-preview${isPickingFloatingInsertPosition ? ' picking' : ''}`;
+  preview.dataset.label = `Prévia ${rect.width}x${rect.height}`;
+  preview.style.left = `${rect.x}px`;
+  preview.style.top = `${rect.y}px`;
+  preview.style.width = `${rect.width}px`;
+  preview.style.height = `${rect.height}px`;
+  slideCanvas.appendChild(preview);
+  updateVideoPlacementControls(element);
 };
 
 const createPreviewRuntimeElement = (type, source, slide) => {
@@ -2059,18 +3402,14 @@ const createPreviewRuntimeElement = (type, source, slide) => {
     quizButtonBackgroundColor: source.quizButtonBackgroundColor || '#6d63ff',
     points: Math.max(1, Number(source.points) || 1),
     lockOnWrong: Boolean(source.lockOnWrong),
-    width: Math.max(40, Number(source.insertWidth) || 420),
-    height: Math.max(40, Number(source.insertHeight) || 280)
+    playSourceVideoOnValidate: Boolean(source.playSourceVideoOnValidate),
+    sourceVideoElementId: source.sourceVideoElementId || '',
+    width: Number.isFinite(Number(source.insertWidth)) ? Number(source.insertWidth) : 420,
+    height: Number.isFinite(Number(source.insertHeight)) ? Number(source.insertHeight) : 280
   };
 };
 
 const canStudentDragElement = (element) => STUDENT_DRAGGABLE_TYPES.has(element?.type) && Boolean(element?.studentCanDrag);
-
-const isTypingTarget = (target) =>
-  target instanceof HTMLInputElement ||
-  target instanceof HTMLTextAreaElement ||
-  target instanceof HTMLSelectElement ||
-  Boolean(target?.isContentEditable);
 
 const getElementRuntimeBox = (element) => {
   const renderState = getElementRenderState(element);
@@ -2088,7 +3427,59 @@ const boxesOverlap = (first, second) =>
   first.top < second.top + second.height &&
   first.top + first.height > second.top;
 
-const findPreviewNodeByElementId = (elementId) => slideCanvas?.querySelector(`[data-element-id="${elementId}"]`) || null;
+const findPreviewNodeByElementId = (elementId) =>
+  slideCanvas?.querySelector(`[data-element-id="${escapeAttributeSelectorValue(elementId)}"]`) || null;
+
+const getPreviewMediaStateKey = (slideId = '', elementId = '') => `${slideId}::${elementId}`;
+const getPreviewTimedVideoTriggerKey = (slideId = '', elementId = '') => `${slideId}::${elementId}`;
+
+const snapshotPreviewMediaState = (slide) => {
+  if (!previewState.active || !slide?.id || !slideCanvas) {
+    return;
+  }
+  slideCanvas.querySelectorAll('[data-element-id]').forEach((node) => {
+    const elementId = node.getAttribute('data-element-id') || '';
+    if (!elementId) {
+      return;
+    }
+    const mediaNode = getPreviewMediaNode(node);
+    if (mediaNode instanceof HTMLVideoElement || mediaNode instanceof HTMLAudioElement) {
+      previewState.mediaState.set(getPreviewMediaStateKey(slide.id, elementId), {
+        currentTime: Math.max(0, Number(mediaNode.currentTime) || 0),
+        paused: mediaNode.paused
+      });
+    }
+  });
+};
+
+const restorePreviewMediaState = (slide, element, node) => {
+  if (!previewState.active || !slide?.id || !element?.id) {
+    return;
+  }
+  const mediaNode = getPreviewMediaNode(node);
+  if (!(mediaNode instanceof HTMLVideoElement) && !(mediaNode instanceof HTMLAudioElement)) {
+    return;
+  }
+  const state = previewState.mediaState.get(getPreviewMediaStateKey(slide.id, element.id));
+  if (!state) {
+    return;
+  }
+  const applyState = () => {
+    if (Number.isFinite(state.currentTime) && state.currentTime > 0) {
+      try {
+        mediaNode.currentTime = state.currentTime;
+      } catch (error) { }
+    }
+    if (state.paused === false) {
+      mediaNode.play().catch(() => { });
+    }
+  };
+  if (mediaNode.readyState >= 1) {
+    applyState();
+  } else {
+    mediaNode.addEventListener('loadedmetadata', applyState, { once: true });
+  }
+};
 
 const applyPreviewAudioPresentation = (node, element, { authoring = false } = {}) => {
   normalizeAudioElement(element);
@@ -2118,12 +3509,12 @@ const controlPreviewAudioElement = (slide, targetElementId) => {
   if (!target) {
     return false;
   }
-  const node = findPreviewNodeByElementId(targetElementId);
+  const node = getPreviewMediaNode(findPreviewNodeByElementId(targetElementId));
   if (!(node instanceof HTMLAudioElement)) {
     return false;
   }
   node.currentTime = 0;
-  node.play().catch(() => {});
+  node.play().catch(() => { });
   return true;
 };
 
@@ -2142,21 +3533,21 @@ const controlPreviewVideoElement = (slide, targetElementId, actionType, timeSeco
   if (!target || target.provider === 'youtube') {
     return false;
   }
-  const node = findPreviewNodeByElementId(targetElementId);
+  const node = getPreviewMediaNode(findPreviewNodeByElementId(targetElementId));
   if (!(node instanceof HTMLVideoElement)) {
     return false;
   }
   const nextTime = Math.max(0, Number(timeSeconds) || 0);
   switch (actionType) {
     case 'playVideo':
-      node.play().catch(() => {});
+      node.play().catch(() => { });
       return true;
     case 'pauseVideo':
       node.pause();
       return true;
     case 'seekVideo':
       node.currentTime = nextTime;
-      node.play().catch(() => {});
+      node.play().catch(() => { });
       return true;
     default:
       return false;
@@ -2168,52 +3559,54 @@ const attachPreviewVideoTimedTrigger = (videoNode, element) => {
   if (!(videoNode instanceof HTMLVideoElement) || element.provider === 'youtube') {
     return;
   }
-  const triggerTime = Math.max(0, Number(element.videoTriggerTime) || 0);
-  if ((element.videoTriggerAction || 'none') === 'none' || triggerTime <= 0) {
+  const slide = getPreviewActiveSlide();
+  if (!slide?.id || !element?.id) {
     return;
   }
-  let fired = false;
+  const triggers = (element.videoTriggers || []).filter(
+    (trigger) => trigger?.enabled !== false && (trigger.actionConfig?.type || 'none') !== 'none' && Number(trigger.time) > 0
+  );
+  if (!triggers.length) {
+    return;
+  }
+  const stateKey = getPreviewTimedVideoTriggerKey(slide.id, element.id);
+  const firedIds = new Set(previewState.timedVideoTriggers.get(stateKey) || []);
+  previewState.timedVideoTriggers.set(stateKey, firedIds);
   const resetIfNeeded = () => {
-    if ((videoNode.currentTime || 0) < triggerTime) {
-      fired = false;
-    }
+    const currentTime = Number(videoNode.currentTime) || 0;
+    triggers.forEach((trigger) => {
+      if (currentTime < Math.max(0, Number(trigger.time) || 0)) {
+        firedIds.delete(trigger.id);
+      }
+    });
+    previewState.timedVideoTriggers.set(stateKey, new Set(firedIds));
   };
   videoNode.addEventListener('seeking', resetIfNeeded);
   videoNode.addEventListener('timeupdate', () => {
-    if (fired || (videoNode.currentTime || 0) < triggerTime) {
-      return;
-    }
-    fired = true;
-    const action = element.videoTriggerAction || 'none';
-    if (action === 'pauseVideo') {
-      videoNode.pause();
-      return;
-    }
-    if (action === 'playAudio') {
-      controlPreviewAudioElement(getPreviewActiveSlide(), element.videoTriggerTargetElementId || '');
-      return;
-    }
-    if (action === 'playVideo') {
-      videoNode.play().catch(() => {});
-      return;
-    }
-    if (action === 'seekVideo') {
-      videoNode.currentTime = Math.max(0, Number(element.videoTriggerSeekTime) || 0);
-      videoNode.play().catch(() => {});
-      return;
-    }
-    if (action === 'showElement') {
-      setPreviewElementVisibilityFromAction(getPreviewActiveSlide(), element.videoTriggerTargetElementId || '', false);
-      renderSlide();
-      return;
-    }
-    if (action === 'hideElement') {
-      setPreviewElementVisibilityFromAction(getPreviewActiveSlide(), element.videoTriggerTargetElementId || '', true);
+    const currentTime = Number(videoNode.currentTime) || 0;
+    let shouldRerender = false;
+    triggers.forEach((trigger) => {
+      if (firedIds.has(trigger.id) || currentTime < Math.max(0, Number(trigger.time) || 0)) {
+        return;
+      }
+      firedIds.add(trigger.id);
+      previewState.timedVideoTriggers.set(stateKey, new Set(firedIds));
+      const actionConfig = {
+        ...(trigger.actionConfig || {}),
+        targetElementId: resolveVideoTriggerActionTargetElementId(element, trigger)
+      };
+      const didExecute = executePreviewActionConfig(element, actionConfig, getPreviewActiveSlide());
+      if (didExecute && !['playAudio', 'playVideo', 'pauseVideo', 'seekVideo', 'moveElement', 'playAnimation'].includes(actionConfig.type || 'none')) {
+        shouldRerender = true;
+      }
+    });
+    if (shouldRerender) {
       renderSlide();
     }
   });
   videoNode.addEventListener('ended', () => {
-    fired = false;
+    firedIds.clear();
+    previewState.timedVideoTriggers.delete(stateKey);
   });
 };
 
@@ -2279,6 +3672,8 @@ const executePreviewActionConfig = (element, config, slide) => {
         return true;
       }
       return false;
+    case 'redirect':
+      return openExternalRedirect(safeConfig.url);
     case 'moveElement': {
       const target = slide.elements?.find((item) => item?.id === safeConfig.targetElementId);
       return animatePreviewElementMove(
@@ -2319,6 +3714,7 @@ const executePreviewActionConfig = (element, config, slide) => {
       slide.elements = slide.elements || [];
       const runtimeSourceId = element.id;
       const runtimeActionType = config.type;
+      const sourceVideoElementId = element?.type === 'video' ? element.id : (safeConfig.sourceVideoElementId || '');
       const hasExistingRuntimeElement = slide.elements.some(
         (item) => item?.isRuntimeGenerated && item.runtimeSourceId === runtimeSourceId && item.runtimeActionType === runtimeActionType
       );
@@ -2328,7 +3724,11 @@ const executePreviewActionConfig = (element, config, slide) => {
         );
       } else {
         slide.elements.push(
-          createPreviewRuntimeElement(elementTypeMap[safeConfig.type], { ...safeConfig, runtimeSourceId, runtimeActionType }, slide)
+          createPreviewRuntimeElement(
+            elementTypeMap[safeConfig.type],
+            { ...safeConfig, runtimeSourceId, runtimeActionType, sourceVideoElementId },
+            slide
+          )
         );
       }
       return true;
@@ -2354,11 +3754,17 @@ const triggerPreviewDetectorsForElement = (draggedElement, slide, options = {}) 
       if (!activation.ready) {
         return;
       }
-      const didTrigger = executePreviewActionConfig(detector, detector.actionConfig || {}, slide);
-      activated = didTrigger || activated;
-      if (didTrigger && detector.actionConfig?.detectorTriggerOnce) {
-        markPreviewDetectorTriggered(slide, detector);
-      }
+      normalizeFloatingActionConfig(detector);
+      (detector.interactionTriggers || []).forEach((trigger) => {
+        if (trigger?.enabled === false) {
+          return;
+        }
+        const didTrigger = executePreviewActionConfig(detector, trigger.actionConfig || {}, slide);
+        activated = didTrigger || activated;
+        if (didTrigger && trigger.actionConfig?.detectorTriggerOnce) {
+          markPreviewDetectorTriggered(slide, detector);
+        }
+      });
     });
   if (activated) {
     renderSlide();
@@ -2433,6 +3839,39 @@ const executePreviewFloatingButtonAction = (element) => {
   }
 };
 
+const executePreviewFloatingButtonTriggers = (element) => {
+  const slide = getPreviewActiveSlide();
+  if (!slide || !element) return;
+  normalizeFloatingActionConfig(element);
+  let executedCount = 0;
+  let blockedRuleState = null;
+  (element.interactionTriggers || []).forEach((trigger) => {
+    if (trigger?.enabled === false) {
+      return;
+    }
+    const ruleState = registerPreviewFloatingRuleClick(slide, element, trigger);
+    if (!ruleState.ready) {
+      blockedRuleState = blockedRuleState || ruleState;
+      return;
+    }
+    if (executePreviewActionConfig(element, trigger.actionConfig || {}, slide)) {
+      executedCount += 1;
+    }
+  });
+  syncPreviewFloatingRuleButtonState(slide, element.id);
+  if (!executedCount && blockedRuleState) {
+    if (blockedRuleState.invalid) {
+      alert('Essa regra precisa de um nome de grupo e de pelo menos 2 botões no mesmo slide.');
+    } else {
+      alert(`Faltam ${blockedRuleState.remaining} botão(ões) desta regra para liberar a ação.`);
+    }
+    return;
+  }
+  if (executedCount > 0) {
+    renderSlide();
+  }
+};
+
 const updateHistoryButtons = () => {
   if (undoActionBtn) {
     undoActionBtn.disabled = historyState.past.length <= 1;
@@ -2473,11 +3912,160 @@ const createEditorSnapshot = () =>
     selectedCourseId: moduleCourseSelect?.value || ''
   });
 
+const createBuilderDraftPayload = () => ({
+  slides: deepClone(builderState.slides || []),
+  activeSlideId: builderState.activeSlideId || null,
+  selectedElementId,
+  moduleTitle: moduleTitleInput?.value || '',
+  moduleDescription: moduleDescriptionInput?.value || '',
+  selectedCourseId: moduleCourseSelect?.value || '',
+  stageSize:
+    builderState.stageSize.width > 0 && builderState.stageSize.height > 0
+      ? deepClone(builderState.stageSize)
+      : { ...DEFAULT_STAGE_SIZE },
+  moduleSettings: deepClone(builderState.moduleSettings || {}),
+  editingModuleId: editingModuleId || null,
+  editingCourseId: editingCourseId || null,
+  editingModuleCourseId: editingModuleCourseId || null,
+  savedAt: new Date().toISOString()
+});
+
+const persistBuilderDraftLocally = () => {
+  try {
+    localStorage.setItem(BUILDER_DRAFT_STORAGE_KEY, JSON.stringify(createBuilderDraftPayload()));
+  } catch (error) {
+    console.warn('Nao foi possivel salvar o rascunho local.', error);
+  }
+};
+
+const getBuilderAutosaveTarget = () => {
+  const courseId = editingModuleCourseId || editingCourseId || moduleCourseSelect?.value || '';
+  const title = moduleTitleInput?.value?.trim() || '';
+  if (!editingModuleId || !courseId || !title) {
+    return null;
+  }
+  return { courseId, moduleId: editingModuleId, title };
+};
+
+const persistBuilderDraftRemotely = async () => {
+  const target = getBuilderAutosaveTarget();
+  if (!target) {
+    return;
+  }
+  try {
+    updateBuilderStageSize();
+    await authorizedFetch(`/api/admin/courses/${target.courseId}/modules/${target.moduleId}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        title: target.title,
+        description: moduleDescriptionInput?.value?.trim() || null,
+        slug: createSlug(target.title),
+        builderData: {
+          slides: deepClone(builderState.slides || []),
+          stageSize:
+            builderState.stageSize.width > 0 && builderState.stageSize.height > 0
+              ? deepClone(builderState.stageSize)
+              : { ...DEFAULT_STAGE_SIZE },
+          moduleSettings: {
+            lockNextModuleUntilCompleted: Boolean(builderState.moduleSettings?.lockNextModuleUntilCompleted),
+            isPublic: Boolean(builderState.moduleSettings?.isPublic),
+            coverImage: getModuleCoverValue()
+          }
+        }
+      })
+    });
+  } catch (error) {
+    console.warn('Nao foi possivel sincronizar o rascunho remoto.', error);
+  }
+};
+
+const scheduleBuilderAutosave = () => {
+  if (!draftRestoreCompleted) {
+    return;
+  }
+  clearTimeout(autosaveState.localTimer);
+  autosaveState.localTimer = setTimeout(() => {
+    persistBuilderDraftLocally();
+  }, 250);
+  clearTimeout(autosaveState.remoteTimer);
+  autosaveState.remoteTimer = setTimeout(() => {
+    persistBuilderDraftRemotely();
+  }, 1800);
+};
+
+const restoreBuilderDraftIfAvailable = () => {
+  let rawDraft = '';
+  try {
+    rawDraft = localStorage.getItem(BUILDER_DRAFT_STORAGE_KEY) || '';
+  } catch (error) {
+    console.warn('Nao foi possivel ler o rascunho local.', error);
+    return false;
+  }
+  if (!rawDraft) {
+    return false;
+  }
+  try {
+    const draft = JSON.parse(rawDraft);
+    if (!Array.isArray(draft?.slides) || !draft.slides.length) {
+      return false;
+    }
+    historyState.suppressCommit = true;
+    builderState.slides = draft.slides;
+    builderState.activeSlideId = draft.activeSlideId || draft.slides[0]?.id || null;
+    builderState.stageSize = normalizeTemplateStageSize(draft.stageSize);
+    builderState.moduleSettings = normalizeTemplateModuleSettings(draft.moduleSettings);
+    selectedElementId = draft.selectedElementId || null;
+    editingModuleId = draft.editingModuleId || null;
+    editingCourseId = draft.editingCourseId || null;
+    editingModuleCourseId = draft.editingModuleCourseId || null;
+    if (moduleTitleInput) {
+      moduleTitleInput.value = draft.moduleTitle || '';
+    }
+    if (moduleDescriptionInput) {
+      moduleDescriptionInput.value = draft.moduleDescription || '';
+    }
+    if (moduleCoverUrlInput) {
+      moduleCoverUrlInput.value = builderState.moduleSettings?.coverImage || '';
+    }
+    if (moduleCourseSelect && draft.selectedCourseId) {
+      moduleCourseSelect.value = draft.selectedCourseId;
+      loadCourseModules(draft.selectedCourseId);
+    }
+    if (moduleCourseSelect) {
+      moduleCourseSelect.disabled = Boolean(editingModuleId);
+    }
+    if (moduleLockNextToggle) {
+      moduleLockNextToggle.checked = Boolean(builderState.moduleSettings.lockNextModuleUntilCompleted);
+    }
+    if (modulePublicToggle) {
+      modulePublicToggle.checked = Boolean(builderState.moduleSettings.isPublic);
+    }
+    setPublicModuleLinkState(
+      editingModuleId && builderState.moduleSettings.isPublic
+        ? { moduleId: editingModuleId, title: draft.moduleTitle || '' }
+        : {}
+    );
+    updateSaveButtonLabel();
+    syncPublicModuleLinkUi();
+    renderSlideList();
+    renderSlide();
+    updateElementInspector(getActiveSlide()?.elements.find((child) => child.id === selectedElementId) || null);
+    historyState.suppressCommit = false;
+    resetHistoryState();
+    scheduleBuilderAutosave();
+    return true;
+  } catch (error) {
+    console.warn('Nao foi possivel restaurar o rascunho local.', error);
+    return false;
+  }
+};
+
 const applyEditorSnapshot = (snapshot) => {
   const state = JSON.parse(snapshot);
   historyState.suppressCommit = true;
   builderState.slides = Array.isArray(state.slides) ? state.slides : [];
   builderState.activeSlideId = state.activeSlideId || builderState.slides[0]?.id || null;
+  builderState.moduleSettings = normalizeTemplateModuleSettings(state.moduleSettings);
   selectedElementId = state.selectedElementId || null;
   if (moduleTitleInput) {
     moduleTitleInput.value = state.moduleTitle || '';
@@ -2485,6 +4073,17 @@ const applyEditorSnapshot = (snapshot) => {
   if (moduleDescriptionInput) {
     moduleDescriptionInput.value = state.moduleDescription || '';
   }
+  if (moduleCoverUrlInput) {
+    moduleCoverUrlInput.value = builderState.moduleSettings?.coverImage || '';
+  }
+  if (moduleLockNextToggle) {
+    moduleLockNextToggle.checked = Boolean(builderState.moduleSettings.lockNextModuleUntilCompleted);
+  }
+  if (modulePublicToggle) {
+    modulePublicToggle.checked = Boolean(builderState.moduleSettings.isPublic);
+  }
+  syncModuleCoverPreview();
+  syncPublicModuleLinkUi();
   if (moduleCourseSelect && state.selectedCourseId) {
     moduleCourseSelect.value = state.selectedCourseId;
   }
@@ -2501,11 +4100,13 @@ const commitHistoryState = () => {
   }
   const snapshot = createEditorSnapshot();
   if (historyState.past[historyState.past.length - 1] === snapshot) {
+    scheduleBuilderAutosave();
     updateHistoryButtons();
     return;
   }
   historyState.past.push(snapshot);
   historyState.future = [];
+  scheduleBuilderAutosave();
   updateHistoryButtons();
 };
 
@@ -2517,6 +4118,7 @@ const scheduleHistoryCommit = () => {
   historyState.debounceTimer = setTimeout(() => {
     commitHistoryState();
   }, 220);
+  scheduleBuilderAutosave();
 };
 
 const undoLastAction = () => {
@@ -2548,30 +4150,8 @@ const resetHistoryState = () => {
   clearTimeout(historyState.debounceTimer);
   historyState.past = [createEditorSnapshot()];
   historyState.future = [];
+  scheduleBuilderAutosave();
   updateHistoryButtons();
-};
-
-const getYouTubeEmbedUrl = (value) => {
-  if (!value) return null;
-  try {
-    const url = new URL(value);
-    const host = url.hostname.replace(/^www\./, '');
-    let videoId = '';
-    if (host === 'youtu.be') {
-      videoId = url.pathname.split('/').filter(Boolean)[0] || '';
-    } else if (host.includes('youtube.com')) {
-      if (url.pathname === '/watch') {
-        videoId = url.searchParams.get('v') || '';
-      } else if (url.pathname.startsWith('/shorts/')) {
-        videoId = url.pathname.split('/')[2] || '';
-      } else if (url.pathname.startsWith('/embed/')) {
-        videoId = url.pathname.split('/')[2] || '';
-      }
-    }
-    return videoId ? `https://www.youtube.com/embed/${videoId}` : null;
-  } catch (error) {
-    return null;
-  }
 };
 
 const chooseMediaSource = (label) => {
@@ -2593,11 +4173,20 @@ const chooseMediaSource = (label) => {
 
 const updateBackgroundMediaEditorFields = () => {
   const mode = backgroundMediaTypeSelect?.value || 'image-url';
+  const isBatch = Boolean(backgroundBatchToggle?.checked);
   document.getElementById('backgroundSolidColorField')?.classList.toggle('hidden', mode !== 'color-solid');
   document.getElementById('backgroundGradientStartField')?.classList.toggle('hidden', mode !== 'color-gradient');
   document.getElementById('backgroundGradientEndField')?.classList.toggle('hidden', mode !== 'color-gradient');
   document.getElementById('backgroundMediaUrlField')?.classList.toggle('hidden', !['image-url', 'video-url'].includes(mode));
   document.getElementById('backgroundMediaLocalField')?.classList.toggle('hidden', !['image-local', 'video-local'].includes(mode));
+  if (backgroundMediaUrlInput && ['image-url', 'video-url'].includes(mode)) {
+    backgroundMediaUrlInput.placeholder = isBatch
+      ? 'Cole uma URL por linha (ou separadas por ; ou ,)'
+      : 'Cole a URL da mídia';
+  }
+  if (backgroundMediaLocalBtn && ['image-local', 'video-local'].includes(mode)) {
+    backgroundMediaLocalBtn.textContent = isBatch ? 'Escolher arquivos' : 'Escolher arquivo';
+  }
   if (!backgroundMediaEditorStatus) return;
   if (mode === 'color-solid') {
     backgroundMediaEditorStatus.textContent = 'Escolha uma cor sólida para o fundo do slide.';
@@ -2605,6 +4194,14 @@ const updateBackgroundMediaEditorFields = () => {
   }
   if (mode === 'color-gradient') {
     backgroundMediaEditorStatus.textContent = 'Escolha duas cores para montar um fundo em gradiente.';
+    return;
+  }
+  if (isBatch && (mode === 'image-url' || mode === 'video-url')) {
+    backgroundMediaEditorStatus.textContent = 'Ação em lote ativa: informe várias URLs e criaremos um slide para cada fundo.';
+    return;
+  }
+  if (isBatch && (mode === 'image-local' || mode === 'video-local')) {
+    backgroundMediaEditorStatus.textContent = 'Ação em lote ativa: selecione vários arquivos e criaremos um slide para cada fundo.';
     return;
   }
   if (mode === 'video-url' || mode === 'video-local') {
@@ -2691,6 +4288,65 @@ const readLocalFile = (input, acceptedPrefix) =>
     input.addEventListener('change', handleChange, { once: true });
     input.click();
   });
+
+const readLocalFiles = (input, acceptedPrefix) =>
+  new Promise((resolve, reject) => {
+    if (!input) {
+      reject(new Error('Entrada de arquivo indisponível.'));
+      return;
+    }
+    const hadMultiple = input.hasAttribute('multiple');
+    input.setAttribute('multiple', 'multiple');
+    input.value = '';
+    const handleChange = () => {
+      input.removeEventListener('change', handleChange);
+      if (!hadMultiple) {
+        input.removeAttribute('multiple');
+      }
+      const files = Array.from(input.files || []);
+      if (!files.length) {
+        resolve([]);
+        return;
+      }
+      const invalidFile = files.find((file) => !String(file.type || '').startsWith(`${acceptedPrefix}/`));
+      if (invalidFile) {
+        reject(new Error(`Selecione apenas arquivos de ${acceptedPrefix} válidos.`));
+        return;
+      }
+      Promise.all(
+        files.map((file) =>
+          new Promise((innerResolve, innerReject) => {
+            const reader = new FileReader();
+            reader.onload = () => innerResolve(typeof reader.result === 'string' ? reader.result : null);
+            reader.onerror = () => innerReject(new Error(`Não foi possível carregar ${file.name}.`));
+            reader.readAsDataURL(file);
+          })
+        )
+      )
+        .then((results) => resolve(results.filter(Boolean)))
+        .catch(reject);
+    };
+    input.addEventListener('change', handleChange, { once: true });
+    input.click();
+  });
+
+const parseBatchBackgroundUrls = (rawValue = '') => {
+  const text = String(rawValue || '').trim();
+  if (!text) {
+    return [];
+  }
+  const byLines = text
+    .split(/\r?\n/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (byLines.length > 1) {
+    return byLines;
+  }
+  return text
+    .split(/[;,]/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+};
 
 const syncElementBackgroundState = (element) => {
   if (!element) return;
@@ -2796,6 +4452,9 @@ const syncBlockEditorControls = (element) => {
 
 const syncImageEditorControls = (element) => {
   const isImage = element?.type === 'image';
+  if (imageSourceModeSelect) imageSourceModeSelect.value = 'local';
+  if (imageSourceUrlInput) imageSourceUrlInput.value = isImage && element.src && !String(element.src).startsWith('data:') ? element.src : '';
+  document.getElementById('imageSourceUrlField')?.classList.toggle('hidden', (imageSourceModeSelect?.value || 'local') !== 'url');
   if (imageElementWidthInput) imageElementWidthInput.value = isImage ? String(element.width || '') : '';
   if (imageElementHeightInput) imageElementHeightInput.value = isImage ? String(element.height || '') : '';
   if (imageElementRotationInput) imageElementRotationInput.value = isImage ? String(element.rotation || 0) : '0';
@@ -2805,11 +4464,30 @@ const syncImageEditorControls = (element) => {
 
 const syncAudioEditorControls = (element) => {
   const isAudio = element?.type === 'audio';
+  if (isAudio) {
+    normalizeAudioElement(element);
+  }
+  if (audioSourceModeSelect) audioSourceModeSelect.value = 'local';
+  if (audioSourceUrlInput) audioSourceUrlInput.value = isAudio && element.src && !String(element.src).startsWith('data:') ? element.src : '';
+  document.getElementById('audioSourceUrlField')?.classList.toggle('hidden', (audioSourceModeSelect?.value || 'local') !== 'url');
   if (audioElementWidthInput) audioElementWidthInput.value = isAudio ? String(element.width || '') : '';
   if (audioElementHeightInput) audioElementHeightInput.value = isAudio ? String(element.height || '') : '';
   if (audioElementRotationInput) audioElementRotationInput.value = isAudio ? String(element.rotation || 0) : '0';
   if (audioElementVisibleToggle) audioElementVisibleToggle.checked = isAudio ? Boolean(element.audioVisible) : true;
   if (audioElementLoopToggle) audioElementLoopToggle.checked = isAudio ? Boolean(element.audioLoop) : false;
+  if (audioCaptionEnabledToggle) audioCaptionEnabledToggle.checked = isAudio ? Boolean(element.captionsEnabled) : false;
+  if (audioCaptionPositionSelect) audioCaptionPositionSelect.value = isAudio ? element.captionStyle?.position || 'bottom' : 'bottom';
+  if (audioCaptionWidthInput) audioCaptionWidthInput.value = isAudio && element.captionStyle?.width ? String(element.captionStyle.width) : '';
+  if (audioCaptionFontSizeInput) audioCaptionFontSizeInput.value = isAudio ? String(element.captionStyle?.fontSize || 20) : '20';
+  if (audioCaptionTextColorInput) audioCaptionTextColorInput.value = isAudio ? element.captionStyle?.textColor || '#ffffff' : '#ffffff';
+  if (audioCaptionBackgroundColorInput) {
+    audioCaptionBackgroundColorInput.value = isAudio ? (element.captionStyle?.backgroundColor || '#0f172acc').slice(0, 7) : '#0f172a';
+  }
+  if (audioCaptionAccentColorInput) audioCaptionAccentColorInput.value = isAudio ? element.captionStyle?.accentColor || '#38bdf8' : '#38bdf8';
+  if (audioCaptionUppercaseToggle) audioCaptionUppercaseToggle.checked = isAudio ? Boolean(element.captionStyle?.uppercase) : false;
+  if (isAudio) {
+    renderCaptionSegmentEditor('audio', element);
+  }
 };
 
 const updateStageEditorState = () => {
@@ -2822,8 +4500,9 @@ const updateStageEditorState = () => {
   const hasVideo = videoEditorCard && !videoEditorCard.classList.contains('hidden');
   const hasBackground = backgroundEditorCard && !backgroundEditorCard.classList.contains('hidden');
   const hasEraser = eraserEditorCard && !eraserEditorCard.classList.contains('hidden');
+  const hasPen = penEditorCard && !penEditorCard.classList.contains('hidden');
   const hasAnimation = animationEditorCard && !animationEditorCard.classList.contains('hidden');
-  const hasAnyEditor = hasText || hasBlock || hasImage || hasAudio || hasQuiz || hasFloating || hasVideo || hasBackground || hasEraser || hasAnimation;
+  const hasAnyEditor = hasText || hasBlock || hasImage || hasAudio || hasQuiz || hasFloating || hasVideo || hasBackground || hasEraser || hasPen || hasAnimation;
   if (stageEditorDock) {
     stageEditorDock.classList.toggle('hidden', !hasAnyEditor);
   }
@@ -2834,6 +4513,7 @@ const updateStageEditorState = () => {
 
 const closeStageEditors = () => {
   currentStageEditor = 'none';
+  showElementMenuTrigger(null);
   textEditorCard?.classList.add('hidden');
   blockEditorCard?.classList.add('hidden');
   imageEditorCard?.classList.add('hidden');
@@ -2843,8 +4523,10 @@ const closeStageEditors = () => {
   videoEditorCard?.classList.add('hidden');
   backgroundEditorCard?.classList.add('hidden');
   eraserEditorCard?.classList.add('hidden');
+  penEditorCard?.classList.add('hidden');
   animationEditorCard?.classList.add('hidden');
   closeEraserSession({ keepEditor: true });
+  closePenSession({ keepEditor: true });
   isPickingFloatingInsertPosition = false;
   updateFloatingPlacementControls(null);
   updateStageEditorState();
@@ -2858,40 +4540,209 @@ const updateVideoEditorVisibility = (element, options = {}) => {
     if (currentStageEditor === 'video' && !options.forceOpen) {
       currentStageEditor = 'none';
     }
+    isPickingFloatingInsertPosition = false;
     videoEditorCard.classList.add('hidden');
+    updateVideoPlacementControls(null);
     updateStageEditorState();
     return;
   }
   currentStageEditor = 'video';
   lastStageEditorOpenedAt = Date.now();
   normalizeVideoTriggerConfig(element);
+  const selectedTrigger = getSelectedVideoTrigger(element);
   videoEditorCard.classList.remove('hidden');
+  if (videoTriggerList) {
+    videoTriggerList.innerHTML = (element.videoTriggers || [])
+      .map((trigger, index) => {
+        const isActive = trigger.id === selectedTrigger?.id;
+        return `
+          <button type="button" class="trigger-chip${isActive ? ' active' : ''}" data-video-trigger-id="${trigger.id}">
+            <span>
+              <span class="trigger-chip-title">${escapeHtml(trigger.name || `Tempo ${index + 1}`)}</span>
+              <small class="trigger-chip-meta">${escapeHtml(`${Number(trigger.time || 0).toFixed(1)}s • ${trigger.actionConfig?.type || 'none'}`)}</small>
+            </span>
+          </button>
+        `;
+      })
+      .join('');
+  }
+  if (videoDuplicateTriggerBtn) {
+    videoDuplicateTriggerBtn.disabled = !selectedTrigger;
+  }
+  if (videoRemoveTriggerBtn) {
+    videoRemoveTriggerBtn.disabled = (element.videoTriggers || []).length <= 1;
+  }
   if (videoTriggerTimeInput) {
-    videoTriggerTimeInput.value = String(element.videoTriggerTime || 0);
+    videoTriggerTimeInput.value = String(selectedTrigger?.time || 0);
   }
   if (videoTriggerActionSelect) {
-    videoTriggerActionSelect.value = element.videoTriggerAction || 'none';
+    videoTriggerActionSelect.value = selectedTrigger?.actionConfig?.type || 'none';
+  }
+  if (videoSourceModeSelect) {
+    videoSourceModeSelect.value = 'local';
+  }
+  if (videoSourceUrlInput) {
+    videoSourceUrlInput.value = element.src && !String(element.src).startsWith('data:') ? element.src : '';
+  }
+  document.getElementById('videoSourceUrlField')?.classList.toggle('hidden', (videoSourceModeSelect?.value || 'local') !== 'url');
+  if (videoCaptionEnabledToggle) videoCaptionEnabledToggle.checked = Boolean(element.captionsEnabled);
+  if (videoCaptionPositionSelect) videoCaptionPositionSelect.value = element.captionStyle?.position || 'bottom';
+  if (videoCaptionWidthInput) videoCaptionWidthInput.value = element.captionStyle?.width ? String(element.captionStyle.width) : '';
+  if (videoCaptionFontSizeInput) videoCaptionFontSizeInput.value = String(element.captionStyle?.fontSize || 28);
+  if (videoCaptionTextColorInput) videoCaptionTextColorInput.value = element.captionStyle?.textColor || '#ffffff';
+  if (videoCaptionBackgroundColorInput) {
+    videoCaptionBackgroundColorInput.value = (element.captionStyle?.backgroundColor || '#0f172acc').slice(0, 7);
+  }
+  if (videoCaptionAccentColorInput) videoCaptionAccentColorInput.value = element.captionStyle?.accentColor || '#facc15';
+  if (videoCaptionUppercaseToggle) videoCaptionUppercaseToggle.checked = Boolean(element.captionStyle?.uppercase);
+  renderCaptionSegmentEditor('video', element);
+  if (videoTriggerTargetSlideSelect) {
+    videoTriggerTargetSlideSelect.innerHTML = (builderState.slides || [])
+      .filter((slide) => slide?.id)
+      .map((slide, index) => `<option value="${slide.id}">${escapeHtml(slide.title || `Slide ${index + 1}`)}</option>`)
+      .join('');
+    const targetSlideId = selectedTrigger?.actionConfig?.targetSlideId || '';
+    videoTriggerTargetSlideSelect.value =
+      targetSlideId && videoTriggerTargetSlideSelect.querySelector(`option[value="${targetSlideId}"]`) ? targetSlideId : '';
   }
   if (videoTriggerTargetElementSelect) {
-    const allowedTypes = (element.videoTriggerAction || 'none') === 'playAudio'
-      ? ['audio']
-      : ['showElement', 'hideElement'].includes(element.videoTriggerAction || 'none')
-        ? ['text', 'block', 'image', 'audio', 'video', 'quiz', 'floatingButton', 'detector', 'animatedArrow']
-        : [];
+    const actionType = selectedTrigger?.actionConfig?.type || 'none';
+    const candidateIds = getVideoTriggerTargetCandidateIds(actionType, element);
     const optionsMarkup = (getActiveSlide()?.elements || [])
-      .filter((item) => item?.id && allowedTypes.includes(item.type) && item.id !== element.id)
+      .filter((item) => item?.id && candidateIds.has(item.id))
       .map((item) => `<option value="${item.id}">${escapeHtml(getFloatingTargetElementLabel(item))}</option>`)
       .join('');
     videoTriggerTargetElementSelect.innerHTML = optionsMarkup || '<option value="">Nenhum elemento compatível</option>';
-    const nextValue = element.videoTriggerTargetElementId || '';
+    const nextValue = resolveVideoTriggerActionTargetElementId(element, selectedTrigger);
     videoTriggerTargetElementSelect.value =
       nextValue && videoTriggerTargetElementSelect.querySelector(`option[value="${nextValue}"]`) ? nextValue : '';
   }
   if (videoTriggerSeekTimeInput) {
-    videoTriggerSeekTimeInput.value = String(element.videoTriggerSeekTime || 0);
+    videoTriggerSeekTimeInput.value = String(selectedTrigger?.actionConfig?.videoTime || 0);
   }
-  document.getElementById('videoTriggerSeekTimeField')?.classList.toggle('hidden', (element.videoTriggerAction || 'none') !== 'seekVideo');
-  document.getElementById('videoTriggerTargetElementField')?.classList.toggle('hidden', !VIDEO_TRIGGER_TARGET_ACTIONS.has(element.videoTriggerAction || 'none'));
+  if (videoTriggerUrlInput) {
+    videoTriggerUrlInput.value = selectedTrigger?.actionConfig?.url || '';
+    videoTriggerUrlInput.placeholder =
+      ['addImage', 'addAudio', 'addVideo'].includes(selectedTrigger?.actionConfig?.type || 'none')
+        ? 'Cole a URL da imagem, áudio ou vídeo'
+        : 'https://...';
+  }
+  const videoTriggerUrlLabel = document.querySelector('label[for="videoTriggerUrlInput"]');
+  if (videoTriggerUrlLabel) {
+    videoTriggerUrlLabel.textContent =
+      ['addImage', 'addAudio', 'addVideo'].includes(selectedTrigger?.actionConfig?.type || 'none')
+        ? 'URL da mídia'
+        : 'URL de redirecionamento';
+  }
+  if (videoTriggerActionTextLabel) {
+    videoTriggerActionTextLabel.textContent =
+      selectedTrigger?.actionConfig?.type === 'replaceText' ? 'Novo conteúdo ou prefixo' : 'Texto a inserir';
+  }
+  if (videoTriggerActionTextInput) {
+    videoTriggerActionTextInput.placeholder =
+      selectedTrigger?.actionConfig?.type === 'replaceText' ? 'Ex: Pontos: ' : 'Ex: Bem-vindo à próxima etapa';
+    syncTextInputValue(
+      videoTriggerActionTextInput,
+      selectedTrigger?.actionConfig?.type === 'replaceText'
+        ? selectedTrigger?.actionConfig?.replaceText || ''
+        : selectedTrigger?.actionConfig?.text || 'Novo texto'
+    );
+  }
+  if (videoTriggerReplaceModeSelect) {
+    videoTriggerReplaceModeSelect.value = getReplaceTextMode(selectedTrigger?.actionConfig?.replaceMode);
+  }
+  if (videoTriggerReplaceCounterStartInput) {
+    videoTriggerReplaceCounterStartInput.value = String(selectedTrigger?.actionConfig?.replaceCounterStart ?? 1);
+  }
+  if (videoTriggerReplaceCounterStepInput) {
+    videoTriggerReplaceCounterStepInput.value = String(selectedTrigger?.actionConfig?.replaceCounterStep ?? 1);
+  }
+  if (videoTriggerAudioVisibleToggle) videoTriggerAudioVisibleToggle.checked = Boolean(selectedTrigger?.actionConfig?.audioVisible);
+  if (videoTriggerAudioLoopToggle) videoTriggerAudioLoopToggle.checked = Boolean(selectedTrigger?.actionConfig?.audioLoop);
+  if (videoTriggerTextColorInput) videoTriggerTextColorInput.value = selectedTrigger?.actionConfig?.textColor || DEFAULT_INSERT_TEXT_STYLE.textColor;
+  if (videoTriggerTextBgColorInput) videoTriggerTextBgColorInput.value = selectedTrigger?.actionConfig?.backgroundColor || DEFAULT_INSERT_TEXT_STYLE.backgroundColor;
+  if (videoTriggerTextFontSizeInput) videoTriggerTextFontSizeInput.value = String(selectedTrigger?.actionConfig?.fontSize || DEFAULT_INSERT_TEXT_STYLE.fontSize);
+  if (videoTriggerTextFontFamilySelect) videoTriggerTextFontFamilySelect.value = selectedTrigger?.actionConfig?.fontFamily || DEFAULT_INSERT_TEXT_STYLE.fontFamily;
+  if (videoTriggerTextFontWeightSelect) videoTriggerTextFontWeightSelect.value = selectedTrigger?.actionConfig?.fontWeight || DEFAULT_INSERT_TEXT_STYLE.fontWeight;
+  if (videoTriggerTextAlignSelect) videoTriggerTextAlignSelect.value = selectedTrigger?.actionConfig?.textAlign || DEFAULT_INSERT_TEXT_STYLE.textAlign;
+  if (videoTriggerTextBackgroundToggle) videoTriggerTextBackgroundToggle.checked = Boolean(selectedTrigger?.actionConfig?.hasTextBackground);
+  if (videoTriggerTextBorderToggle) videoTriggerTextBorderToggle.checked = Boolean(selectedTrigger?.actionConfig?.hasTextBorder);
+  if (videoTriggerInsertXInput) videoTriggerInsertXInput.value = String(selectedTrigger?.actionConfig?.insertX ?? 120);
+  if (videoTriggerInsertYInput) videoTriggerInsertYInput.value = String(selectedTrigger?.actionConfig?.insertY ?? 120);
+  if (videoTriggerInsertWidthInput) videoTriggerInsertWidthInput.value = String(selectedTrigger?.actionConfig?.insertWidth ?? 280);
+  if (videoTriggerInsertHeightInput) videoTriggerInsertHeightInput.value = String(selectedTrigger?.actionConfig?.insertHeight ?? 180);
+  if (videoTriggerMoveXInput) videoTriggerMoveXInput.value = String(selectedTrigger?.actionConfig?.moveByX ?? 160);
+  if (videoTriggerMoveYInput) videoTriggerMoveYInput.value = String(selectedTrigger?.actionConfig?.moveByY ?? 0);
+  if (videoTriggerMoveDurationInput) videoTriggerMoveDurationInput.value = String(selectedTrigger?.actionConfig?.moveDuration ?? 0.8);
+  if (videoTriggerQuizQuestionInput) syncTextInputValue(videoTriggerQuizQuestionInput, selectedTrigger?.actionConfig?.quizQuestion || 'Nova pergunta');
+  if (videoTriggerQuizOptionsInput) syncTextInputValue(videoTriggerQuizOptionsInput, (selectedTrigger?.actionConfig?.quizOptions || createDefaultQuizOptions()).join('\n'));
+  if (videoTriggerQuizSuccessInput) syncTextInputValue(videoTriggerQuizSuccessInput, selectedTrigger?.actionConfig?.successMessage || 'Resposta correta!');
+  if (videoTriggerQuizErrorInput) syncTextInputValue(videoTriggerQuizErrorInput, selectedTrigger?.actionConfig?.errorMessage || 'Resposta incorreta. Tente novamente.');
+  if (videoTriggerQuizActionLabelInput) syncTextInputValue(videoTriggerQuizActionLabelInput, selectedTrigger?.actionConfig?.actionLabel || 'Validar resposta');
+  if (videoTriggerQuizBackgroundColorInput) videoTriggerQuizBackgroundColorInput.value = selectedTrigger?.actionConfig?.quizBackgroundColor || '#ffffff';
+  if (videoTriggerQuizQuestionColorInput) videoTriggerQuizQuestionColorInput.value = selectedTrigger?.actionConfig?.quizQuestionColor || '#171934';
+  if (videoTriggerQuizOptionBackgroundColorInput) videoTriggerQuizOptionBackgroundColorInput.value = selectedTrigger?.actionConfig?.quizOptionBackgroundColor || '#f4f6ff';
+  if (videoTriggerQuizOptionTextColorInput) videoTriggerQuizOptionTextColorInput.value = selectedTrigger?.actionConfig?.quizOptionTextColor || '#25284c';
+  if (videoTriggerQuizButtonBackgroundColorInput) videoTriggerQuizButtonBackgroundColorInput.value = selectedTrigger?.actionConfig?.quizButtonBackgroundColor || '#6d63ff';
+  if (videoTriggerQuizPointsInput) videoTriggerQuizPointsInput.value = String(selectedTrigger?.actionConfig?.points || 1);
+  if (videoTriggerQuizLockOnWrongToggle) videoTriggerQuizLockOnWrongToggle.checked = Boolean(selectedTrigger?.actionConfig?.lockOnWrong);
+  if (videoTriggerQuizPlaySourceVideoToggle) {
+    videoTriggerQuizPlaySourceVideoToggle.checked = Boolean(selectedTrigger?.actionConfig?.playSourceVideoOnValidate);
+  }
+  if (videoTriggerQuizCorrectSelect) {
+    const quizOptions = selectedTrigger?.actionConfig?.quizOptions || createDefaultQuizOptions();
+    videoTriggerQuizCorrectSelect.innerHTML = quizOptions
+      .map((option, index) => `<option value="${index}">${option || `Alternativa ${index + 1}`}</option>`)
+      .join('');
+    videoTriggerQuizCorrectSelect.value = String(
+      Math.min(Math.max(selectedTrigger?.actionConfig?.quizCorrectOption || 0, 0), Math.max(quizOptions.length - 1, 0))
+    );
+  }
+  const actionType = selectedTrigger?.actionConfig?.type || 'none';
+  document.getElementById('videoTriggerSeekTimeField')?.classList.toggle('hidden', actionType !== 'seekVideo');
+  document.getElementById('videoTriggerTargetElementField')?.classList.toggle('hidden', !VIDEO_TRIGGER_TARGET_ACTIONS.has(actionType));
+  document.getElementById('videoTriggerTargetSlideField')?.classList.toggle('hidden', actionType !== 'jumpSlide');
+  document.getElementById('videoTriggerUrlField')?.classList.toggle('hidden', !['redirect', 'addImage', 'addAudio', 'addVideo'].includes(actionType));
+  document.getElementById('videoTriggerActionTextField')?.classList.toggle('hidden', !['addText', 'replaceText'].includes(actionType));
+  document.getElementById('videoTriggerReplaceModeField')?.classList.toggle('hidden', actionType !== 'replaceText');
+  const replaceCounterMode = actionType === 'replaceText' && getReplaceTextMode(selectedTrigger?.actionConfig?.replaceMode) === REPLACE_COUNTER_MODE;
+  document.getElementById('videoTriggerReplaceCounterStartField')?.classList.toggle('hidden', !replaceCounterMode);
+  document.getElementById('videoTriggerReplaceCounterStepField')?.classList.toggle('hidden', !replaceCounterMode);
+  document.getElementById('videoTriggerTextFontSizeField')?.classList.toggle('hidden', actionType !== 'addText');
+  document.getElementById('videoTriggerTextFontFamilyField')?.classList.toggle('hidden', actionType !== 'addText');
+  document.getElementById('videoTriggerTextFontWeightField')?.classList.toggle('hidden', actionType !== 'addText');
+  document.getElementById('videoTriggerTextAlignField')?.classList.toggle('hidden', actionType !== 'addText');
+  document.getElementById('videoTriggerTextColorField')?.classList.toggle('hidden', actionType !== 'addText');
+  document.getElementById('videoTriggerTextBgColorField')?.classList.toggle('hidden', actionType !== 'addText');
+  document.getElementById('videoTriggerTextBackgroundToggleField')?.classList.toggle('hidden', actionType !== 'addText');
+  document.getElementById('videoTriggerTextBorderToggleField')?.classList.toggle('hidden', actionType !== 'addText');
+  document.getElementById('videoTriggerAudioVisibleField')?.classList.toggle('hidden', actionType !== 'addAudio');
+  document.getElementById('videoTriggerAudioLoopField')?.classList.toggle('hidden', actionType !== 'addAudio');
+  const insertMode = ['addText', 'addImage', 'addAudio', 'addVideo', 'addQuiz'].includes(actionType);
+  document.getElementById('videoTriggerInsertXField')?.classList.toggle('hidden', !insertMode);
+  document.getElementById('videoTriggerInsertYField')?.classList.toggle('hidden', !insertMode);
+  document.getElementById('videoTriggerInsertWidthField')?.classList.toggle('hidden', !insertMode);
+  document.getElementById('videoTriggerInsertHeightField')?.classList.toggle('hidden', !insertMode);
+  document.getElementById('videoPlacementToolsField')?.classList.toggle('hidden', !insertMode);
+  document.getElementById('videoTriggerMoveXField')?.classList.toggle('hidden', actionType !== 'moveElement');
+  document.getElementById('videoTriggerMoveYField')?.classList.toggle('hidden', actionType !== 'moveElement');
+  document.getElementById('videoTriggerMoveDurationField')?.classList.toggle('hidden', actionType !== 'moveElement');
+  const quizMode = actionType === 'addQuiz';
+  document.getElementById('videoTriggerQuizQuestionField')?.classList.toggle('hidden', !quizMode);
+  document.getElementById('videoTriggerQuizOptionsField')?.classList.toggle('hidden', !quizMode);
+  document.getElementById('videoTriggerQuizCorrectField')?.classList.toggle('hidden', !quizMode);
+  document.getElementById('videoTriggerQuizSuccessField')?.classList.toggle('hidden', !quizMode);
+  document.getElementById('videoTriggerQuizErrorField')?.classList.toggle('hidden', !quizMode);
+  document.getElementById('videoTriggerQuizActionLabelField')?.classList.toggle('hidden', !quizMode);
+  document.getElementById('videoTriggerQuizBackgroundColorField')?.classList.toggle('hidden', !quizMode);
+  document.getElementById('videoTriggerQuizQuestionColorField')?.classList.toggle('hidden', !quizMode);
+  document.getElementById('videoTriggerQuizOptionBackgroundColorField')?.classList.toggle('hidden', !quizMode);
+  document.getElementById('videoTriggerQuizOptionTextColorField')?.classList.toggle('hidden', !quizMode);
+  document.getElementById('videoTriggerQuizButtonBackgroundColorField')?.classList.toggle('hidden', !quizMode);
+  document.getElementById('videoTriggerQuizPointsField')?.classList.toggle('hidden', !quizMode);
+  document.getElementById('videoTriggerQuizLockOnWrongField')?.classList.toggle('hidden', !quizMode);
+  document.getElementById('videoTriggerQuizPlaySourceVideoField')?.classList.toggle('hidden', !quizMode);
+  updateVideoPlacementPreview();
   requestAnimationFrame(() => positionStageEditorCard('video'));
   updateStageEditorState();
 };
@@ -2902,14 +4753,102 @@ const syncVideoEditor = () => {
     return;
   }
   normalizeVideoTriggerConfig(element);
-  element.videoTriggerTime = Math.max(0, Number(videoTriggerTimeInput?.value) || 0);
-  element.videoTriggerAction = VIDEO_TRIGGER_ACTIONS.has(String(videoTriggerActionSelect?.value || 'none'))
+  element.captionsEnabled = Boolean(videoCaptionEnabledToggle?.checked);
+  const nextPosition = videoCaptionPositionSelect?.value || 'bottom';
+  element.captionStyle = normalizeCaptionStyle({
+    width: videoCaptionWidthInput?.value || '',
+    position: nextPosition,
+    fontSize: Number(videoCaptionFontSizeInput?.value) || 28,
+    textColor: videoCaptionTextColorInput?.value || '#ffffff',
+    backgroundColor: videoCaptionBackgroundColorInput?.value || '#0f172a',
+    accentColor: videoCaptionAccentColorInput?.value || '#facc15',
+    uppercase: Boolean(videoCaptionUppercaseToggle?.checked),
+    freePosition: false,
+    stageX: null,
+    stageY: null
+  }, 'video');
+  const selectedTrigger = getSelectedVideoTrigger(element);
+  if (!selectedTrigger) {
+    return;
+  }
+  selectedTrigger.time = Math.max(0, Number(videoTriggerTimeInput?.value) || 0);
+  selectedTrigger.actionConfig.type = VIDEO_TRIGGER_ACTIONS.has(String(videoTriggerActionSelect?.value || 'none'))
     ? String(videoTriggerActionSelect?.value || 'none')
     : 'none';
-  element.videoTriggerSeekTime = Math.max(0, Number(videoTriggerSeekTimeInput?.value) || 0);
-  element.videoTriggerTargetElementId = videoTriggerTargetElementSelect?.value || '';
-  document.getElementById('videoTriggerSeekTimeField')?.classList.toggle('hidden', element.videoTriggerAction !== 'seekVideo');
-  document.getElementById('videoTriggerTargetElementField')?.classList.toggle('hidden', !VIDEO_TRIGGER_TARGET_ACTIONS.has(element.videoTriggerAction));
+  selectedTrigger.actionConfig.videoTime = Math.max(0, Number(videoTriggerSeekTimeInput?.value) || 0);
+  selectedTrigger.actionConfig.targetElementId = videoTriggerTargetElementSelect?.value || '';
+  selectedTrigger.actionConfig.targetSlideId = videoTriggerTargetSlideSelect?.value || '';
+  selectedTrigger.actionConfig.url = videoTriggerUrlInput?.value?.trim() || '';
+  const actionTextValue = videoTriggerActionTextInput?.value ?? '';
+  selectedTrigger.actionConfig.text =
+    selectedTrigger.actionConfig.type === 'addText'
+      ? (actionTextValue.length ? actionTextValue : 'Novo texto')
+      : (selectedTrigger.actionConfig.text || 'Novo texto');
+  selectedTrigger.actionConfig.replaceText =
+    selectedTrigger.actionConfig.type === 'replaceText' ? actionTextValue : (selectedTrigger.actionConfig.replaceText || '');
+  selectedTrigger.actionConfig.replaceMode =
+    selectedTrigger.actionConfig.type === 'replaceText'
+      ? getReplaceTextMode(videoTriggerReplaceModeSelect?.value)
+      : REPLACE_TEXT_MODE;
+  selectedTrigger.actionConfig.replaceCounterStart =
+    selectedTrigger.actionConfig.type === 'replaceText'
+      ? (Number.isFinite(Number(videoTriggerReplaceCounterStartInput?.value)) ? Number(videoTriggerReplaceCounterStartInput.value) : 1)
+      : 1;
+  selectedTrigger.actionConfig.replaceCounterStep =
+    selectedTrigger.actionConfig.type === 'replaceText'
+      ? (Number.isFinite(Number(videoTriggerReplaceCounterStepInput?.value)) ? Number(videoTriggerReplaceCounterStepInput.value) : 1)
+      : 1;
+  selectedTrigger.actionConfig.audioVisible = Boolean(videoTriggerAudioVisibleToggle?.checked);
+  selectedTrigger.actionConfig.audioLoop = Boolean(videoTriggerAudioLoopToggle?.checked);
+  selectedTrigger.actionConfig.textColor = videoTriggerTextColorInput?.value || DEFAULT_INSERT_TEXT_STYLE.textColor;
+  selectedTrigger.actionConfig.backgroundColor = videoTriggerTextBgColorInput?.value || DEFAULT_INSERT_TEXT_STYLE.backgroundColor;
+  selectedTrigger.actionConfig.textAlign = videoTriggerTextAlignSelect?.value || DEFAULT_INSERT_TEXT_STYLE.textAlign;
+  selectedTrigger.actionConfig.fontFamily = videoTriggerTextFontFamilySelect?.value || DEFAULT_INSERT_TEXT_STYLE.fontFamily;
+  selectedTrigger.actionConfig.fontWeight = videoTriggerTextFontWeightSelect?.value || DEFAULT_INSERT_TEXT_STYLE.fontWeight;
+  selectedTrigger.actionConfig.fontSize = Math.max(10, Number(videoTriggerTextFontSizeInput?.value) || DEFAULT_INSERT_TEXT_STYLE.fontSize);
+  selectedTrigger.actionConfig.hasTextBackground = Boolean(videoTriggerTextBackgroundToggle?.checked);
+  selectedTrigger.actionConfig.hasTextBorder = Boolean(videoTriggerTextBorderToggle?.checked);
+  selectedTrigger.actionConfig.hasTextBlock = false;
+  selectedTrigger.actionConfig.insertX = Math.max(0, Number(videoTriggerInsertXInput?.value) || 120);
+  selectedTrigger.actionConfig.insertY = Math.max(0, Number(videoTriggerInsertYInput?.value) || 120);
+  selectedTrigger.actionConfig.insertWidth = Number.isFinite(Number(videoTriggerInsertWidthInput?.value)) ? Number(videoTriggerInsertWidthInput.value) : 280;
+  selectedTrigger.actionConfig.insertHeight = Math.max(40, Number(videoTriggerInsertHeightInput?.value) || 180);
+  selectedTrigger.actionConfig.moveByX = Number.isFinite(Number(videoTriggerMoveXInput?.value)) ? Number(videoTriggerMoveXInput.value) : 160;
+  selectedTrigger.actionConfig.moveByY = Number.isFinite(Number(videoTriggerMoveYInput?.value)) ? Number(videoTriggerMoveYInput.value) : 0;
+  selectedTrigger.actionConfig.moveDuration = Math.max(0.1, Number(videoTriggerMoveDurationInput?.value) || 0.8);
+  const videoQuizQuestionValue = videoTriggerQuizQuestionInput?.value ?? '';
+  selectedTrigger.actionConfig.quizQuestion = videoQuizQuestionValue.length ? videoQuizQuestionValue : 'Nova pergunta';
+  selectedTrigger.actionConfig.quizOptions = (videoTriggerQuizOptionsInput?.value || '')
+    .split('\n')
+    .map((option) => option.trim())
+    .filter(Boolean);
+  if (!selectedTrigger.actionConfig.quizOptions.length) {
+    selectedTrigger.actionConfig.quizOptions = createDefaultQuizOptions();
+  }
+  const correctIndex = Number(videoTriggerQuizCorrectSelect?.value);
+  selectedTrigger.actionConfig.quizCorrectOption = Number.isNaN(correctIndex)
+    ? 0
+    : Math.min(Math.max(correctIndex, 0), selectedTrigger.actionConfig.quizOptions.length - 1);
+  const videoQuizSuccessValue = videoTriggerQuizSuccessInput?.value ?? '';
+  const videoQuizErrorValue = videoTriggerQuizErrorInput?.value ?? '';
+  const videoQuizActionLabelValue = videoTriggerQuizActionLabelInput?.value ?? '';
+  selectedTrigger.actionConfig.successMessage = videoQuizSuccessValue.length ? videoQuizSuccessValue : 'Resposta correta!';
+  selectedTrigger.actionConfig.errorMessage = videoQuizErrorValue.length ? videoQuizErrorValue : 'Resposta incorreta. Tente novamente.';
+  selectedTrigger.actionConfig.actionLabel = videoQuizActionLabelValue.length ? videoQuizActionLabelValue : 'Validar resposta';
+  selectedTrigger.actionConfig.quizBackgroundColor = videoTriggerQuizBackgroundColorInput?.value || '#ffffff';
+  selectedTrigger.actionConfig.quizQuestionColor = videoTriggerQuizQuestionColorInput?.value || '#171934';
+  selectedTrigger.actionConfig.quizOptionBackgroundColor = videoTriggerQuizOptionBackgroundColorInput?.value || '#f4f6ff';
+  selectedTrigger.actionConfig.quizOptionTextColor = videoTriggerQuizOptionTextColorInput?.value || '#25284c';
+  selectedTrigger.actionConfig.quizButtonBackgroundColor = videoTriggerQuizButtonBackgroundColorInput?.value || '#6d63ff';
+  selectedTrigger.actionConfig.points = Math.max(1, Number(videoTriggerQuizPointsInput?.value) || 1);
+  selectedTrigger.actionConfig.lockOnWrong = Boolean(videoTriggerQuizLockOnWrongToggle?.checked);
+  selectedTrigger.actionConfig.playSourceVideoOnValidate = Boolean(videoTriggerQuizPlaySourceVideoToggle?.checked);
+  element.videoTriggers.sort((first, second) => (Number(first.time) || 0) - (Number(second.time) || 0));
+  element.videoTriggerTime = element.videoTriggers[0]?.time || 0;
+  element.videoTriggerAction = element.videoTriggers[0]?.actionConfig?.type || 'none';
+  element.videoTriggerSeekTime = element.videoTriggers[0]?.actionConfig?.videoTime || 0;
+  element.videoTriggerTargetElementId = element.videoTriggers[0]?.actionConfig?.targetElementId || '';
+  updateVideoEditorVisibility(element, { forceOpen: true });
   renderSlide();
   scheduleHistoryCommit();
 };
@@ -3148,10 +5087,71 @@ const updateEraserEditorVisibility = (element, options = {}) => {
   updateStageEditorState();
 };
 
+const syncPenEditorControls = (element = null) => {
+  const isPen = element?.type === 'pen';
+  const nextColor = isPen ? element.strokeColor || '#111827' : getPenStrokeColor();
+  const nextSize = isPen
+    ? clamp(Number(element.strokeWidth) || 8, PEN_MIN_BRUSH_SIZE, PEN_MAX_BRUSH_SIZE)
+    : getPenSize();
+  if (penColorInput) {
+    penColorInput.value = nextColor;
+  }
+  if (penSizeInput) {
+    penSizeInput.value = String(nextSize);
+  }
+  if (penSizeNumberInput) {
+    penSizeNumberInput.value = String(nextSize);
+  }
+  if (penClearPreviewBtn) {
+    penClearPreviewBtn.disabled = !penState.points.length;
+  }
+  if (penStartDrawingBtn) {
+    penStartDrawingBtn.textContent = penState.active ? 'Desenhando...' : 'Desenhar no slide';
+  }
+};
+
+const closePenSession = ({ keepEditor = false } = {}) => {
+  destroyPenOverlay();
+  penState.active = false;
+  resetPenDraftState();
+  if (!keepEditor) {
+    penEditorCard?.classList.add('hidden');
+    if (currentStageEditor === 'pen') {
+      currentStageEditor = 'none';
+    }
+  }
+  syncPenEditorControls(getActiveSlide()?.elements.find((child) => child.id === selectedElementId) || null);
+  updateStageEditorState();
+};
+
+const updatePenEditorVisibility = (element, options = {}) => {
+  if (!penEditorCard) return;
+  const isPen = element?.type === 'pen';
+  const shouldStayOpen = options.forceOpen || currentStageEditor === 'pen' || penState.active;
+  const canRenderCard = isPen || penState.active || options.forceOpen;
+  if (!shouldStayOpen || !canRenderCard) {
+    if (currentStageEditor === 'pen' && !options.forceOpen && !penState.active) {
+      currentStageEditor = 'none';
+    }
+    penEditorCard.classList.add('hidden');
+    if (!options.forceOpen && !isPen && !penState.active) {
+      closePenSession({ keepEditor: true });
+    }
+    updateStageEditorState();
+    return;
+  }
+  currentStageEditor = 'pen';
+  lastStageEditorOpenedAt = Date.now();
+  penEditorCard.classList.remove('hidden');
+  syncPenEditorControls(element);
+  requestAnimationFrame(() => positionStageEditorCard('pen'));
+  updateStageEditorState();
+};
+
 const getEraserTargetElement = () => getActiveSlide()?.elements.find((child) => child.id === selectedElementId) || null;
 
 const getStageNodeByElementId = (elementId) =>
-  slideCanvas?.querySelector(`[data-element-id="${String(elementId || '').replace(/"/g, '\\"')}"]`) || null;
+  slideCanvas?.querySelector(`[data-element-id="${escapeAttributeSelectorValue(elementId)}"]`) || null;
 
 const cloneNodeWithInlineStyles = (node) => {
   if (node.nodeType === Node.TEXT_NODE) {
@@ -3288,6 +5288,47 @@ const renderBlockElementToCanvas = (element, width, height, scale = 2) => {
   return canvas;
 };
 
+const renderPenElementToCanvas = (element, width, height, scale = 2) => {
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('O navegador nÃ£o conseguiu preparar a borracha.');
+  }
+  const points = Array.isArray(element?.points) ? element.points : [];
+  context.scale(scale, scale);
+  context.clearRect(0, 0, width, height);
+  if (!points.length) {
+    return canvas;
+  }
+  context.save();
+  context.strokeStyle = element?.strokeColor || '#111827';
+  context.lineWidth = Math.max(PEN_MIN_BRUSH_SIZE, Number(element?.strokeWidth) || 8);
+  context.lineCap = 'round';
+  context.lineJoin = 'round';
+  context.beginPath();
+  const firstPoint = points[0];
+  context.moveTo(
+    clamp(Number(firstPoint?.x) || 0, 0, 1) * width,
+    clamp(Number(firstPoint?.y) || 0, 0, 1) * height
+  );
+  points.slice(1).forEach((point) => {
+    context.lineTo(
+      clamp(Number(point?.x) || 0, 0, 1) * width,
+      clamp(Number(point?.y) || 0, 0, 1) * height
+    );
+  });
+  if (points.length === 1) {
+    const x = clamp(Number(firstPoint?.x) || 0, 0, 1) * width;
+    const y = clamp(Number(firstPoint?.y) || 0, 0, 1) * height;
+    context.lineTo(x + 0.01, y + 0.01);
+  }
+  context.stroke();
+  context.restore();
+  return canvas;
+};
+
 const loadImageElement = (sourceUrl) =>
   new Promise((resolve, reject) => {
     const image = new Image();
@@ -3368,6 +5409,9 @@ const buildEraserSourceCanvas = async (element) => {
   if (element.type === 'block') {
     return renderBlockElementToCanvas(element, width, height, Math.max(1, Math.min(3, window.devicePixelRatio || 2)));
   }
+  if (element.type === 'pen') {
+    return renderPenElementToCanvas(element, width, height, Math.max(1, Math.min(3, window.devicePixelRatio || 2)));
+  }
   if (stageNode) {
     return rasterizeStageNodeToCanvas(stageNode, width, height);
   }
@@ -3396,6 +5440,161 @@ const getCanvasPointFromEvent = (canvas, event) => {
     x: ((event.clientX - rect.left) / Math.max(rect.width, 1)) * canvas.width,
     y: ((event.clientY - rect.top) / Math.max(rect.height, 1)) * canvas.height
   };
+};
+
+const getPenSize = () =>
+  clamp(Number(penSizeInput?.value || penSizeNumberInput?.value || 8), PEN_MIN_BRUSH_SIZE, PEN_MAX_BRUSH_SIZE);
+
+const syncPenSizeInputs = (source = 'range') => {
+  const nextValue = getPenSize();
+  if (penSizeInput) {
+    penSizeInput.value = String(nextValue);
+  }
+  if (penSizeNumberInput) {
+    penSizeNumberInput.value = String(nextValue);
+  }
+  if (source === 'number' && penSizeInput) {
+    penSizeInput.value = String(nextValue);
+  }
+  if (source === 'range' && penSizeNumberInput) {
+    penSizeNumberInput.value = String(nextValue);
+  }
+};
+
+const getPenStrokeColor = () => {
+  const value = typeof penColorInput?.value === 'string' ? penColorInput.value.trim() : '';
+  return value || '#111827';
+};
+
+const resetPenDraftState = () => {
+  penState.drawing = false;
+  penState.points = [];
+  penState.hoverPoint = null;
+};
+
+const destroyPenOverlay = () => {
+  if (penState.overlay) {
+    penState.overlay.remove();
+  }
+  penState.overlay = null;
+  penState.canvas = null;
+};
+
+const renderPenSvgMarkup = (element) => {
+  const width = Math.max(1, Number(element?.width) || 1);
+  const height = Math.max(1, Number(element?.height) || 1);
+  const points = Array.isArray(element?.points) ? element.points : [];
+  const polylinePoints = points
+    .map((point) => `${clamp(Number(point?.x) || 0, 0, 1) * width},${clamp(Number(point?.y) || 0, 0, 1) * height}`)
+    .join(' ');
+  const strokeWidth = Math.max(PEN_MIN_BRUSH_SIZE, Number(element?.strokeWidth) || 8);
+  const strokeColor = element?.strokeColor || '#111827';
+  return `
+    <svg class="builder-pen-svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" aria-hidden="true">
+      <polyline
+        points="${escapeAttribute(polylinePoints)}"
+        fill="none"
+        stroke="${escapeAttribute(strokeColor)}"
+        stroke-width="${strokeWidth}"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        vector-effect="non-scaling-stroke"
+      />
+    </svg>
+  `;
+};
+
+const createPenElementNode = (element) => {
+  const node = document.createElement('div');
+  node.className = 'builder-pen-element';
+  node.innerHTML = renderPenSvgMarkup(element);
+  return node;
+};
+
+const renderPenPreview = () => {
+  const canvas = penState.canvas;
+  if (!canvas) {
+    return;
+  }
+  const context = canvas.getContext('2d');
+  if (!context) {
+    return;
+  }
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  const points = penState.points || [];
+  if (!points.length) {
+    return;
+  }
+  context.save();
+  context.strokeStyle = getPenStrokeColor();
+  context.lineWidth = getPenSize();
+  context.lineCap = 'round';
+  context.lineJoin = 'round';
+  context.beginPath();
+  context.moveTo(points[0].x, points[0].y);
+  points.slice(1).forEach((point) => {
+    context.lineTo(point.x, point.y);
+  });
+  if (points.length === 1) {
+    context.lineTo(points[0].x + 0.01, points[0].y + 0.01);
+  }
+  context.stroke();
+  context.restore();
+};
+
+const buildPenElementFromPoints = (points, options = {}) => {
+  if (!Array.isArray(points) || points.length < 2) {
+    return null;
+  }
+  const stage = getStageDimensions();
+  const strokeWidth = Math.max(PEN_MIN_BRUSH_SIZE, Number(options.strokeWidth) || getPenSize());
+  const strokeColor = options.strokeColor || getPenStrokeColor();
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  points.forEach((point) => {
+    minX = Math.min(minX, point.x);
+    minY = Math.min(minY, point.y);
+    maxX = Math.max(maxX, point.x);
+    maxY = Math.max(maxY, point.y);
+  });
+  const padding = strokeWidth / 2 + 2;
+  const left = clamp(minX - padding, 0, stage.width);
+  const top = clamp(minY - padding, 0, stage.height);
+  const right = clamp(maxX + padding, 0, stage.width);
+  const bottom = clamp(maxY + padding, 0, stage.height);
+  const width = Math.max(strokeWidth + 4, right - left);
+  const height = Math.max(strokeWidth + 4, bottom - top);
+  const normalizedPoints = points.map((point) => ({
+    x: clamp((point.x - left) / width, 0, 1),
+    y: clamp((point.y - top) / height, 0, 1)
+  }));
+  return {
+    type: 'pen',
+    x: left,
+    y: top,
+    width,
+    height,
+    points: normalizedPoints,
+    strokeColor,
+    strokeWidth,
+    backgroundColor: 'transparent',
+    initiallyHidden: false
+  };
+};
+
+const applyPenEditorToElement = () => {
+  const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId);
+  if (!element || element.type !== 'pen') {
+    return;
+  }
+  element.strokeColor = getPenStrokeColor();
+  element.strokeWidth = getPenSize();
+  element.backgroundColor = 'transparent';
+  updateElementInspector(element);
+  renderSlide();
+  scheduleHistoryCommit();
 };
 
 const drawBrushStamp = (context, x, y, size, shape) => {
@@ -3584,11 +5783,31 @@ const renderEraserOverlay = () => {
   const overlay = document.createElement('div');
   overlay.className = 'eraser-stage-overlay';
   overlay.dataset.mode = eraserModeSelect?.value || 'brush';
-  overlay.style.left = `${element.x || 0}px`;
-  overlay.style.top = `${element.y || 0}px`;
-  overlay.style.width = `${Math.max(MIN_ELEMENT_SIZE, Number(element.width) || eraserState.baseCanvas.width)}px`;
-  overlay.style.height = `${Math.max(MIN_ELEMENT_SIZE, Number(element.height) || eraserState.baseCanvas.height)}px`;
-  overlay.style.zIndex = String((Number(element.zIndex) || 0) + 1000);
+
+  // Try to find the element wrapper (for elements with clip-path)
+  const elementWrapper = slideCanvas?.querySelector(`[data-elementId="${element.id}"][data-hasMenuTrigger="true"]`);
+
+  // Position depends on whether we're rendering inside wrapper or directly in slideCanvas
+  if (elementWrapper) {
+    // Render inside wrapper - use relative positioning and full size
+    overlay.style.position = 'relative';
+    overlay.style.left = '0';
+    overlay.style.top = '0';
+    overlay.style.width = '100%';
+    overlay.style.height = '100%';
+    overlay.style.zIndex = '10001';
+    elementWrapper.appendChild(overlay);
+  } else {
+    // Render in slideCanvas - use absolute positioning with element coordinates
+    overlay.style.position = 'absolute';
+    overlay.style.left = `${element.x || 0}px`;
+    overlay.style.top = `${element.y || 0}px`;
+    overlay.style.width = `${Math.max(MIN_ELEMENT_SIZE, Number(element.width) || eraserState.baseCanvas.width)}px`;
+    overlay.style.height = `${Math.max(MIN_ELEMENT_SIZE, Number(element.height) || eraserState.baseCanvas.height)}px`;
+    overlay.style.zIndex = '10000000';
+    slideCanvas.appendChild(overlay);
+  }
+
   overlay.addEventListener('pointerdown', (event) => {
     event.stopPropagation();
   });
@@ -3600,11 +5819,98 @@ const renderEraserOverlay = () => {
   canvas.width = eraserState.baseCanvas.width;
   canvas.height = eraserState.baseCanvas.height;
   overlay.appendChild(canvas);
-  slideCanvas.appendChild(overlay);
   eraserState.overlay = overlay;
   eraserState.displayCanvas = canvas;
   attachEraserOverlayEvents(canvas);
   renderEraserPreview();
+};
+
+const finishPenStroke = () => {
+  if (!penState.points.length) {
+    resetPenDraftState();
+    renderPenPreview();
+    syncPenEditorControls(getActiveSlide()?.elements.find((child) => child.id === selectedElementId) || null);
+    return;
+  }
+  const elementConfig = buildPenElementFromPoints(penState.points, {
+    strokeColor: getPenStrokeColor(),
+    strokeWidth: getPenSize()
+  });
+  resetPenDraftState();
+  renderPenPreview();
+  if (!elementConfig) {
+    syncPenEditorControls(getActiveSlide()?.elements.find((child) => child.id === selectedElementId) || null);
+    return;
+  }
+  addElementToSlide(elementConfig);
+  syncPenEditorControls(getActiveSlide()?.elements.find((child) => child.id === selectedElementId) || null);
+};
+
+const attachPenOverlayEvents = (canvas) => {
+  canvas.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const point = getCanvasPointFromEvent(canvas, event);
+    penState.drawing = true;
+    penState.points = [point];
+    penState.hoverPoint = point;
+    renderPenPreview();
+    syncPenEditorControls(getActiveSlide()?.elements.find((child) => child.id === selectedElementId) || null);
+    canvas.setPointerCapture?.(event.pointerId);
+  });
+  canvas.addEventListener('pointermove', (event) => {
+    if (!penState.drawing) {
+      return;
+    }
+    const point = getCanvasPointFromEvent(canvas, event);
+    const lastPoint = penState.points[penState.points.length - 1];
+    if (!lastPoint || Math.hypot(point.x - lastPoint.x, point.y - lastPoint.y) >= 1.2) {
+      penState.points.push(point);
+    }
+    penState.hoverPoint = point;
+    renderPenPreview();
+  });
+  const stopDrawing = (event) => {
+    if (!penState.drawing) {
+      return;
+    }
+    penState.drawing = false;
+    canvas.releasePointerCapture?.(event.pointerId);
+    finishPenStroke();
+  };
+  canvas.addEventListener('pointerup', stopDrawing);
+  canvas.addEventListener('pointercancel', stopDrawing);
+};
+
+const renderPenOverlay = () => {
+  if (!penState.active || !slideCanvas || previewState.active || currentStageEditor !== 'pen') {
+    destroyPenOverlay();
+    return;
+  }
+  destroyPenOverlay();
+  const overlay = document.createElement('div');
+  overlay.className = 'pen-stage-overlay';
+  overlay.addEventListener('pointerdown', (event) => {
+    event.stopPropagation();
+  });
+  const canvas = document.createElement('canvas');
+  canvas.className = 'pen-overlay-canvas';
+  canvas.width = Math.max(1, slideCanvas.clientWidth || builderState.stageSize.width || DEFAULT_STAGE_SIZE.width);
+  canvas.height = Math.max(1, slideCanvas.clientHeight || builderState.stageSize.height || DEFAULT_STAGE_SIZE.height);
+  overlay.appendChild(canvas);
+  slideCanvas.appendChild(overlay);
+  penState.overlay = overlay;
+  penState.canvas = canvas;
+  attachPenOverlayEvents(canvas);
+  renderPenPreview();
+};
+
+const startPenDrawingSession = () => {
+  penState.active = true;
+  resetPenDraftState();
+  currentStageEditor = 'pen';
+  updatePenEditorVisibility(getActiveSlide()?.elements.find((child) => child.id === selectedElementId && child.type === 'pen') || null, { forceOpen: true });
+  renderPenOverlay();
 };
 
 const clearEraserMask = () => {
@@ -3650,8 +5956,11 @@ const applyEraserChanges = async () => {
   const dataUrl = resultCanvas.toDataURL('image/png');
   element.type = 'image';
   element.src = dataUrl;
-  element.objectFit = eraserState.sourceType === 'block' ? 'fill' : getElementMediaObjectFit(element);
+  element.objectFit = ['block', 'pen'].includes(eraserState.sourceType) ? 'fill' : getElementMediaObjectFit(element);
   element.backgroundColor = 'transparent';
+  delete element.points;
+  delete element.strokeColor;
+  delete element.strokeWidth;
   delete element.provider;
   delete element.embedSrc;
   closeEraserSession();
@@ -3662,7 +5971,7 @@ const applyEraserChanges = async () => {
 
 const openEraserEditorForElement = async (element) => {
   if (!canUseEraserOnElement(element)) {
-    alert('Selecione uma imagem ou bloco para usar a borracha.');
+    alert('Selecione uma imagem, bloco ou traço da caneta para usar a borracha.');
     return;
   }
   updateEraserEditorVisibility(element, { forceOpen: true });
@@ -3693,17 +6002,15 @@ const openEraserEditorForElement = async (element) => {
   }
 };
 
-const updateQuizEditorVisibility = (element) => {
+const updateQuizEditorVisibility = (element, options = {}) => {
   if (!quizEditorCard) return;
   const isQuiz = element?.type === 'quiz';
-  if (isQuiz) {
-    currentStageEditor = 'quiz';
-    lastStageEditorOpenedAt = Date.now();
-  } else if (currentStageEditor === 'quiz') {
-    currentStageEditor = 'none';
-  }
-  quizEditorCard.classList.toggle('hidden', !(isQuiz && currentStageEditor === 'quiz'));
-  if (!isQuiz) {
+  const shouldStayOpen = options.forceOpen || currentStageEditor === 'quiz';
+  if (!shouldStayOpen || !isQuiz) {
+    if (currentStageEditor === 'quiz' && !options.forceOpen) {
+      currentStageEditor = 'none';
+    }
+    quizEditorCard.classList.add('hidden');
     if (quizQuestionInput) quizQuestionInput.value = '';
     if (quizOptionsInput) quizOptionsInput.value = '';
     if (quizSuccessMessageInput) quizSuccessMessageInput.value = '';
@@ -3720,6 +6027,9 @@ const updateQuizEditorVisibility = (element) => {
     updateStageEditorState();
     return;
   }
+  currentStageEditor = 'quiz';
+  lastStageEditorOpenedAt = Date.now();
+  quizEditorCard.classList.remove('hidden');
   normalizeQuizElement(element);
   if (quizQuestionInput) quizQuestionInput.value = element.question;
   if (quizOptionsInput) quizOptionsInput.value = element.options.join('\n');
@@ -3755,6 +6065,7 @@ const getFloatingTargetElementLabel = (element) => {
     block: 'Bloco',
     image: 'Imagem',
     floatingButton: 'Botão',
+    input: 'Input',
     detector: 'Detector',
     quiz: 'Quiz',
     video: 'Vídeo',
@@ -3779,14 +6090,14 @@ const populateFloatingTargetElements = (selectedId = '', actionType = 'none', so
     : actionType === 'playAudio'
       ? ['audio']
       : ['showElement', 'hideElement'].includes(actionType)
-        ? ['text', 'block', 'image', 'audio', 'video', 'quiz', 'floatingButton', 'detector', 'animatedArrow']
-    : actionType === 'moveElement'
-      ? ['text', 'block', 'image']
-      : actionType === 'replaceText'
-        ? Array.from(REPLACEABLE_TEXT_TYPES)
-        : actionType === 'playAnimation'
-          ? Array.from(ANIMATABLE_ELEMENT_TYPES)
-          : [];
+        ? ['text', 'block', 'image', 'audio', 'video', 'quiz', 'floatingButton', 'input', 'detector', 'animatedArrow']
+        : actionType === 'moveElement'
+          ? ['text', 'block', 'image', 'input']
+          : actionType === 'replaceText'
+            ? Array.from(REPLACEABLE_TEXT_TYPES)
+            : actionType === 'playAnimation'
+              ? Array.from(ANIMATABLE_ELEMENT_TYPES)
+              : [];
   const options = (slide?.elements || [])
     .filter((item) => {
       if (!item?.id || !allowedTypes.includes(item.type) || item.id === sourceElement?.id) {
@@ -3834,30 +6145,139 @@ const populateFloatingQuizCorrectOptions = (options = [], selectedIndex = 0) => 
   floatingQuizCorrectSelect.value = String(Math.min(Math.max(selectedIndex, 0), Math.max(options.length - 1, 0)));
 };
 
-const updateFloatingButtonEditorVisibility = (element) => {
+const updateFloatingButtonEditorVisibility = (element, options = {}) => {
   if (!floatingButtonEditorCard) return;
-  const isActionTrigger = ['floatingButton', 'detector'].includes(element?.type);
-  if (isActionTrigger) {
-    currentStageEditor = 'floating';
-    lastStageEditorOpenedAt = Date.now();
-  } else if (currentStageEditor === 'floating') {
-    currentStageEditor = 'none';
-  }
-  floatingButtonEditorCard.classList.toggle('hidden', !(isActionTrigger && currentStageEditor === 'floating'));
-  if (!isActionTrigger) {
+  const isActionTrigger = ['floatingButton', 'detector', 'timedTrigger', 'input'].includes(element?.type);
+  const shouldStayOpen = options.forceOpen || currentStageEditor === 'floating';
+  if (!shouldStayOpen || !isActionTrigger) {
+    if (currentStageEditor === 'floating' && !options.forceOpen) {
+      currentStageEditor = 'none';
+    }
+    floatingButtonEditorCard.classList.add('hidden');
     isPickingFloatingInsertPosition = false;
     isPickingFloatingTargetElement = false;
     updateFloatingPlacementControls(null);
     updateStageEditorState();
     return;
   }
+  currentStageEditor = 'floating';
+  lastStageEditorOpenedAt = Date.now();
+  floatingButtonEditorCard.classList.remove('hidden');
   normalizeFloatingActionConfig(element);
-  const config = element.actionConfig;
+  const selectedTrigger = getSelectedFloatingTrigger(element);
+  const config = selectedTrigger?.actionConfig || element.actionConfig;
+  const floatingActionUrlLabel = document.querySelector('label[for="floatingActionUrlInput"]');
+  if (floatingTriggerList) {
+    floatingTriggerList.innerHTML = (element.interactionTriggers || [])
+      .map((trigger, index) => {
+        const isActive = trigger.id === selectedTrigger?.id;
+        const triggerAction = trigger.actionConfig?.type || 'none';
+        return `
+          <button type="button" class="trigger-chip${isActive ? ' active' : ''}" data-floating-trigger-id="${trigger.id}">
+            <span>
+              <span class="trigger-chip-title">${escapeHtml(trigger.name || `${element.type === 'detector' ? 'Gatilho' : element.type === 'timedTrigger' ? 'Tempo' : element.type === 'input' ? 'Envio' : 'Ação'} ${index + 1}`)}</span>
+              <small class="trigger-chip-meta">${escapeHtml(element.type === 'timedTrigger' ? `${Number(trigger.time || 0).toFixed(1)}s • ${triggerAction}` : triggerAction)}</small>
+            </span>
+          </button>
+        `;
+      })
+      .join('');
+  }
+  if (floatingDuplicateTriggerBtn) {
+    floatingDuplicateTriggerBtn.disabled = !selectedTrigger;
+  }
+  if (floatingRemoveTriggerBtn) {
+    floatingRemoveTriggerBtn.disabled = (element.interactionTriggers || []).length <= 1;
+  }
   if (floatingEditorBadge) {
-    floatingEditorBadge.textContent = element.type === 'detector' ? 'Detector' : 'Botão flutuante';
+    floatingEditorBadge.textContent =
+      element.type === 'detector' ? 'Detector' : element.type === 'timedTrigger' ? 'Gatilho por tempo' : element.type === 'input' ? 'Input' : 'Botão flutuante';
   }
   if (floatingEditorTitle) {
-    floatingEditorTitle.textContent = element.type === 'detector' ? 'Configure o gatilho invisível' : 'Configure o clique';
+    floatingEditorTitle.textContent =
+      element.type === 'detector'
+        ? 'Configure o gatilho invisível'
+        : element.type === 'timedTrigger'
+          ? 'Configure o disparo por tempo'
+          : element.type === 'input'
+            ? 'Configure o envio do aluno'
+            : 'Configure o clique';
+  }
+  document.getElementById('floatingButtonLabelField')?.classList.toggle('hidden', element.type !== 'floatingButton');
+  document.getElementById('floatingInputPlaceholderField')?.classList.toggle('hidden', element.type !== 'input');
+  document.getElementById('floatingInputSubmitLabelField')?.classList.toggle('hidden', element.type !== 'input');
+  document.getElementById('floatingInputCompareTextField')?.classList.toggle('hidden', element.type !== 'input');
+  document.getElementById('floatingInputCompareCaseField')?.classList.toggle('hidden', element.type !== 'input');
+  document.getElementById('floatingInputCompareImageField')?.classList.toggle('hidden', element.type !== 'input');
+  document.getElementById('floatingInputCompareImageSourceField')?.classList.toggle(
+    'hidden',
+    element.type !== 'input' || !Boolean(element.compareImageEnabled)
+  );
+  document.getElementById('floatingInputSuccessField')?.classList.toggle('hidden', element.type !== 'input');
+  document.getElementById('floatingInputErrorField')?.classList.toggle('hidden', element.type !== 'input');
+  document.getElementById('floatingInputImageField')?.classList.toggle('hidden', element.type !== 'input');
+  document.getElementById('floatingInputAudioField')?.classList.toggle('hidden', element.type !== 'input');
+  document.getElementById('floatingInputBackgroundColorField')?.classList.toggle('hidden', element.type !== 'input');
+  document.getElementById('floatingInputLabelColorField')?.classList.toggle('hidden', element.type !== 'input');
+  document.getElementById('floatingInputTextColorField')?.classList.toggle('hidden', element.type !== 'input');
+  document.getElementById('floatingInputButtonBackgroundColorField')?.classList.toggle('hidden', element.type !== 'input');
+  document.getElementById('floatingInputButtonTextColorField')?.classList.toggle('hidden', element.type !== 'input');
+  document.getElementById('floatingTriggerTimeField')?.classList.toggle('hidden', element.type !== 'timedTrigger');
+  if (floatingButtonLabelInput) {
+    syncTextInputValue(floatingButtonLabelInput, element.type === 'floatingButton' ? element.label || 'Ação' : '');
+  }
+  if (floatingInputPlaceholderInput) {
+    syncTextInputValue(floatingInputPlaceholderInput, element.type === 'input' ? element.placeholder || 'Digite sua resposta' : '');
+  }
+  if (floatingInputSubmitLabelInput) {
+    syncTextInputValue(floatingInputSubmitLabelInput, element.type === 'input' ? element.submitLabel || 'Enviar resposta' : '');
+  }
+  if (floatingInputCompareTextInput) {
+    syncTextInputValue(floatingInputCompareTextInput, element.type === 'input' ? element.compareText || '' : '');
+  }
+  if (floatingInputCompareCaseToggle) {
+    floatingInputCompareCaseToggle.checked = element.type === 'input' ? Boolean(element.compareCaseSensitive) : false;
+  }
+  if (floatingInputCompareImageToggle) {
+    floatingInputCompareImageToggle.checked = element.type === 'input' ? Boolean(element.compareImageEnabled) : false;
+  }
+  if (floatingInputCompareImageUrlInput) {
+    syncTextInputValue(floatingInputCompareImageUrlInput, element.type === 'input' ? element.compareImageReference || '' : '');
+  }
+  renderFloatingInputCompareImagePreview(element.type === 'input' ? element.compareImageReference || '' : '');
+  if (floatingInputSuccessInput) {
+    syncTextInputValue(floatingInputSuccessInput, element.type === 'input' ? element.successMessage || 'Resposta enviada com sucesso.' : '');
+  }
+  if (floatingInputErrorInput) {
+    syncTextInputValue(floatingInputErrorInput, element.type === 'input' ? element.errorMessage || 'A palavra não confere. Tente novamente.' : '');
+  }
+  if (floatingInputAllowImageToggle) {
+    floatingInputAllowImageToggle.checked = element.type === 'input' ? Boolean(element.allowImage) : false;
+    floatingInputAllowImageToggle.disabled = element.type === 'input' ? Boolean(element.compareImageEnabled) : false;
+  }
+  if (floatingInputAllowAudioToggle) {
+    floatingInputAllowAudioToggle.checked = element.type === 'input' ? Boolean(element.allowAudio) : false;
+  }
+  if (floatingInputBackgroundColorInput) {
+    floatingInputBackgroundColorInput.value = element.type === 'input' ? element.backgroundColor || '#ffffff' : '#ffffff';
+  }
+  if (floatingInputLabelColorInput) {
+    floatingInputLabelColorInput.value = element.type === 'input' ? element.labelColor || '#9ca3af' : '#9ca3af';
+  }
+  if (floatingInputTextColorInput) {
+    floatingInputTextColorInput.value = element.type === 'input' ? element.inputTextColor || '#0f142c' : '#0f142c';
+  }
+  if (floatingInputButtonBackgroundColorInput) {
+    floatingInputButtonBackgroundColorInput.value = element.type === 'input' ? element.submitButtonColor || '#6d63ff' : '#6d63ff';
+  }
+  if (floatingInputButtonTextColorInput) {
+    floatingInputButtonTextColorInput.value = element.type === 'input' ? element.submitButtonTextColor || '#ffffff' : '#ffffff';
+  }
+  if (floatingTriggerTimeInput) {
+    floatingTriggerTimeInput.value = String(selectedTrigger?.time || 0);
+  }
+  if (floatingActionTypeLabel) {
+    floatingActionTypeLabel.textContent = element.type === 'timedTrigger' ? 'Ação ao atingir o tempo' : 'Ação ao clicar';
   }
   floatingActionTypeSelect.value = config.type;
   populateFloatingTargetSlides(config.targetSlideId);
@@ -3866,7 +6286,7 @@ const updateFloatingButtonEditorVisibility = (element) => {
     floatingRequireAllToggle.checked = Boolean(config.requireAllButtonsInGroup);
   }
   if (floatingRuleGroupInput) {
-    floatingRuleGroupInput.value = config.ruleGroup || '';
+    syncTextInputValue(floatingRuleGroupInput, config.ruleGroup || '');
   }
   if (element.type === 'detector') {
     populateDetectorAcceptedElements(config.detectorAcceptedDrag);
@@ -3886,7 +6306,7 @@ const updateFloatingButtonEditorVisibility = (element) => {
   if (floatingActionTextInput) {
     floatingActionTextInput.placeholder =
       config.type === 'replaceText' ? 'Ex: Pontos: ' : 'Ex: Bem-vindo à próxima etapa';
-    floatingActionTextInput.value = config.type === 'replaceText' ? config.replaceText || '' : config.text;
+    syncTextInputValue(floatingActionTextInput, config.type === 'replaceText' ? config.replaceText || '' : config.text);
   }
   if (floatingReplaceModeSelect) {
     floatingReplaceModeSelect.value = getReplaceTextMode(config.replaceMode);
@@ -3897,7 +6317,16 @@ const updateFloatingButtonEditorVisibility = (element) => {
   if (floatingReplaceCounterStepInput) {
     floatingReplaceCounterStepInput.value = String(config.replaceCounterStep ?? 1);
   }
-  floatingActionUrlInput.value = config.url;
+  syncTextInputValue(floatingActionUrlInput, config.url);
+  if (floatingActionUrlLabel) {
+    floatingActionUrlLabel.textContent = config.type === 'redirect' ? 'URL de redirecionamento' : 'URL da mídia';
+  }
+  if (floatingActionUrlInput) {
+    floatingActionUrlInput.placeholder =
+      config.type === 'redirect'
+        ? 'Cole a URL do site para abrir quando o gatilho for acionado'
+        : 'Cole a URL da imagem, áudio ou vídeo';
+  }
   if (floatingAudioVisibleToggle) floatingAudioVisibleToggle.checked = Boolean(config.audioVisible);
   if (floatingAudioLoopToggle) floatingAudioLoopToggle.checked = Boolean(config.audioLoop);
   if (floatingTextColorInput) floatingTextColorInput.value = config.textColor || DEFAULT_INSERT_TEXT_STYLE.textColor;
@@ -3916,11 +6345,11 @@ const updateFloatingButtonEditorVisibility = (element) => {
   if (floatingMoveYInput) floatingMoveYInput.value = String(config.moveByY);
   if (floatingMoveDurationInput) floatingMoveDurationInput.value = String(config.moveDuration);
   if (floatingVideoTimeInput) floatingVideoTimeInput.value = String(config.videoTime || 0);
-  floatingQuizQuestionInput.value = config.quizQuestion;
-  floatingQuizOptionsInput.value = config.quizOptions.join('\n');
-  if (floatingQuizSuccessInput) floatingQuizSuccessInput.value = config.successMessage;
-  if (floatingQuizErrorInput) floatingQuizErrorInput.value = config.errorMessage;
-  if (floatingQuizActionLabelInput) floatingQuizActionLabelInput.value = config.actionLabel;
+  syncTextInputValue(floatingQuizQuestionInput, config.quizQuestion);
+  syncTextInputValue(floatingQuizOptionsInput, config.quizOptions.join('\n'));
+  if (floatingQuizSuccessInput) syncTextInputValue(floatingQuizSuccessInput, config.successMessage);
+  if (floatingQuizErrorInput) syncTextInputValue(floatingQuizErrorInput, config.errorMessage);
+  if (floatingQuizActionLabelInput) syncTextInputValue(floatingQuizActionLabelInput, config.actionLabel);
   if (floatingQuizBackgroundColorInput) floatingQuizBackgroundColorInput.value = config.quizBackgroundColor;
   if (floatingQuizQuestionColorInput) floatingQuizQuestionColorInput.value = config.quizQuestionColor;
   if (floatingQuizOptionBackgroundColorInput) floatingQuizOptionBackgroundColorInput.value = config.quizOptionBackgroundColor;
@@ -3932,7 +6361,7 @@ const updateFloatingButtonEditorVisibility = (element) => {
   const actionType = config.type;
   document.getElementById('floatingTargetSlideField')?.classList.toggle('hidden', actionType !== 'jumpSlide');
   document.getElementById('floatingTargetElementField')?.classList.toggle('hidden', !['moveElement', 'playAnimation', 'replaceText', 'playAudio', 'playVideo', 'pauseVideo', 'seekVideo', 'showElement', 'hideElement'].includes(actionType));
-  document.getElementById('floatingRuleGroupField')?.classList.toggle('hidden', element.type === 'detector' || !config.requireAllButtonsInGroup);
+  document.getElementById('floatingRuleGroupField')?.classList.toggle('hidden', element.type === 'detector' || element.type === 'timedTrigger' || element.type === 'input' || !config.requireAllButtonsInGroup);
   document.getElementById('floatingDetectorAcceptedField')?.classList.toggle('hidden', element.type !== 'detector');
   document.getElementById('floatingDetectorMinCountField')?.classList.toggle('hidden', element.type !== 'detector');
   document.getElementById('floatingDetectorTriggerOnceField')?.classList.toggle('hidden', element.type !== 'detector');
@@ -3949,7 +6378,7 @@ const updateFloatingButtonEditorVisibility = (element) => {
   document.getElementById('floatingTextBgColorField')?.classList.toggle('hidden', actionType !== 'addText');
   document.getElementById('floatingTextBackgroundToggleField')?.classList.toggle('hidden', actionType !== 'addText');
   document.getElementById('floatingTextBorderToggleField')?.classList.toggle('hidden', actionType !== 'addText');
-  document.getElementById('floatingActionUrlField')?.classList.toggle('hidden', !['addImage', 'addAudio', 'addVideo'].includes(actionType));
+  document.getElementById('floatingActionUrlField')?.classList.toggle('hidden', !['redirect', 'addImage', 'addAudio', 'addVideo'].includes(actionType));
   document.getElementById('floatingAudioVisibleField')?.classList.toggle('hidden', actionType !== 'addAudio');
   document.getElementById('floatingAudioLoopField')?.classList.toggle('hidden', actionType !== 'addAudio');
   const insertMode = ['addText', 'addImage', 'addAudio', 'addVideo', 'addQuiz'].includes(actionType);
@@ -3976,7 +6405,7 @@ const updateFloatingButtonEditorVisibility = (element) => {
   document.getElementById('floatingQuizPointsField')?.classList.toggle('hidden', !quizMode);
   document.getElementById('floatingQuizLockOnWrongField')?.classList.toggle('hidden', !quizMode);
   if (floatingRequireAllToggle) {
-    floatingRequireAllToggle.disabled = element.type === 'detector';
+    floatingRequireAllToggle.disabled = element.type === 'detector' || element.type === 'timedTrigger' || element.type === 'input';
   }
   if (!insertMode) {
     isPickingFloatingInsertPosition = false;
@@ -3991,15 +6420,20 @@ const updateFloatingButtonEditorVisibility = (element) => {
 
 const syncFloatingButtonEditor = () => {
   const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId);
-  if (!element || !['floatingButton', 'detector'].includes(element.type)) {
+  if (!element || !['floatingButton', 'detector', 'timedTrigger', 'input'].includes(element.type)) {
     return;
   }
   normalizeFloatingActionConfig(element);
-  const config = element.actionConfig;
+  const selectedTrigger = getSelectedFloatingTrigger(element);
+  const config = selectedTrigger?.actionConfig || element.actionConfig;
+  if (selectedTrigger) {
+    selectedTrigger.time = element.type === 'timedTrigger' ? Math.max(0, Number(floatingTriggerTimeInput?.value) || 0) : 0;
+  }
   config.type = floatingActionTypeSelect?.value || 'none';
   config.targetSlideId = floatingTargetSlideSelect?.value || '';
   config.targetElementId = floatingTargetElementSelect?.value || '';
-  config.requireAllButtonsInGroup = element.type === 'detector' ? false : Boolean(floatingRequireAllToggle?.checked);
+  config.requireAllButtonsInGroup =
+    element.type === 'detector' || element.type === 'timedTrigger' || element.type === 'input' ? false : Boolean(floatingRequireAllToggle?.checked);
   config.ruleGroup = config.requireAllButtonsInGroup ? (floatingRuleGroupInput?.value?.trim() || '') : '';
   config.detectorAcceptedDrag =
     element.type === 'detector'
@@ -4012,6 +6446,36 @@ const syncFloatingButtonEditor = () => {
   if (element.type === 'detector' && floatingDetectorMinCountInput) {
     floatingDetectorMinCountInput.value = String(config.detectorMinMatchCount);
     floatingDetectorMinCountInput.disabled = forceSingleDetectorMatch;
+  }
+  if (element.type === 'floatingButton') {
+    const nextLabel = floatingButtonLabelInput?.value?.trim() || 'Ação';
+    element.label = nextLabel;
+    if (floatingButtonLabelInput && document.activeElement !== floatingButtonLabelInput && floatingButtonLabelInput.value !== nextLabel) {
+      floatingButtonLabelInput.value = nextLabel;
+    }
+  }
+  if (element.type === 'input') {
+    element.placeholder = floatingInputPlaceholderInput?.value?.trim() || 'Digite sua resposta';
+    element.submitLabel = floatingInputSubmitLabelInput?.value?.trim() || 'Enviar resposta';
+    element.compareText = floatingInputCompareTextInput?.value ?? '';
+    element.compareCaseSensitive = Boolean(floatingInputCompareCaseToggle?.checked);
+    element.compareImageEnabled = Boolean(floatingInputCompareImageToggle?.checked);
+    element.compareImageReference = floatingInputCompareImageUrlInput?.value?.trim() || '';
+    element.successMessage = floatingInputSuccessInput?.value?.trim() || 'Resposta enviada com sucesso.';
+    element.errorMessage = floatingInputErrorInput?.value?.trim() || 'A palavra não confere. Tente novamente.';
+    element.allowImage = element.compareImageEnabled ? true : Boolean(floatingInputAllowImageToggle?.checked);
+    element.allowAudio = Boolean(floatingInputAllowAudioToggle?.checked);
+    element.backgroundColor = floatingInputBackgroundColorInput?.value || '#ffffff';
+    element.labelColor = floatingInputLabelColorInput?.value || '#9ca3af';
+    element.inputTextColor = floatingInputTextColorInput?.value || '#0f142c';
+    element.submitButtonColor = floatingInputButtonBackgroundColorInput?.value || '#6d63ff';
+    element.submitButtonTextColor = floatingInputButtonTextColorInput?.value || '#ffffff';
+    renderFloatingInputCompareImagePreview(element.compareImageReference);
+    document.getElementById('floatingInputCompareImageSourceField')?.classList.toggle('hidden', !element.compareImageEnabled);
+    if (floatingInputAllowImageToggle) {
+      floatingInputAllowImageToggle.checked = element.allowImage;
+      floatingInputAllowImageToggle.disabled = element.compareImageEnabled;
+    }
   }
   const actionTextValue = floatingActionTextInput?.value ?? '';
   config.text = config.type === 'addText' ? (actionTextValue.length ? actionTextValue : 'Novo texto') : (config.text || 'Novo texto');
@@ -4035,7 +6499,7 @@ const syncFloatingButtonEditor = () => {
   config.hasTextBlock = false;
   config.insertX = Math.max(0, Number(floatingInsertXInput?.value) || 120);
   config.insertY = Math.max(0, Number(floatingInsertYInput?.value) || 120);
-  config.insertWidth = Math.max(40, Number(floatingInsertWidthInput?.value) || 280);
+  config.insertWidth = Number.isFinite(Number(floatingInsertWidthInput?.value)) ? Number(floatingInsertWidthInput.value) : 280;
   config.insertHeight = Math.max(40, Number(floatingInsertHeightInput?.value) || 180);
   config.moveByX = Number.isFinite(Number(floatingMoveXInput?.value)) ? Number(floatingMoveXInput.value) : 160;
   config.moveByY = Number.isFinite(Number(floatingMoveYInput?.value)) ? Number(floatingMoveYInput.value) : 0;
@@ -4067,6 +6531,25 @@ const syncFloatingButtonEditor = () => {
   config.quizButtonBackgroundColor = floatingQuizButtonBackgroundColorInput?.value || '#6d63ff';
   config.points = Math.max(1, Number(floatingQuizPointsInput?.value) || 1);
   config.lockOnWrong = Boolean(floatingQuizLockOnWrongToggle?.checked);
+  if (selectedTrigger) {
+    selectedTrigger.name =
+      config.type === 'none'
+        ? element.type === 'detector'
+          ? 'Gatilho'
+          : element.type === 'timedTrigger'
+            ? 'Tempo'
+            : element.type === 'input'
+              ? 'Envio'
+              : 'Ação'
+        : element.type === 'timedTrigger'
+          ? `Tempo ${Number(selectedTrigger.time || 0).toFixed(1)}s`
+          : config.type;
+  }
+  if (element.type === 'timedTrigger') {
+    element.interactionTriggers.sort((first, second) => (Number(first.time) || 0) - (Number(second.time) || 0));
+  }
+  element.actionConfig = element.interactionTriggers[0]?.actionConfig || config;
+  renderSlide();
   updateFloatingButtonEditorVisibility(element);
   updateFloatingPlacementPreview();
   scheduleHistoryCommit();
@@ -4080,13 +6563,32 @@ const toggleFloatingPlacementPicker = () => {
     return;
   }
   normalizeFloatingActionConfig(element);
-  if (!FLOATING_INSERT_ACTIONS.includes(element.actionConfig?.type || 'none')) {
+  const selectedTrigger = getSelectedFloatingTrigger(element);
+  if (!FLOATING_INSERT_ACTIONS.includes(selectedTrigger?.actionConfig?.type || 'none')) {
     isPickingFloatingInsertPosition = false;
     updateFloatingPlacementControls(element);
     return;
   }
   isPickingFloatingInsertPosition = !isPickingFloatingInsertPosition;
   updateFloatingPlacementPreview();
+};
+
+const toggleVideoPlacementPicker = () => {
+  const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId && child.type === 'video');
+  if (!element) {
+    isPickingFloatingInsertPosition = false;
+    updateVideoPlacementControls(null);
+    return;
+  }
+  normalizeVideoTriggerConfig(element);
+  const selectedTrigger = getSelectedVideoTrigger(element);
+  if (!FLOATING_INSERT_ACTIONS.includes(selectedTrigger?.actionConfig?.type || 'none')) {
+    isPickingFloatingInsertPosition = false;
+    updateVideoPlacementControls(element);
+    return;
+  }
+  isPickingFloatingInsertPosition = !isPickingFloatingInsertPosition;
+  updateVideoPlacementPreview();
 };
 
 const toggleFloatingTargetElementPicker = () => {
@@ -4097,7 +6599,8 @@ const toggleFloatingTargetElementPicker = () => {
     return;
   }
   normalizeFloatingActionConfig(element);
-  if (!['moveElement', 'playAnimation', 'replaceText'].includes(element.actionConfig?.type || 'none')) {
+  const selectedTrigger = getSelectedFloatingTrigger(element);
+  if (!['moveElement', 'playAnimation', 'replaceText', 'playAudio', 'playVideo', 'pauseVideo', 'seekVideo', 'showElement', 'hideElement'].includes(selectedTrigger?.actionConfig?.type || 'none')) {
     isPickingFloatingTargetElement = false;
     updateFloatingPlacementPreview();
     return;
@@ -4112,26 +6615,58 @@ const handleFloatingPlacementPick = (event) => {
     return false;
   }
   normalizeFloatingActionConfig(element);
-  if (!FLOATING_INSERT_ACTIONS.includes(element.actionConfig?.type || 'none')) {
+  const selectedTrigger = getSelectedFloatingTrigger(element);
+  if (!FLOATING_INSERT_ACTIONS.includes(selectedTrigger?.actionConfig?.type || 'none')) {
     isPickingFloatingInsertPosition = false;
     updateFloatingPlacementPreview();
     return false;
   }
   const stage = getStageDimensions();
   const pointer = getStagePointerPosition(event);
-  const previewRect = getFloatingInsertPreviewRect(element.actionConfig);
+  const previewRect = getFloatingInsertPreviewRect(selectedTrigger?.actionConfig);
   const x = clamp(pointer.x, 0, Math.max(0, stage.width - previewRect.width));
   const y = clamp(pointer.y, 0, Math.max(0, stage.height - previewRect.height));
-  element.actionConfig.insertX = Math.round(x);
-  element.actionConfig.insertY = Math.round(y);
+  selectedTrigger.actionConfig.insertX = Math.round(x);
+  selectedTrigger.actionConfig.insertY = Math.round(y);
   if (floatingInsertXInput) {
-    floatingInsertXInput.value = String(element.actionConfig.insertX);
+    floatingInsertXInput.value = String(selectedTrigger.actionConfig.insertX);
   }
   if (floatingInsertYInput) {
-    floatingInsertYInput.value = String(element.actionConfig.insertY);
+    floatingInsertYInput.value = String(selectedTrigger.actionConfig.insertY);
   }
   isPickingFloatingInsertPosition = false;
   updateFloatingPlacementPreview();
+  scheduleHistoryCommit();
+  return true;
+};
+
+const handleVideoPlacementPick = (event) => {
+  const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId && child.type === 'video');
+  if (!slideCanvas || !element || !isPickingFloatingInsertPosition || currentStageEditor !== 'video') {
+    return false;
+  }
+  normalizeVideoTriggerConfig(element);
+  const selectedTrigger = getSelectedVideoTrigger(element);
+  if (!FLOATING_INSERT_ACTIONS.includes(selectedTrigger?.actionConfig?.type || 'none')) {
+    isPickingFloatingInsertPosition = false;
+    updateVideoPlacementPreview();
+    return false;
+  }
+  const stage = getStageDimensions();
+  const pointer = getStagePointerPosition(event);
+  const previewRect = getFloatingInsertPreviewRect(selectedTrigger?.actionConfig);
+  const x = clamp(pointer.x, 0, Math.max(0, stage.width - previewRect.width));
+  const y = clamp(pointer.y, 0, Math.max(0, stage.height - previewRect.height));
+  selectedTrigger.actionConfig.insertX = Math.round(x);
+  selectedTrigger.actionConfig.insertY = Math.round(y);
+  if (videoTriggerInsertXInput) {
+    videoTriggerInsertXInput.value = String(selectedTrigger.actionConfig.insertX);
+  }
+  if (videoTriggerInsertYInput) {
+    videoTriggerInsertYInput.value = String(selectedTrigger.actionConfig.insertY);
+  }
+  isPickingFloatingInsertPosition = false;
+  updateVideoPlacementPreview();
   scheduleHistoryCommit();
   return true;
 };
@@ -4141,7 +6676,7 @@ const syncBlockEditor = () => {
   if (!element || element.type !== 'block') {
     return;
   }
-  element.content = blockElementContentInput?.value || element.content || '';
+  element.content = blockElementContentInput?.value ?? '';
   const width = Number(blockElementWidthInput?.value);
   const height = Number(blockElementHeightInput?.value);
   const rotation = Number(blockElementRotationInput?.value);
@@ -4278,6 +6813,7 @@ const updateSmartSidebarVisibility = (element) => {
   );
   toggle('sharedBackgroundField', ['text', 'floatingButton'].includes(type));
   toggle('sharedStudentDragField', ['text', 'block'].includes(type));
+  toggle('sharedInitiallyHiddenField', hasElement); // Show for all element types
   toggle('textBackgroundField', type === 'text');
   toggle('textBorderField', type === 'text');
   toggle('textAlignToolsField', type === 'text');
@@ -4446,6 +6982,7 @@ const removeBackgroundFromSelectedImage = async () => {
     if (!response.ok) {
       throw new Error(payload?.message || 'Não foi possível remover o fundo da imagem.');
     }
+    syncProfessorCreditsFromPayload(payload);
     const { removeMaskColorFromImageSource } = await backgroundRemovalModulePromise;
     element.src = await removeMaskColorFromImageSource(payload?.dataUrl || element.src, {
       maskColor: payload?.maskColor || ''
@@ -4474,6 +7011,10 @@ const toggleCourseModuleCard = (forceExpanded = null) => {
 const rememberAiAction = (action) => {
   if (!action || typeof action !== 'object') {
     return;
+  }
+  aiAssistantState.generatedActions.push(JSON.parse(JSON.stringify(action)));
+  if (aiAssistantState.generatedActions.length > 200) {
+    aiAssistantState.generatedActions.shift();
   }
   aiAssistantState.recentActions.push(JSON.parse(JSON.stringify(action)));
   if (aiAssistantState.recentActions.length > 10) {
@@ -4606,10 +7147,317 @@ const clearAiAssistantProposal = () => {
   aiAssistantState.stepIndex = 0;
   aiAssistantState.feedbackEntries = [];
   aiAssistantState.recentActions = [];
+  aiAssistantState.generatedActions = [];
+  aiAssistantState.executionPlan = null;
   aiAssistantState.debugInfo = null;
   renderAiAssistantActions();
   renderAiAssistantFeedback();
   renderAiAssistantDebug();
+};
+
+const syncProfessorCreditsFromPayload = (payload = null) => {
+  if (!payload || typeof payload !== 'object') {
+    return;
+  }
+  const nextData = {};
+  if (Number.isFinite(Number(payload.aiCredits))) {
+    nextData.aiCredits = Math.max(0, Number(Number(payload.aiCredits).toFixed(2)));
+  }
+  if (Number.isFinite(Number(payload.professorCreditsRemaining))) {
+    nextData.aiCredits = Math.max(0, Number(Number(payload.professorCreditsRemaining).toFixed(2)));
+  }
+  if (Number.isFinite(Number(payload.aiCreditCostPerCall))) {
+    nextData.aiCreditCostPerCall = Math.max(0.01, Number(Number(payload.aiCreditCostPerCall).toFixed(2)));
+  }
+  if (payload.studentLimit !== undefined) {
+    nextData.studentLimit = payload.studentLimit;
+  }
+  if (payload.storageLimitBytes !== undefined) {
+    nextData.storageLimitBytes = payload.storageLimitBytes;
+  }
+  if (payload.storageUsedBytes !== undefined) {
+    nextData.storageUsedBytes = payload.storageUsedBytes;
+  }
+  saveCurrentUserData(nextData);
+  renderBuilderProfessorCreditsStatus();
+};
+
+const renderBuilderProfessorCreditsStatus = () => {
+  if (!builderProfessorCreditsStatus) return;
+  const role = localStorage.getItem(USER_ROLE_KEY);
+  if (role !== 'professor') {
+    builderProfessorCreditsStatus.textContent = '';
+    return;
+  }
+  const user = getCurrentUserData();
+  const credits = Number.isFinite(Number(user.aiCredits)) ? Math.max(0, Number(user.aiCredits)) : 0;
+  const cost = Number.isFinite(Number(user.aiCreditCostPerCall)) ? Math.max(0.01, Number(user.aiCreditCostPerCall)) : 0.5;
+  const storageText = user.storageLimitBytes
+    ? ` | espaço: ${formatStorageAmount(user.storageUsedBytes || 0)} / ${formatStorageAmount(user.storageLimitBytes)}`
+    : '';
+  builderProfessorCreditsStatus.textContent = `Saldo: ${formatCreditNumber(credits)} crédito(s) | custo/chamada: ${formatCreditNumber(cost)}${storageText}`;
+  builderProfessorCreditsStatus.style.color = credits > 0 ? '#6d63ff' : '#ff6b6b';
+};
+
+const loadBuilderProfessorCreditsStatus = async () => {
+  const role = localStorage.getItem(USER_ROLE_KEY);
+  if (role !== 'professor') {
+    renderBuilderProfessorCreditsStatus();
+    return;
+  }
+  try {
+    const response = await authorizedFetch('/api/admin/me/professor-credits');
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(payload?.message || 'Não foi possível carregar os créditos.');
+    }
+    syncProfessorCreditsFromPayload(payload);
+  } catch (error) {
+    renderBuilderProfessorCreditsStatus();
+  }
+};
+
+const getAiAssistantWorkingState = () => {
+  const state = {
+    slides: deepClone(builderState.slides || []),
+    activeSlideId: builderState.activeSlideId || builderState.slides[0]?.id || null
+  };
+  if (aiAssistantState.pendingActions.length) {
+    const result = applyAiActionsToState(state, aiAssistantState.pendingActions, { selectedElementId: null });
+    state.activeSlideId = state.activeSlideId || builderState.activeSlideId;
+    state.selectedElementId = result.selectedElementId || null;
+  }
+  return state;
+};
+
+const requestAiExecutionPlan = async (request) => {
+  const workingState = getAiAssistantWorkingState();
+  const response = await authorizedFetch('/api/admin/ai/slide-actions/plan', {
+    method: 'POST',
+    body: JSON.stringify({
+      request,
+      slides: workingState.slides,
+      activeSlideId: workingState.activeSlideId,
+      stageSize: builderState.stageSize.width && builderState.stageSize.height ? builderState.stageSize : DEFAULT_STAGE_SIZE,
+      attachments: getAiAssistantAttachmentsPayload()
+    })
+  });
+  const result = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(result?.message || 'A IA não conseguiu montar o plano.');
+  }
+  syncProfessorCreditsFromPayload(result);
+  return result;
+};
+
+const applyOrQueueAiActions = (actions, options = {}) => {
+  if (!Array.isArray(actions) || !actions.length) {
+    return;
+  }
+  const shouldAutoApply = options.requireConfirmation === false;
+  actions.forEach((action) => rememberAiAction(action));
+  if (shouldAutoApply) {
+    const applyResult = applyAiActions(actions.map((action) => deepClone(action)));
+    if (applyResult.warnings.length) {
+      pushAiAssistantFeedback('Ações aplicadas com alertas', applyResult.warnings.join('\n'), 'error');
+    }
+    updateAiAssistantStatus(`Executando automaticamente ${aiAssistantState.generatedActions.length} ação(ões) da IA...`, applyResult.warnings.length ? 'error' : 'success');
+    return;
+  }
+  aiAssistantState.pendingActions.push(...actions.map((action) => deepClone(action)));
+  renderAiAssistantActions();
+};
+
+const executeAiPlanItem = async ({ request, plan, planItem, requireConfirmation, providerLabel }) => {
+  const maxSteps = 1;
+  let generatedCount = 0;
+  for (let localStep = 0; localStep < maxSteps; localStep += 1) {
+    const workingState = getAiAssistantWorkingState();
+    const response = await authorizedFetch('/api/admin/ai/slide-actions', {
+      method: 'POST',
+      body: JSON.stringify({
+        request,
+        slides: workingState.slides,
+        activeSlideId: workingState.activeSlideId,
+        stageSize: builderState.stageSize.width && builderState.stageSize.height ? builderState.stageSize : DEFAULT_STAGE_SIZE,
+        stepIndex: aiAssistantState.stepIndex,
+        recentActions: aiAssistantState.recentActions,
+        attachments: getAiAssistantAttachmentsPayload(),
+        executionPlan: plan,
+        currentPlanItem: planItem
+      })
+    });
+    const result = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(result?.message || 'A IA não conseguiu gerar a próxima etapa.');
+    }
+    syncProfessorCreditsFromPayload(result);
+    aiAssistantState.debugInfo = {
+      request,
+      providerLabel: providerLabel || result?.providerLabel || '',
+      requireConfirmation,
+      plan,
+      currentPlanItem: planItem,
+      stepIndex: aiAssistantState.stepIndex,
+      lastStepResult: result,
+      generatedActionCount: aiAssistantState.generatedActions.length,
+      pendingActionCount: aiAssistantState.pendingActions.length
+    };
+    renderAiAssistantDebug();
+    if (result?.done) {
+      pushAiAssistantFeedback(
+        plan?.mode === 'simple' ? 'Pedido concluído' : `Slide ${planItem?.order || ''} planejado`,
+        result?.message || 'Etapa concluída.',
+        'success'
+      );
+      return generatedCount;
+    }
+    if (!result?.action) {
+      throw new Error('A IA não retornou uma ação válida nesta etapa.');
+    }
+    const stepAction = deepClone(result.action);
+    applyOrQueueAiActions([stepAction], { requireConfirmation });
+    aiAssistantState.stepIndex += 1;
+    generatedCount += 1;
+    pushAiAssistantFeedback(
+      plan?.mode === 'simple' ? 'Ação gerada' : `Slide ${planItem?.order || ''} em progresso`,
+      result?.message || stepAction.reason || 'A IA gerou uma nova ação.',
+      'success'
+    );
+  }
+  pushAiAssistantFeedback(
+    plan?.mode === 'simple' ? 'Encerrado' : `Slide ${planItem?.order || ''} encerrado`,
+    'A etapa atingiu o limite de ações para evitar loops.',
+    'muted'
+  );
+  return generatedCount;
+};
+
+const executeAiSlidePlanItem = async ({ request, plan, planItem, requireConfirmation, providerLabel }) => {
+  const workingState = getAiAssistantWorkingState();
+  const response = await authorizedFetch('/api/admin/ai/slide-actions', {
+    method: 'POST',
+    body: JSON.stringify({
+      request,
+      slides: workingState.slides,
+      activeSlideId: workingState.activeSlideId,
+      stageSize: builderState.stageSize.width && builderState.stageSize.height ? builderState.stageSize : DEFAULT_STAGE_SIZE,
+      attachments: getAiAssistantAttachmentsPayload(),
+      executionPlan: plan,
+      currentPlanItem: planItem
+    })
+  });
+  const result = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(result?.message || 'Falha ao gerar o slide atual.');
+  }
+  syncProfessorCreditsFromPayload(result);
+  const actions = Array.isArray(result?.actions) ? result.actions.map((action) => deepClone(action)) : [];
+  aiAssistantState.debugInfo = {
+    request,
+    providerLabel: providerLabel || result?.providerLabel || '',
+    requireConfirmation,
+    plan,
+    currentPlanItem: planItem,
+    lastSlideResult: result,
+    generatedActionCount: aiAssistantState.generatedActions.length,
+    pendingActionCount: aiAssistantState.pendingActions.length
+  };
+  renderAiAssistantDebug();
+  if (!actions.length) {
+    pushAiAssistantFeedback(
+      plan?.mode === 'simple' ? 'Pedido concluído' : `Slide ${planItem?.order || ''} sem mudanças`,
+      'Nenhuma ação nova foi necessária para esta etapa.',
+      'muted'
+    );
+    return 0;
+  }
+  applyOrQueueAiActions(actions, { requireConfirmation });
+  aiAssistantState.stepIndex += 1;
+  pushAiAssistantFeedback(
+    plan?.mode === 'simple' ? 'Pedido gerado' : `Slide ${planItem?.order || ''} gerado`,
+    `${actions.length} ação(ões) preparadas para ${planItem?.title || 'esta etapa'}.`,
+    'success'
+  );
+  return actions.length;
+};
+
+const requestAiPlannedProposal = async (request) => {
+  clearAiAssistantProposal();
+  aiAssistantState.stopRequested = false;
+  aiAssistantState.lastPrompt = request;
+  updateBuilderStageSize();
+  pushAiAssistantFeedback(
+    'IA planejando',
+    aiAssistantState.attachments.length
+      ? 'Primeiro vou planejar a execução com base no prompt e na imagem anexada, depois montar por etapas.'
+      : 'Primeiro vou planejar os passos e depois executar slide por slide.'
+  );
+  const planResponse = await requestAiExecutionPlan(request);
+  const plan = planResponse?.plan || null;
+  if (!plan || typeof plan !== 'object') {
+    throw new Error('A IA não retornou um plano válido.');
+  }
+  aiAssistantState.executionPlan = deepClone(plan);
+  aiAssistantState.debugInfo = {
+    request,
+    providerLabel: planResponse?.providerLabel || '',
+    requireConfirmation: planResponse?.requireConfirmation !== false,
+    plan,
+    generatedActionCount: 0,
+    pendingActionCount: 0
+  };
+  renderAiAssistantDebug();
+
+  const requireConfirmation = planResponse?.requireConfirmation !== false;
+  if (plan.mode === 'simple') {
+    pushAiAssistantFeedback('Plano simples', plan.summary || 'Pedido pontual detectado. Vou gerar só o necessário.', 'success');
+    await executeAiSlidePlanItem({
+      request,
+      plan,
+      planItem: plan.simpleTask || { id: 'simple-task', title: 'Pedido simples', goal: request, order: 1 },
+      requireConfirmation,
+      providerLabel: planResponse?.providerLabel || ''
+    });
+  } else {
+    const planItems = Array.isArray(plan.slides) ? plan.slides : [];
+    pushAiAssistantFeedback(
+      'Plano pronto',
+      `${planItems.length} slide(s) separados antes da execução. Agora vou montar um por vez.`,
+      'success'
+    );
+    for (const planItem of planItems) {
+      pushAiAssistantFeedback(
+        `Executando slide ${planItem.order || ''}`,
+        `${planItem.title || 'Slide'}: ${planItem.goal || 'Montando o layout deste slide.'}`,
+        'muted'
+      );
+      await executeAiSlidePlanItem({
+        request,
+        plan,
+        planItem,
+        requireConfirmation,
+        providerLabel: planResponse?.providerLabel || ''
+      });
+    }
+  }
+
+  if (!aiAssistantState.generatedActions.length) {
+    pushAiAssistantFeedback('Sem alterações', 'A IA concluiu o planejamento, mas não retornou mudanças aplicáveis.', 'muted');
+    updateAiAssistantStatus('Nenhuma alteração válida foi gerada.');
+    return;
+  }
+
+  rememberAiProposal(request, aiAssistantState.generatedActions);
+  if (requireConfirmation) {
+    renderAiAssistantActions();
+    updateAiAssistantStatus(
+      `Plano concluído com ${aiAssistantState.generatedActions.length} ação(ões). Revise e clique em aplicar.`,
+      'success'
+    );
+  } else {
+    updateAiAssistantStatus(`${aiAssistantState.generatedActions.length} ação(ões) executadas automaticamente.`, 'success');
+  }
 };
 
 const requestAiBulkProposal = async (request) => {
@@ -4637,6 +7485,7 @@ const requestAiBulkProposal = async (request) => {
   if (!response.ok) {
     throw new Error(result?.message || 'A IA não conseguiu gerar a proposta.');
   }
+  syncProfessorCreditsFromPayload(result);
   const actions = Array.isArray(result?.actions) ? result.actions : [];
   aiAssistantState.debugInfo = {
     request,
@@ -4673,6 +7522,7 @@ const loadAiAssistantSettings = async () => {
       throw new Error('Não foi possível carregar a integração de IA.');
     }
     aiAssistantState.settings = await response.json();
+    syncProfessorCreditsFromPayload({ aiCreditCostPerCall: aiAssistantState.settings?.aiCreditCostPerCall });
     if (aiAssistantState.settings?.connected && aiAssistantState.settings?.isEnabled) {
       const imageProvider = aiAssistantState.settings?.imageProvider;
       updateAiAssistantStatus(
@@ -4722,20 +7572,77 @@ const getActiveSlide = () => builderState.slides.find((slide) => slide.id === bu
 const renderSlideList = () => {
   if (!slideList) return;
   slideList.innerHTML = builderState.slides
-    .map(
-      (slide) => `<button type="button" class="slide-chip ${slide.id === builderState.activeSlideId ? 'active' : ''}" data-slide-id="${slide.id}">${slide.title}</button>`
-    )
+    .map((slide) => {
+      const classes = ['slide-chip'];
+      if (slide.id === builderState.activeSlideId) {
+        classes.push('active');
+      }
+      if (slide.id === draggingSlideId) {
+        classes.push('is-drag-source');
+      }
+      if (slide.id === slideDropTargetId) {
+        classes.push(slideDropPlacement === 'before' ? 'drop-before' : 'drop-after');
+      }
+      return `<button type="button" class="${classes.join(' ')}" data-slide-id="${slide.id}" draggable="true">${slide.title}</button>`;
+    })
     .join('');
+};
+
+const clearSlideDragState = () => {
+  draggingSlideId = null;
+  slideDropTargetId = null;
+  slideDropPlacement = 'after';
+  if (!slideList) return;
+  slideList.querySelectorAll('.slide-chip').forEach((chip) => {
+    chip.classList.remove('is-drag-source', 'drop-before', 'drop-after');
+  });
+};
+
+const moveSlideInStrip = (fromSlideId, toSlideId, placement = 'after') => {
+  if (!fromSlideId || !toSlideId || fromSlideId === toSlideId) {
+    return false;
+  }
+  const fromIndex = builderState.slides.findIndex((slide) => slide.id === fromSlideId);
+  const toIndex = builderState.slides.findIndex((slide) => slide.id === toSlideId);
+  if (fromIndex < 0 || toIndex < 0) {
+    return false;
+  }
+  const [movedSlide] = builderState.slides.splice(fromIndex, 1);
+  const adjustedTargetIndex = builderState.slides.findIndex((slide) => slide.id === toSlideId);
+  if (adjustedTargetIndex < 0) {
+    builderState.slides.push(movedSlide);
+  } else {
+    const insertionIndex = placement === 'before' ? adjustedTargetIndex : adjustedTargetIndex + 1;
+    builderState.slides.splice(insertionIndex, 0, movedSlide);
+  }
+  return true;
+};
+
+const syncSlideDropVisualState = () => {
+  if (!slideList) return;
+  slideList.querySelectorAll('.slide-chip').forEach((chip) => {
+    const slideId = chip.dataset.slideId;
+    chip.classList.toggle('is-drag-source', Boolean(draggingSlideId && slideId === draggingSlideId));
+    chip.classList.toggle('drop-before', Boolean(slideDropTargetId && slideId === slideDropTargetId && slideDropPlacement === 'before'));
+    chip.classList.toggle('drop-after', Boolean(slideDropTargetId && slideId === slideDropTargetId && slideDropPlacement === 'after'));
+  });
 };
 
 const renderSlide = () => {
   if (!slideCanvas) return;
   const slide = previewState.active ? getPreviewActiveSlide() : getActiveSlide();
   if (!slide) {
+    if (previewState.active) {
+      clearPreviewTimedSlideTriggerTimers();
+      previewState.activeTimedSlideId = null;
+    }
     slideCanvas.innerHTML = '';
     return;
   }
   if (previewState.active) {
+    if (previewState.activeTimedSlideId !== slide.id) {
+      clearPreviewTimedSlideTriggerTimers();
+    }
     if (lastPreviewAnimationSlideId !== slide.id) {
       previewAnimationState.clear();
       lastPreviewAnimationSlideId = slide.id;
@@ -4755,12 +7662,19 @@ const renderSlide = () => {
     previewStageBtn.textContent = previewState.active ? 'Sair da prévia' : 'Prévia do aluno';
     previewStageBtn.classList.toggle('active', previewState.active);
   }
+  if (previewState.active) {
+    snapshotPreviewMediaState(slide);
+  }
   slideCanvas.innerHTML = '';
   setStageBackground(slide);
   if (!previewState.active) {
     syncBackgroundInputs(slide);
   }
+  const deferredCaptionOverlays = [];
   if (!slide.elements.length) {
+    if (previewState.active) {
+      clearPreviewTimedSlideTriggerTimers();
+    }
     const hint = document.createElement('p');
     hint.className = 'canvas-hint';
     hint.textContent = previewState.active
@@ -4769,6 +7683,11 @@ const renderSlide = () => {
     slideCanvas.appendChild(hint);
     clearHandleLayer();
     destroyEraserOverlay();
+    if (!previewState.active) {
+      renderPenOverlay();
+    } else {
+      destroyPenOverlay();
+    }
     updateBuilderStageSize();
     return;
   }
@@ -4778,14 +7697,62 @@ const renderSlide = () => {
     .forEach((element) => {
       const node = previewState.active ? createPreviewElementNode(element, slide) : renderElementNode(element);
       slideCanvas.appendChild(node);
+      if (['audio', 'video'].includes(element.type)) {
+        const mediaNode = getPreviewMediaNode(node);
+        const overlayNode = createMediaCaptionOverlayNode(element, mediaNode, {
+          stageNode: slideCanvas,
+          interactive: !previewState.active,
+          keepVisibleWhenIdle: !previewState.active,
+          onCommit: () => commitHistoryState(),
+          onSelect: () => {
+            if (!previewState.active) {
+              selectElement(element.id);
+            }
+          }
+        });
+        if (overlayNode) {
+          deferredCaptionOverlays.push({
+            element,
+            overlayNode,
+            zIndex: Number(element.zIndex) || 0
+          });
+        }
+      }
+      if (!previewState.active) {
+        expandElementToRenderedContent(element, node);
+        if (!node.dataset.hasMenuTrigger) {
+          slideCanvas.appendChild(createElementMenuTrigger(element));
+        }
+      }
     });
+  deferredCaptionOverlays
+    .sort((a, b) => a.zIndex - b.zIndex)
+    .forEach(({ element, overlayNode, zIndex }) => {
+      const overlayZIndex = selectedElementId === overlayNode.dataset.captionForElementId ? 1000000 : zIndex + 1000;
+      overlayNode.style.zIndex = String(overlayZIndex);
+      slideCanvas.appendChild(overlayNode);
+      positionCaptionOverlayNode(overlayNode, element, slideCanvas);
+    });
+  if (deferredCaptionOverlays.length) {
+    requestAnimationFrame(() => {
+      deferredCaptionOverlays.forEach(({ element, overlayNode }) => positionCaptionOverlayNode(overlayNode, element, slideCanvas));
+      if (!previewState.active) {
+        renderHandles();
+      }
+    });
+  }
   if (!previewState.active) {
+    updateElementMenuTriggerVisibility();
     renderHandles();
     updateFloatingPlacementPreview();
+    updateVideoPlacementPreview();
     renderEraserOverlay();
+    renderPenOverlay();
   } else {
     clearHandleLayer();
     destroyEraserOverlay();
+    destroyPenOverlay();
+    schedulePreviewTimedSlideTriggers(slide);
   }
   updateBuilderStageSize();
 };
@@ -4800,12 +7767,18 @@ const clearHandleLayer = () => {
 const toggleStudentPreview = () => {
   if (previewState.active) {
     previewState.active = false;
+    clearPreviewTimedSlideTriggerTimers();
     previewState.slides = [];
     previewState.activeSlideId = null;
+    previewState.slideEnteredAt = 0;
+    previewState.activeTimedSlideId = null;
+    previewState.timedSlideTriggers = new Map();
     previewState.clickedRuleButtons = new Map();
     previewState.triggeredDetectors = new Set();
     previewState.replaceCounters = new Map();
     previewState.hiddenElements = new Map();
+    previewState.mediaState = new Map();
+    previewState.timedVideoTriggers = new Map();
     previewAnimationState.clear();
     lastPreviewAnimationSlideId = null;
     renderSlide();
@@ -4814,12 +7787,26 @@ const toggleStudentPreview = () => {
   previewState.active = true;
   previewState.slides = JSON.parse(JSON.stringify(builderState.slides || []));
   previewState.activeSlideId = builderState.activeSlideId || previewState.slides[0]?.id || null;
+  previewState.slideEnteredAt = Date.now();
+  previewState.activeTimedSlideId = null;
+  previewState.timedSlideTriggerTimers = [];
+  previewState.timedSlideTriggers = new Map();
   previewState.clickedRuleButtons = new Map();
   previewState.triggeredDetectors = new Set();
   previewState.replaceCounters = new Map();
   previewState.hiddenElements = new Map();
+  previewState.mediaState = new Map();
+  previewState.timedVideoTriggers = new Map();
   previewAnimationState.clear();
   lastPreviewAnimationSlideId = null;
+  // Initialize initially hidden elements
+  previewState.slides.forEach((slide) => {
+    slide.elements?.forEach((element) => {
+      if (element.initiallyHidden) {
+        setPreviewElementHidden(slide.id, element.id, true);
+      }
+    });
+  });
   renderSlide();
 };
 
@@ -4827,10 +7814,11 @@ const startResize = (direction, element, event) => {
   event.preventDefault();
   event.stopPropagation();
   const startPointer = getStagePointerPosition(event);
-  const startWidth = Number(element.width) || MIN_ELEMENT_SIZE;
-  const startHeight = Number(element.height) || MIN_ELEMENT_SIZE;
-  const startLeft = element.x || 0;
-  const startTop = element.y || 0;
+  const startBox = getStageRelativeElementBox(element);
+  const startWidth = Math.max(MIN_ELEMENT_SIZE, Number(startBox.width) || Number(element.width) || MIN_ELEMENT_SIZE);
+  const startHeight = Math.max(MIN_ELEMENT_SIZE, Number(startBox.height) || Number(element.height) || MIN_ELEMENT_SIZE);
+  const startLeft = Number.isFinite(Number(startBox.left)) ? Number(startBox.left) : (element.x || 0);
+  const startTop = Number.isFinite(Number(startBox.top)) ? Number(startBox.top) : (element.y || 0);
   const moveHandler = (moveEvent) => {
     const movePointer = getStagePointerPosition(moveEvent);
     let deltaX = movePointer.x - startPointer.x;
@@ -4876,10 +7864,11 @@ const startRotate = (element, event) => {
   if (!slideCanvas) return;
   const stageRect = slideCanvas.getBoundingClientRect();
   const scale = getStageScale();
-  const width = Number(element.width) || MIN_ELEMENT_SIZE;
-  const height = Number(element.height) || MIN_ELEMENT_SIZE;
-  const centerX = stageRect.left + ((element.x || 0) + width / 2) * scale;
-  const centerY = stageRect.top + ((element.y || 0) + height / 2) * scale;
+  const elementBox = getStageRelativeElementBox(element);
+  const width = Math.max(MIN_ELEMENT_SIZE, Number(elementBox.width) || Number(element.width) || MIN_ELEMENT_SIZE);
+  const height = Math.max(MIN_ELEMENT_SIZE, Number(elementBox.height) || Number(element.height) || MIN_ELEMENT_SIZE);
+  const centerX = stageRect.left + ((elementBox.left || 0) + width / 2) * scale;
+  const centerY = stageRect.top + ((elementBox.top || 0) + height / 2) * scale;
   const startAngle = Math.atan2(event.clientY - centerY, event.clientX - centerX);
   const baseRotation = Number(element.rotation) || 0;
   const moveHandler = (moveEvent) => {
@@ -4887,6 +7876,55 @@ const startRotate = (element, event) => {
     const delta = currentAngle - startAngle;
     const degrees = ((baseRotation + (delta * 180) / Math.PI) % 360 + 360) % 360;
     element.rotation = degrees;
+    updateElementInspector(element);
+    renderSlide();
+  };
+  const endHandler = () => {
+    document.removeEventListener('pointermove', moveHandler);
+    document.removeEventListener('pointerup', endHandler);
+    commitHistoryState();
+  };
+  document.addEventListener('pointermove', moveHandler);
+  document.addEventListener('pointerup', endHandler);
+};
+
+const startCaptionResize = (direction, element, event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  if (!slideCanvas || !element) {
+    return;
+  }
+  const startPointer = getStagePointerPosition(event);
+  const startBox = getStageRelativeCaptionBox(element);
+  if (!startBox) {
+    return;
+  }
+  const stage = getCaptionStageSize(slideCanvas);
+  const startStyle = normalizeCaptionStyle(element.captionStyle, element.type);
+  const startWidth = Math.max(40, Number(startStyle.width) || startBox.width || 40);
+  const startFontSize = Math.max(12, Number(startStyle.fontSize) || 12);
+  const startX = Number.isFinite(startStyle.stageX) ? startStyle.stageX : startBox.left;
+  const moveHandler = (moveEvent) => {
+    const movePointer = getStagePointerPosition(moveEvent);
+    const deltaX = movePointer.x - startPointer.x;
+    const widthDelta = direction.includes('w') ? -deltaX : deltaX;
+    const nextWidth = clamp(startWidth + widthDelta, 40, Math.max(40, stage.width));
+    const scaleRatio = nextWidth / Math.max(startWidth, 1);
+    const nextFontSize = clamp(Math.round(startFontSize * scaleRatio), 12, 96);
+    let nextStageX = startX;
+    if (startStyle.freePosition && direction.includes('w')) {
+      const rightEdge = startX + startWidth;
+      nextStageX = clamp(rightEdge - nextWidth, 0, Math.max(0, stage.width - nextWidth));
+    } else if (startStyle.freePosition) {
+      nextStageX = clamp(startX, 0, Math.max(0, stage.width - nextWidth));
+    }
+    element.captionStyle = normalizeCaptionStyle({
+      ...element.captionStyle,
+      width: nextWidth,
+      fontSize: nextFontSize,
+      stageX: startStyle.freePosition ? nextStageX : null,
+      stageY: startStyle.freePosition ? startStyle.stageY : null
+    }, element.type);
     updateElementInspector(element);
     renderSlide();
   };
@@ -4908,12 +7946,14 @@ const renderHandles = () => {
   if (!element) {
     return;
   }
-  const left = element.x || 0;
-  const top = element.y || 0;
-  const width = Number(element.width) || MIN_ELEMENT_SIZE;
-  const height = Number(element.height) || MIN_ELEMENT_SIZE;
+  const elementBox = getStageRelativeElementBox(element);
+  const left = elementBox.left || 0;
+  const top = elementBox.top || 0;
+  const width = Math.max(MIN_ELEMENT_SIZE, Number(elementBox.width) || MIN_ELEMENT_SIZE);
+  const height = Math.max(MIN_ELEMENT_SIZE, Number(elementBox.height) || MIN_ELEMENT_SIZE);
   handleLayer = document.createElement('div');
   handleLayer.className = 'element-handle-layer';
+  handleLayer.style.zIndex = '999999';
   const corners = ['nw', 'ne', 'sw', 'se'];
   corners.forEach((direction) => {
     const handle = document.createElement('div');
@@ -4932,6 +7972,30 @@ const renderHandles = () => {
   rotateHandle.style.top = `${top - 24}px`;
   rotateHandle.addEventListener('pointerdown', (event) => startRotate(element, event));
   handleLayer.appendChild(rotateHandle);
+  if (['audio', 'video'].includes(element.type) && element.captionsEnabled && (element.captions || []).length) {
+    const captionBox = getStageRelativeCaptionBox(element);
+    if (captionBox) {
+      const captionOutline = document.createElement('div');
+      captionOutline.className = 'caption-handle-outline';
+      captionOutline.style.left = `${captionBox.left}px`;
+      captionOutline.style.top = `${captionBox.top}px`;
+      captionOutline.style.width = `${captionBox.width}px`;
+      captionOutline.style.height = `${captionBox.height}px`;
+      handleLayer.appendChild(captionOutline);
+      const captionCorners = ['nw', 'ne', 'sw', 'se'];
+      captionCorners.forEach((direction) => {
+        const handle = document.createElement('div');
+        handle.className = 'resize-handle caption-resize-handle';
+        handle.dataset.direction = direction;
+        const offsetX = direction.includes('e') ? captionBox.width : 0;
+        const offsetY = direction.includes('s') ? captionBox.height : 0;
+        handle.style.left = `${captionBox.left + offsetX - 6}px`;
+        handle.style.top = `${captionBox.top + offsetY - 6}px`;
+        handle.addEventListener('pointerdown', (resizeEvent) => startCaptionResize(direction, element, resizeEvent));
+        handleLayer.appendChild(handle);
+      });
+    }
+  }
   slideCanvas.appendChild(handleLayer);
 };
 
@@ -5025,52 +8089,131 @@ const updateBackgroundMediaEditorVisibility = (forceOpen = false) => {
   updateStageEditorState();
 };
 
+const applyBackgroundConfigToSlide = (slide, mode, sourceValue = '') => {
+  if (!slide) return;
+  if (mode === 'color-solid') {
+    clearSlideBackgroundMedia(slide);
+    slide.backgroundFillType = 'solid';
+    slide.backgroundColor = backgroundSolidColorInput?.value || '#fdfbff';
+  } else if (mode === 'color-gradient') {
+    clearSlideBackgroundMedia(slide);
+    slide.backgroundFillType = 'gradient';
+    slide.backgroundGradientStart = backgroundGradientStartInput?.value || '#fdfbff';
+    slide.backgroundGradientEnd = backgroundGradientEndInput?.value || '#dfe7ff';
+    slide.backgroundColor = slide.backgroundGradientStart;
+  } else if (mode === 'image-url' || mode === 'image-local') {
+    clearSlideBackgroundMedia(slide);
+    slide.backgroundImage = String(sourceValue || '').trim();
+  } else if (mode === 'video-url' || mode === 'video-local') {
+    clearSlideBackgroundMedia(slide);
+    const normalizedSource = String(sourceValue || '').trim();
+    slide.backgroundVideo = normalizedSource;
+    slide.backgroundVideoEmbedSrc = getYouTubeEmbedUrl(normalizedSource);
+    slide.backgroundVideoProvider =
+      mode === 'video-local'
+        ? 'file'
+        : (slide.backgroundVideoEmbedSrc ? 'youtube' : 'file');
+  }
+  normalizeSlideBackgroundFill(slide);
+};
+
+const createBatchBackgroundSlides = (mode, sources = []) => {
+  const baseSlide = getActiveSlide();
+  if (!baseSlide || !sources.length) {
+    return [];
+  }
+  let anchorSlideId = baseSlide.id;
+  const createdSlides = sources.map((source, index) => {
+    const newSlide = {
+      id: createId('slide'),
+      title: `Slide ${builderState.slides.length + index + 1}`,
+      elements: []
+    };
+    applyBackgroundConfigToSlide(newSlide, mode, source);
+    insertSlideAfter(newSlide, anchorSlideId);
+    anchorSlideId = newSlide.id;
+    return newSlide;
+  });
+  return createdSlides;
+};
+
 const applyBackgroundMediaFromEditor = async (modeOverride = '') => {
   const slide = getActiveSlide();
   const mode = modeOverride || backgroundMediaTypeSelect?.value || 'image-url';
+  const isBatch = Boolean(backgroundBatchToggle?.checked);
   if (!slide) return;
   try {
-    if (mode === 'color-solid') {
-      clearSlideBackgroundMedia(slide);
-      slide.backgroundFillType = 'solid';
-      slide.backgroundColor = backgroundSolidColorInput?.value || '#fdfbff';
-    } else if (mode === 'color-gradient') {
-      clearSlideBackgroundMedia(slide);
-      slide.backgroundFillType = 'gradient';
-      slide.backgroundGradientStart = backgroundGradientStartInput?.value || '#fdfbff';
-      slide.backgroundGradientEnd = backgroundGradientEndInput?.value || '#dfe7ff';
-      slide.backgroundColor = slide.backgroundGradientStart;
-    } else if (mode === 'image-url') {
+    if (mode === 'image-url') {
       const src = backgroundMediaUrlInput?.value?.trim();
       if (!src) {
         alert('Informe a URL da imagem.');
         return;
       }
-      clearSlideBackgroundMedia(slide);
-      slide.backgroundImage = src;
+      const sources = isBatch ? parseBatchBackgroundUrls(src) : [src];
+      if (!sources.length) {
+        alert('Informe ao menos uma URL válida.');
+        return;
+      }
+      if (isBatch && sources.length > 1) {
+        const createdSlides = createBatchBackgroundSlides('image-url', sources);
+        if (!createdSlides.length) return;
+        setActiveSlide(createdSlides[createdSlides.length - 1].id);
+        updateBackgroundMediaEditorVisibility(true);
+        scheduleHistoryCommit();
+        return;
+      }
+      applyBackgroundConfigToSlide(slide, 'image-url', sources[0]);
     } else if (mode === 'video-url') {
       const src = backgroundMediaUrlInput?.value?.trim();
       if (!src) {
         alert('Informe a URL do vídeo.');
         return;
       }
-      clearSlideBackgroundMedia(slide);
-      slide.backgroundVideo = src;
-      slide.backgroundVideoEmbedSrc = getYouTubeEmbedUrl(src);
-      slide.backgroundVideoProvider = slide.backgroundVideoEmbedSrc ? 'youtube' : 'file';
+      const sources = isBatch ? parseBatchBackgroundUrls(src) : [src];
+      if (!sources.length) {
+        alert('Informe ao menos uma URL válida.');
+        return;
+      }
+      if (isBatch && sources.length > 1) {
+        const createdSlides = createBatchBackgroundSlides('video-url', sources);
+        if (!createdSlides.length) return;
+        setActiveSlide(createdSlides[createdSlides.length - 1].id);
+        updateBackgroundMediaEditorVisibility(true);
+        scheduleHistoryCommit();
+        return;
+      }
+      applyBackgroundConfigToSlide(slide, 'video-url', sources[0]);
     } else if (mode === 'image-local') {
-      const src = await readLocalFile(localImageInput, 'image');
-      if (!src) return;
-      clearSlideBackgroundMedia(slide);
-      slide.backgroundImage = src;
+      const sources = isBatch
+        ? await readLocalFiles(localImageInput, 'image')
+        : [await readLocalFile(localImageInput, 'image')].filter(Boolean);
+      if (!sources.length) return;
+      if (isBatch && sources.length > 1) {
+        const createdSlides = createBatchBackgroundSlides('image-local', sources);
+        if (!createdSlides.length) return;
+        setActiveSlide(createdSlides[createdSlides.length - 1].id);
+        updateBackgroundMediaEditorVisibility(true);
+        scheduleHistoryCommit();
+        return;
+      }
+      applyBackgroundConfigToSlide(slide, 'image-local', sources[0]);
     } else if (mode === 'video-local') {
-      const src = await readLocalFile(localVideoInput, 'video');
-      if (!src) return;
-      clearSlideBackgroundMedia(slide);
-      slide.backgroundVideo = src;
-      slide.backgroundVideoProvider = 'file';
+      const sources = isBatch
+        ? await readLocalFiles(localVideoInput, 'video')
+        : [await readLocalFile(localVideoInput, 'video')].filter(Boolean);
+      if (!sources.length) return;
+      if (isBatch && sources.length > 1) {
+        const createdSlides = createBatchBackgroundSlides('video-local', sources);
+        if (!createdSlides.length) return;
+        setActiveSlide(createdSlides[createdSlides.length - 1].id);
+        updateBackgroundMediaEditorVisibility(true);
+        scheduleHistoryCommit();
+        return;
+      }
+      applyBackgroundConfigToSlide(slide, 'video-local', sources[0]);
+    } else {
+      applyBackgroundConfigToSlide(slide, mode);
     }
-    normalizeSlideBackgroundFill(slide);
     renderSlide();
     syncBackgroundInputs(slide);
     updateBackgroundMediaEditorVisibility(true);
@@ -5101,9 +8244,11 @@ function updateModuleBehavior() {
   builderState.moduleSettings = {
     ...(builderState.moduleSettings || {}),
     lockNextModuleUntilCompleted: Boolean(moduleLockNextToggle?.checked),
-    isPublic: Boolean(modulePublicToggle?.checked)
+    isPublic: Boolean(modulePublicToggle?.checked),
+    coverImage: getModuleCoverValue()
   };
   syncPublicModuleLinkUi();
+  syncModuleCoverPreview();
   commitHistoryState();
 }
 
@@ -5112,8 +8257,12 @@ const resetBuilder = () => {
   builderState.activeSlideId = null;
   builderState.moduleSettings = {
     lockNextModuleUntilCompleted: false,
-    isPublic: false
+    isPublic: false,
+    coverImage: ''
   };
+  if (moduleCoverUrlInput) {
+    moduleCoverUrlInput.value = '';
+  }
   if (moduleLockNextToggle) {
     moduleLockNextToggle.checked = false;
   }
@@ -5121,6 +8270,7 @@ const resetBuilder = () => {
     modulePublicToggle.checked = false;
   }
   syncPublicModuleLinkUi();
+  syncModuleCoverPreview();
   addSlide('Slide 01');
   clearHandleLayer();
 };
@@ -5150,16 +8300,17 @@ const showCourseModules = (modules, courseId) => {
         const isPublicModule = Boolean(module.builder_data?.moduleSettings?.isPublic);
         return `
       <div class="module-list-item" data-course-id="${courseId}" data-module-id="${module.id}">
-        <h4>${module.title}</h4>
-        <p>${module.description || module.slug}</p>
-        ${isPublicModule ? '<small class="muted">Link público liberado para este módulo.</small>' : ''}
+        <div class="module-list-content">
+          <h4>${module.title}</h4>
+          <p>${module.description || module.slug}</p>
+          ${isPublicModule ? '<small class="muted module-list-status">Link público liberado para este módulo.</small>' : ''}
+        </div>
         <div class="actions">
-          ${
-            isPublicModule
-              ? `<button type="button" class="secondary-btn small module-public-btn" data-module-id="${module.id}">
+          ${isPublicModule
+            ? `<button type="button" class="secondary-btn small module-public-btn" data-module-id="${module.id}">
             Abrir público
           </button>`
-              : ''
+            : ''
           }
           <button type="button" class="secondary-btn small module-edit-btn" data-module-id="${module.id}" data-module-course="${courseId}">
             Editar
@@ -5189,6 +8340,9 @@ const resetEditingState = () => {
   if (moduleDescriptionInput) {
     moduleDescriptionInput.value = '';
   }
+  if (moduleCoverUrlInput) {
+    moduleCoverUrlInput.value = '';
+  }
   if (elementGradientToggle) {
     elementGradientToggle.checked = false;
     updateGradientFieldsVisibility();
@@ -5198,6 +8352,7 @@ const resetEditingState = () => {
     moduleCourseSelect.disabled = false;
   }
   syncPublicModuleLinkUi();
+  syncModuleCoverPreview();
 };
 
 const startEditingModule = (courseId, moduleId) => {
@@ -5217,20 +8372,26 @@ const startEditingModule = (courseId, moduleId) => {
   builderState.stageSize = module.builder_data?.stageSize || builderState.stageSize;
   builderState.moduleSettings = {
     lockNextModuleUntilCompleted: Boolean(module.builder_data?.moduleSettings?.lockNextModuleUntilCompleted),
-    isPublic: Boolean(module.builder_data?.moduleSettings?.isPublic)
+    isPublic: Boolean(module.builder_data?.moduleSettings?.isPublic),
+    coverImage: typeof module.builder_data?.moduleSettings?.coverImage === 'string' ? module.builder_data.moduleSettings.coverImage : ''
   };
+  if (moduleCoverUrlInput) {
+    moduleCoverUrlInput.value = builderState.moduleSettings.coverImage || '';
+  }
   if (moduleLockNextToggle) {
     moduleLockNextToggle.checked = Boolean(builderState.moduleSettings.lockNextModuleUntilCompleted);
   }
   if (modulePublicToggle) {
     modulePublicToggle.checked = Boolean(builderState.moduleSettings.isPublic);
   }
+  syncModuleCoverPreview();
   setPublicModuleLinkState(
     builderState.moduleSettings.isPublic
       ? { moduleId: module.id, title: module.title }
       : {}
   );
   syncPublicModuleLinkUi();
+  syncModuleCoverPreview();
   builderState.activeSlideId = null;
   if (builderState.slides.length) {
     setActiveSlide(builderState.slides[0].id);
@@ -5358,6 +8519,12 @@ function updateElementInspector(element) {
     elementHeightInput.value = '';
     elementRotationInput.value = '0';
     elementLayerInput.value = '0';
+    if (elementOpacityInput) {
+      elementOpacityInput.value = '100';
+    }
+    if (elementOpacityValue) {
+      elementOpacityValue.textContent = '100%';
+    }
     if (elementShapeSelect) {
       elementShapeSelect.value = 'rectangle';
     }
@@ -5400,6 +8567,9 @@ function updateElementInspector(element) {
     if (elementStudentDragToggle) {
       elementStudentDragToggle.checked = false;
     }
+    if (elementInitiallyHiddenToggle) {
+      elementInitiallyHiddenToggle.checked = false;
+    }
     updateTextEditorVisibility(null);
     updateBlockEditorVisibility(null);
     updateImageEditorVisibility(null);
@@ -5418,10 +8588,19 @@ function updateElementInspector(element) {
     return;
   }
   selectedElementTypeLabel.textContent = element.type;
+  if (element.type === 'input') {
+    normalizeInputElement(element);
+  }
   elementWidthInput.value = element.width || '';
   elementHeightInput.value = element.height || '';
   elementRotationInput.value = element.rotation != null ? element.rotation : '';
   elementLayerInput.value = element.zIndex != null ? element.zIndex : 0;
+  if (elementOpacityInput) {
+    elementOpacityInput.value = String(Math.round(getElementBaseOpacity(element) * 100));
+  }
+  if (elementOpacityValue) {
+    elementOpacityValue.textContent = `${Math.round(getElementBaseOpacity(element) * 100)}%`;
+  }
   if (elementShapeSelect) {
     elementShapeSelect.value = element.shape || 'rectangle';
   }
@@ -5467,6 +8646,9 @@ function updateElementInspector(element) {
   if (elementStudentDragToggle) {
     elementStudentDragToggle.checked = Boolean(element.studentCanDrag);
   }
+  if (elementInitiallyHiddenToggle) {
+    elementInitiallyHiddenToggle.checked = Boolean(element.initiallyHidden);
+  }
   updateTextEditorVisibility(element);
   updateBlockEditorVisibility(element);
   updateImageEditorVisibility(element);
@@ -5475,6 +8657,7 @@ function updateElementInspector(element) {
   updateFloatingButtonEditorVisibility(element);
   updateVideoEditorVisibility(element);
   updateEraserEditorVisibility(element);
+  updatePenEditorVisibility(element);
   updateAnimationEditorVisibility(element);
   updateSmartSidebarVisibility(element);
   if (removeSelectedElementBtn) {
@@ -5484,32 +8667,45 @@ function updateElementInspector(element) {
   updateHistoryButtons();
 }
 
-function selectElement(elementId) {
-  selectedElementId = elementId;
-  const element = getActiveSlide()?.elements.find((child) => child.id === elementId);
-  if (element?.type === 'text') {
-    currentStageEditor = 'text';
-  } else if (element?.type === 'block') {
-    currentStageEditor = 'block';
-  } else if (element?.type === 'image') {
-    currentStageEditor = 'image';
-  } else if (element?.type === 'audio') {
-    currentStageEditor = 'audio';
-  } else if (element?.type === 'video') {
-    currentStageEditor = 'video';
-  } else if (currentStageEditor === 'text') {
-    currentStageEditor = 'none';
-  } else if (currentStageEditor === 'block') {
-    currentStageEditor = 'none';
-  } else if (currentStageEditor === 'image') {
-    currentStageEditor = 'none';
-  } else if (currentStageEditor === 'audio') {
-    currentStageEditor = 'none';
-  } else if (currentStageEditor === 'video') {
-    currentStageEditor = 'none';
+const getPrimaryEditorForElement = (element) => {
+  switch (element?.type) {
+    case 'text':
+      return 'text';
+    case 'block':
+      return 'block';
+    case 'image':
+      return 'image';
+    case 'pen':
+      return 'pen';
+    case 'audio':
+      return 'audio';
+    case 'video':
+      return 'video';
+    case 'quiz':
+      return 'quiz';
+    case 'floatingButton':
+    case 'detector':
+    case 'timedTrigger':
+    case 'input':
+      return 'floating';
+    default:
+      return 'none';
   }
+};
+
+function selectElement(elementId, options = {}) {
+  const { openEditor = false } = options;
+  const previousScrollX = window.scrollX;
+  const previousScrollY = window.scrollY;
+  selectedElementId = elementId;
+  showElementMenuTrigger(openEditor ? elementId : null);
+  const element = getActiveSlide()?.elements.find((child) => child.id === elementId);
+  currentStageEditor = openEditor ? getPrimaryEditorForElement(element) : 'none';
   updateElementInspector(element || null);
   renderSlide();
+  requestAnimationFrame(() => {
+    window.scrollTo(previousScrollX, previousScrollY);
+  });
 }
 
 const removeSelectedElement = () => {
@@ -5591,13 +8787,18 @@ const replaceSelectedImageSource = async () => {
   if (!element || element.type !== 'image') {
     return;
   }
-  const nextConfig = await chooseMediaConfig('image');
-  if (!nextConfig) {
-    return;
+  try {
+    const src = await readLocalFile(localImageInput, 'image');
+    if (!src) {
+      return;
+    }
+    element.src = src;
+    updateImageEditorVisibility(element, { forceOpen: true });
+    renderSlide();
+    commitHistoryState();
+  } catch (error) {
+    alert(error.message || 'Não foi possível carregar a imagem escolhida.');
   }
-  element.src = nextConfig.src;
-  renderSlide();
-  commitHistoryState();
 };
 
 const replaceSelectedBlockTexture = async () => {
@@ -5605,15 +8806,19 @@ const replaceSelectedBlockTexture = async () => {
   if (!element || element.type !== 'block') {
     return;
   }
-  const nextConfig = await chooseMediaConfig('image');
-  if (!nextConfig) {
-    return;
+  try {
+    const src = await readLocalFile(localImageInput, 'image');
+    if (!src) {
+      return;
+    }
+    element.textureImage = src;
+    normalizeBlockTexture(element);
+    syncBlockEditorControls(element);
+    renderSlide();
+    commitHistoryState();
+  } catch (error) {
+    alert(error.message || 'Não foi possível carregar a textura escolhida.');
   }
-  element.textureImage = nextConfig.src || '';
-  normalizeBlockTexture(element);
-  syncBlockEditorControls(element);
-  renderSlide();
-  commitHistoryState();
 };
 
 const clearSelectedBlockTexture = () => {
@@ -5652,6 +8857,20 @@ const syncAudioEditor = () => {
   }
   element.audioVisible = Boolean(audioElementVisibleToggle?.checked);
   element.audioLoop = Boolean(audioElementLoopToggle?.checked);
+  element.captionsEnabled = Boolean(audioCaptionEnabledToggle?.checked);
+  const nextPosition = audioCaptionPositionSelect?.value || 'bottom';
+  element.captionStyle = normalizeCaptionStyle({
+    width: audioCaptionWidthInput?.value || '',
+    position: nextPosition,
+    fontSize: Number(audioCaptionFontSizeInput?.value) || 20,
+    textColor: audioCaptionTextColorInput?.value || '#ffffff',
+    backgroundColor: audioCaptionBackgroundColorInput?.value || '#0f172a',
+    accentColor: audioCaptionAccentColorInput?.value || '#38bdf8',
+    uppercase: Boolean(audioCaptionUppercaseToggle?.checked),
+    freePosition: false,
+    stageX: null,
+    stageY: null
+  }, 'audio');
   applyStageConstraints(element);
   updateAudioEditorVisibility(element, { forceOpen: true });
   renderSlide();
@@ -5663,14 +8882,19 @@ const replaceSelectedAudioSource = async () => {
   if (!element || element.type !== 'audio') {
     return;
   }
-  const nextConfig = await chooseMediaConfig('audio');
-  if (!nextConfig) {
-    return;
+  try {
+    const src = await readLocalFile(localAudioInput, 'audio');
+    if (!src) {
+      return;
+    }
+    element.src = src;
+    normalizeAudioElement(element);
+    updateAudioEditorVisibility(element, { forceOpen: true });
+    renderSlide();
+    commitHistoryState();
+  } catch (error) {
+    alert(error.message || 'Não foi possível carregar o áudio escolhido.');
   }
-  element.src = nextConfig.src;
-  normalizeAudioElement(element);
-  renderSlide();
-  commitHistoryState();
 };
 
 function applyElementStyles() {
@@ -5685,6 +8909,7 @@ function applyElementStyles() {
   const heightSource = isBlockEditor ? blockElementHeightInput : elementHeightInput;
   const rotationSource = isBlockEditor ? blockElementRotationInput : elementRotationInput;
   const layerSource = isBlockEditor ? blockElementLayerInput : elementLayerInput;
+  const opacitySource = elementOpacityInput;
   const shapeSource = isBlockEditor ? blockElementShapeSelect : elementShapeSelect;
   const gradientToggleSource = isBlockEditor ? blockElementGradientToggle : elementGradientToggle;
   const gradientStartSource = isBlockEditor ? blockElementGradientStartInput : elementGradientStartInput;
@@ -5713,6 +8938,15 @@ function applyElementStyles() {
     const layerValue = Number(layerSource.value);
     if (!Number.isNaN(layerValue)) {
       element.zIndex = Math.max(0, Math.round(layerValue));
+    }
+  }
+  if (opacitySource) {
+    const opacityValue = Number(opacitySource.value);
+    if (!Number.isNaN(opacityValue)) {
+      element.opacity = clamp(opacityValue / 100, 0, 1);
+      if (elementOpacityValue) {
+        elementOpacityValue.textContent = `${Math.round(element.opacity * 100)}%`;
+      }
     }
   }
   if (shapeSource && ['block', 'floatingButton'].includes(element.type) && String(shapeSource.value || '').trim()) {
@@ -5760,6 +8994,9 @@ function applyElementStyles() {
   }
   if (elementStudentDragToggle && STUDENT_DRAGGABLE_TYPES.has(element.type)) {
     element.studentCanDrag = Boolean(elementStudentDragToggle.checked);
+  }
+  if (elementInitiallyHiddenToggle) {
+    element.initiallyHidden = Boolean(elementInitiallyHiddenToggle.checked);
   }
   syncElementBackgroundState(element);
   if (element.type === 'quiz') {
@@ -5818,7 +9055,8 @@ const saveModule = async () => {
           stageSize: currentStageSize,
           moduleSettings: {
             lockNextModuleUntilCompleted: Boolean(builderState.moduleSettings?.lockNextModuleUntilCompleted),
-            isPublic: Boolean(builderState.moduleSettings?.isPublic)
+            isPublic: Boolean(builderState.moduleSettings?.isPublic),
+            coverImage: getModuleCoverValue()
           }
         }
       })
@@ -5871,6 +9109,14 @@ const addElementToSlide = (config) => {
     element.backgroundColor = '#f4f6ff';
     element.solidColor = '#f4f6ff';
   }
+  if (element.type === 'pen') {
+    element.strokeColor = element.strokeColor || '#111827';
+    element.strokeWidth = Math.max(PEN_MIN_BRUSH_SIZE, Number(element.strokeWidth) || 8);
+    element.backgroundColor = 'transparent';
+  }
+  if (!Number.isFinite(Number(element.opacity))) {
+    element.opacity = 1;
+  }
   if (element.type === 'floatingButton' && !element.backgroundColor) {
     element.backgroundColor = '#6d63ff';
     element.solidColor = '#6d63ff';
@@ -5879,14 +9125,29 @@ const addElementToSlide = (config) => {
     normalizeFloatingActionConfig(element);
     element.backgroundColor = 'transparent';
   }
+  if (element.type === 'timedTrigger') {
+    normalizeFloatingActionConfig(element);
+    delete element.backgroundColor;
+    delete element.solidColor;
+  }
   if (['block', 'floatingButton'].includes(element.type) && !element.shape) {
     element.shape = 'rectangle';
   }
   if (element.type === 'quiz') {
     normalizeQuizElement(element);
   }
+  if (element.type === 'input') {
+    normalizeInputElement(element);
+    normalizeFloatingActionConfig(element);
+  }
   if (element.type === 'floatingButton') {
     normalizeFloatingActionConfig(element);
+  }
+  if (element.type === 'timedTrigger') {
+    normalizeFloatingActionConfig(element);
+  }
+  if (element.type === 'video') {
+    normalizeVideoTriggerConfig(element);
   }
   if (ANIMATABLE_ELEMENT_TYPES.has(element.type)) {
     normalizeElementAnimation(element);
@@ -5894,11 +9155,12 @@ const addElementToSlide = (config) => {
   if (element.type === 'block') {
     normalizeBlockTexture(element);
   }
+  element.opacity = getElementBaseOpacity(element);
   syncElementBackgroundState(element);
   ensureElementHasUsableSize(element);
   slide.elements.push(element);
   applyStageConstraints(element);
-  selectElement(element.id);
+  selectElement(element.id, { openEditor: true });
   renderSlide();
   commitHistoryState();
 };
@@ -5919,12 +9181,18 @@ const addElementToSpecificSlide = (slideId, config) => {
     zIndex: config.zIndex ?? getNextLayerIndex(slide),
     ...config
   };
+  element.opacity = getElementBaseOpacity(element);
   if (!element.textColor) {
     element.textColor = element.type === 'floatingButton' ? '#ffffff' : '#0f142c';
   }
   if (element.type === 'block' && !element.backgroundColor) {
     element.backgroundColor = '#f4f6ff';
     element.solidColor = '#f4f6ff';
+  }
+  if (element.type === 'pen') {
+    element.strokeColor = element.strokeColor || '#111827';
+    element.strokeWidth = Math.max(PEN_MIN_BRUSH_SIZE, Number(element.strokeWidth) || 8);
+    element.backgroundColor = 'transparent';
   }
   if (element.type === 'floatingButton' && !element.backgroundColor) {
     element.backgroundColor = '#6d63ff';
@@ -5934,14 +9202,35 @@ const addElementToSpecificSlide = (slideId, config) => {
     normalizeFloatingActionConfig(element);
     element.backgroundColor = 'transparent';
   }
+  if (element.type === 'timedTrigger') {
+    normalizeFloatingActionConfig(element);
+    delete element.backgroundColor;
+    delete element.solidColor;
+  }
   if (element.type === 'quiz') {
     normalizeQuizElement(element);
+  }
+  if (element.type === 'input') {
+    normalizeInputElement(element);
+    normalizeFloatingActionConfig(element);
   }
   if (element.type === 'floatingButton') {
     normalizeFloatingActionConfig(element);
   }
+  if (element.type === 'timedTrigger') {
+    normalizeFloatingActionConfig(element);
+  }
+  if (element.type === 'video') {
+    normalizeVideoTriggerConfig(element);
+  }
   if (ANIMATABLE_ELEMENT_TYPES.has(element.type)) {
     normalizeElementAnimation(element);
+  }
+  if (['block', 'floatingButton'].includes(element.type) && !element.shape) {
+    element.shape = 'rectangle';
+  }
+  if (element.type === 'block') {
+    normalizeBlockTexture(element);
   }
   syncElementBackgroundState(element);
   ensureElementHasUsableSize(element);
@@ -5976,7 +9265,7 @@ const pasteClipboardElement = () => {
     y: (Number(source.y) || 0) + 24,
     zIndex: getNextLayerIndex(slide)
   });
-  selectElement(pastedElement.id);
+  selectElement(pastedElement.id, { openEditor: true });
   renderSlide();
   commitHistoryState();
   updateHistoryButtons();
@@ -6029,6 +9318,9 @@ const updateElementFromPatch = (element, patch) => {
   if (element.type === 'floatingButton') {
     normalizeFloatingActionConfig(element);
   }
+  if (element.type === 'video') {
+    normalizeVideoTriggerConfig(element);
+  }
   if (ANIMATABLE_ELEMENT_TYPES.has(element.type)) {
     normalizeElementAnimation(element);
   }
@@ -6043,8 +9335,8 @@ const updateElementFromPatch = (element, patch) => {
   applyStageConstraints(element);
 };
 
-const getFallbackAiSlideTarget = (requestedSlideId) => {
-  const existingSlides = builderState.slides || [];
+const getFallbackAiSlideTargetFromState = (targetState, requestedSlideId) => {
+  const existingSlides = targetState?.slides || [];
   if (!existingSlides.length) {
     return null;
   }
@@ -6055,9 +9347,11 @@ const getFallbackAiSlideTarget = (requestedSlideId) => {
   if (existingSlides.length === 1) {
     return existingSlides[0];
   }
-  const activeSlide = existingSlides.find((entry) => entry.id === builderState.activeSlideId);
+  const activeSlide = existingSlides.find((entry) => entry.id === targetState?.activeSlideId);
   return activeSlide || existingSlides[0];
 };
+
+const getFallbackAiSlideTarget = (requestedSlideId) => getFallbackAiSlideTargetFromState(builderState, requestedSlideId);
 
 const inferElementTypeFromAiId = (elementId = '') => {
   const value = String(elementId || '').toLowerCase();
@@ -6117,6 +9411,98 @@ const getFallbackAiElementTarget = (slide, action) => {
   return null;
 };
 
+const insertSlideAfterInState = (targetState, slide, afterSlideId) => {
+  const targetSlides = Array.isArray(targetState?.slides) ? targetState.slides : [];
+  if (!afterSlideId) {
+    targetSlides.push(slide);
+    return;
+  }
+  const targetIndex = targetSlides.findIndex((entry) => entry.id === afterSlideId);
+  if (targetIndex === -1) {
+    targetSlides.push(slide);
+    return;
+  }
+  targetSlides.splice(targetIndex + 1, 0, slide);
+};
+
+const createFallbackSlideFromAiUpdate = (targetState, action = {}) => {
+  if (!targetState || !action.slide || typeof action.slide !== 'object') {
+    return null;
+  }
+  const existingSlides = Array.isArray(targetState.slides) ? targetState.slides : [];
+  const slide = {
+    id: action.slideId || action.slide.id || createId('slide'),
+    title: action.slide.title || `Slide ${existingSlides.length + 1}`,
+    elements: [],
+    backgroundImage: action.slide.backgroundImage || null,
+    backgroundColor: action.slide.backgroundColor || '#fdfbff'
+  };
+  insertSlideAfterInState(targetState, slide, action.afterSlideId);
+  return slide;
+};
+
+const addElementToSpecificSlideState = (targetState, slideId, config) => {
+  const slide = targetState?.slides?.find((entry) => entry.id === slideId);
+  if (!slide) {
+    throw new Error(`Slide alvo nÃ£o encontrado: ${slideId}`);
+  }
+  const element = {
+    id: config.id || createId('element'),
+    type: config.type,
+    x: config.x || 50,
+    y: config.y || 60,
+    width: config.width,
+    height: config.height,
+    rotation: Number.isFinite(Number(config.rotation)) ? Number(config.rotation) : 0,
+    zIndex: config.zIndex ?? getNextLayerIndex(slide),
+    ...config
+  };
+  element.opacity = getElementBaseOpacity(element);
+  if (!element.textColor) {
+    element.textColor = element.type === 'floatingButton' ? '#ffffff' : '#0f142c';
+  }
+  if (element.type === 'block' && !element.backgroundColor) {
+    element.backgroundColor = '#f4f6ff';
+    element.solidColor = '#f4f6ff';
+  }
+  if (element.type === 'pen') {
+    element.strokeColor = element.strokeColor || '#111827';
+    element.strokeWidth = Math.max(PEN_MIN_BRUSH_SIZE, Number(element.strokeWidth) || 8);
+    element.backgroundColor = 'transparent';
+  }
+  if (element.type === 'floatingButton' && !element.backgroundColor) {
+    element.backgroundColor = '#6d63ff';
+    element.solidColor = '#6d63ff';
+  }
+  if (element.type === 'detector') {
+    normalizeFloatingActionConfig(element);
+    element.backgroundColor = 'transparent';
+  }
+  if (element.type === 'quiz') {
+    normalizeQuizElement(element);
+  }
+  if (element.type === 'floatingButton') {
+    normalizeFloatingActionConfig(element);
+  }
+  if (element.type === 'video') {
+    normalizeVideoTriggerConfig(element);
+  }
+  if (ANIMATABLE_ELEMENT_TYPES.has(element.type)) {
+    normalizeElementAnimation(element);
+  }
+  if (['block', 'floatingButton'].includes(element.type) && !element.shape) {
+    element.shape = 'rectangle';
+  }
+  if (element.type === 'block') {
+    normalizeBlockTexture(element);
+  }
+  syncElementBackgroundState(element);
+  ensureElementHasUsableSize(element);
+  applyStageConstraints(element);
+  slide.elements.push(element);
+  return element;
+};
+
 const applyAiActions = (actions) => {
   if (!Array.isArray(actions) || !actions.length) {
     return { appliedCount: 0, warnings: [] };
@@ -6146,6 +9532,16 @@ const applyAiActions = (actions) => {
     if (action.element?.actionConfig?.targetElementId) {
       action.element.actionConfig.targetElementId = resolveElementAlias(action.element.actionConfig.targetElementId);
     }
+    if (Array.isArray(action.element?.interactionTriggers)) {
+      action.element.interactionTriggers.forEach((trigger) => {
+        if (trigger?.actionConfig?.targetSlideId) {
+          trigger.actionConfig.targetSlideId = resolveSlideAlias(trigger.actionConfig.targetSlideId);
+        }
+        if (trigger?.actionConfig?.targetElementId) {
+          trigger.actionConfig.targetElementId = resolveElementAlias(trigger.actionConfig.targetElementId);
+        }
+      });
+    }
     switch (action.type) {
       case 'add_slide': {
         const originalSlideId = action.slide?.id || '';
@@ -6167,11 +9563,18 @@ const applyAiActions = (actions) => {
         break;
       }
       case 'update_slide': {
-        const slide = getFallbackAiSlideTarget(action.slideId);
+        let slide = getFallbackAiSlideTarget(action.slideId);
+        if (!slide && action.slide) {
+          slide = createFallbackSlideFromAiUpdate(builderState, action);
+          if (slide && action.slideId) {
+            slideAliasMap.set(action.slideId, slide.id);
+          }
+        }
         if (!slide || !action.slide) {
           applyWarnings.push(`Ação ${index + 1}: não encontrei o slide para update_slide (${action.slideId || 'sem slideId'}).`);
           break;
         }
+        action.slideId = slide.id;
         const slidePatch = { ...action.slide };
         delete slidePatch.id;
         Object.assign(slide, slidePatch);
@@ -6296,6 +9699,181 @@ const applyAiActions = (actions) => {
   return { appliedCount, warnings: applyWarnings };
 };
 
+const applyAiActionsToState = (targetState, actions, options = {}) => {
+  if (!Array.isArray(actions) || !actions.length) {
+    return { appliedCount: 0, warnings: [], selectedElementId: options.selectedElementId || null };
+  }
+  let nextSelectedElementId = options.selectedElementId || null;
+  let nextActiveSlideId = targetState?.activeSlideId || null;
+  const applyWarnings = [];
+  let appliedCount = 0;
+  const slideAliasMap = new Map();
+  const elementAliasMap = new Map();
+  const resolveSlideAlias = (slideId = '') => slideAliasMap.get(slideId) || slideId;
+  const resolveElementAlias = (elementId = '') => elementAliasMap.get(elementId) || elementId;
+
+  actions.forEach((rawAction, index) => {
+    const action = deepClone(rawAction);
+    if (action.slideId) {
+      action.slideId = resolveSlideAlias(action.slideId);
+    }
+    if (action.afterSlideId) {
+      action.afterSlideId = resolveSlideAlias(action.afterSlideId);
+    }
+    if (action.elementId) {
+      action.elementId = resolveElementAlias(action.elementId);
+    }
+    if (action.element?.actionConfig?.targetSlideId) {
+      action.element.actionConfig.targetSlideId = resolveSlideAlias(action.element.actionConfig.targetSlideId);
+    }
+    if (action.element?.actionConfig?.targetElementId) {
+      action.element.actionConfig.targetElementId = resolveElementAlias(action.element.actionConfig.targetElementId);
+    }
+    if (Array.isArray(action.element?.interactionTriggers)) {
+      action.element.interactionTriggers.forEach((trigger) => {
+        if (trigger?.actionConfig?.targetSlideId) {
+          trigger.actionConfig.targetSlideId = resolveSlideAlias(trigger.actionConfig.targetSlideId);
+        }
+        if (trigger?.actionConfig?.targetElementId) {
+          trigger.actionConfig.targetElementId = resolveElementAlias(trigger.actionConfig.targetElementId);
+        }
+      });
+    }
+
+    switch (action.type) {
+      case 'add_slide': {
+        const originalSlideId = action.slide?.id || '';
+        const slide = {
+          id: originalSlideId || createId('slide'),
+          title: action.slide?.title || `Slide ${(targetState?.slides?.length || 0) + 1}`,
+          elements: [],
+          backgroundImage: action.slide?.backgroundImage || null,
+          backgroundColor: action.slide?.backgroundColor || '#fdfbff'
+        };
+        insertSlideAfterInState(targetState, slide, action.afterSlideId);
+        if (originalSlideId) {
+          slideAliasMap.set(originalSlideId, slide.id);
+        }
+        if (action.setActive !== false) {
+          nextActiveSlideId = slide.id;
+        }
+        appliedCount += 1;
+        break;
+      }
+      case 'update_slide': {
+        let slide = getFallbackAiSlideTargetFromState(targetState, action.slideId);
+        if (!slide && action.slide) {
+          slide = createFallbackSlideFromAiUpdate(targetState, action);
+          if (slide && action.slideId) {
+            slideAliasMap.set(action.slideId, slide.id);
+          }
+        }
+        if (!slide || !action.slide) {
+          applyWarnings.push(`Ação ${index + 1}: slide não encontrado para update_slide.`);
+          break;
+        }
+        action.slideId = slide.id;
+        const slidePatch = { ...action.slide };
+        delete slidePatch.id;
+        Object.assign(slide, slidePatch);
+        if (action.setActive !== false) {
+          nextActiveSlideId = slide.id;
+        }
+        appliedCount += 1;
+        break;
+      }
+      case 'delete_slide': {
+        if ((targetState?.slides?.length || 0) <= 1) {
+          break;
+        }
+        const targetIndex = targetState.slides.findIndex((entry) => entry.id === action.slideId);
+        if (targetIndex === -1) {
+          break;
+        }
+        targetState.slides.splice(targetIndex, 1);
+        if (nextActiveSlideId === action.slideId) {
+          nextActiveSlideId =
+            targetState.slides[targetIndex]?.id ||
+            targetState.slides[targetIndex - 1]?.id ||
+            targetState.slides[0]?.id ||
+            null;
+        }
+        break;
+      }
+      case 'add_element': {
+        const originalElementId = action.element?.id || action.elementId || '';
+        const inferredType = inferElementTypeFromAiPatch(action.element, originalElementId);
+        if (action.element && !action.element.type && inferredType) {
+          action.element.type = inferredType;
+        }
+        if (!action.element?.type) {
+          applyWarnings.push(`Ação ${index + 1}: add_element sem tipo.`);
+          break;
+        }
+        const targetSlide = getFallbackAiSlideTargetFromState(targetState, action.slideId);
+        if (!targetSlide) {
+          applyWarnings.push(`Ação ${index + 1}: slide não encontrado para add_element.`);
+          break;
+        }
+        const created = addElementToSpecificSlideState(targetState, targetSlide.id, action.element);
+        if (originalElementId) {
+          elementAliasMap.set(originalElementId, created.id);
+        }
+        if (action.setActive !== false) {
+          nextActiveSlideId = targetSlide.id;
+          nextSelectedElementId = created.id;
+        }
+        appliedCount += 1;
+        break;
+      }
+      case 'update_element': {
+        const slide = getFallbackAiSlideTargetFromState(targetState, action.slideId);
+        const element = getFallbackAiElementTarget(slide, action);
+        if (!element || !action.element) {
+          applyWarnings.push(`Ação ${index + 1}: elemento não encontrado para update_element.`);
+          break;
+        }
+        updateElementFromPatch(element, action.element);
+        if (action.setActive !== false) {
+          nextActiveSlideId = slide.id;
+          nextSelectedElementId = element.id;
+        }
+        appliedCount += 1;
+        break;
+      }
+      case 'delete_element': {
+        const slide = getFallbackAiSlideTargetFromState(targetState, action.slideId);
+        if (!slide?.elements?.length) {
+          applyWarnings.push(`Ação ${index + 1}: slide/elemento não encontrado para delete_element.`);
+          break;
+        }
+        const targetElement = getFallbackAiElementTarget(slide, action);
+        if (!targetElement) {
+          applyWarnings.push(`Ação ${index + 1}: elemento não encontrado para delete_element.`);
+          break;
+        }
+        slide.elements = slide.elements.filter((entry) => entry.id !== targetElement.id);
+        if (nextSelectedElementId === targetElement.id) {
+          nextSelectedElementId = null;
+        }
+        appliedCount += 1;
+        break;
+      }
+      case 'select_element': {
+        nextActiveSlideId = action.slideId || nextActiveSlideId;
+        nextSelectedElementId = action.elementId || null;
+        appliedCount += 1;
+        break;
+      }
+      default:
+        break;
+    }
+  });
+
+  targetState.activeSlideId = nextActiveSlideId || targetState?.slides?.[0]?.id || null;
+  return { appliedCount, warnings: applyWarnings, selectedElementId: nextSelectedElementId };
+};
+
 const requestAiSlideActions = async () => {
   const request = aiAssistantPromptInput?.value?.trim();
   if (!request) {
@@ -6313,9 +9891,9 @@ const requestAiSlideActions = async () => {
       return;
     }
   }
-  startAiAssistantLoading('Gerando proposta completa');
+  startAiAssistantLoading('Planejando e executando com a IA');
   try {
-    await requestAiBulkProposal(request);
+    await requestAiPlannedProposal(request);
   } catch (error) {
     pushAiAssistantFeedback('Erro da IA', error.message || 'Falha ao gerar a proposta.', 'error');
     updateAiAssistantStatus(error.message || 'Não foi possível gerar a proposta.', 'error');
@@ -6332,7 +9910,6 @@ const applyPendingAiActions = () => {
   const actionsToApply = aiAssistantState.pendingActions.map((action) => JSON.parse(JSON.stringify(action)));
   try {
     const applyResult = applyAiActions(actionsToApply);
-    actionsToApply.forEach((action) => rememberAiAction(action));
     if (applyResult.warnings.length) {
       pushAiAssistantFeedback(
         'Proposta aplicada com alertas',
@@ -6373,6 +9950,223 @@ const buildVideoElementConfig = (src, width = 320, height = 190) => {
     height,
     ...(embedSrc ? { provider: 'youtube', embedSrc } : {})
   };
+};
+
+const setActionButtonBusy = (button, busy, idleLabel, busyLabel) => {
+  if (!button) return;
+  button.disabled = Boolean(busy);
+  button.textContent = busy ? busyLabel : idleLabel;
+};
+
+const requestMediaTranscription = async (src, sourceType) => {
+  const response = await authorizedFetch('/api/admin/media/transcribe', {
+    method: 'POST',
+    body: JSON.stringify({ src, sourceType })
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(payload?.message || 'Nao foi possivel transcrever a midia.');
+  }
+  syncProfessorCreditsFromPayload(payload);
+  return payload;
+};
+
+const applyGeneratedCaptionsToElement = (element, payload, type) => {
+  normalizeMediaCaptionConfig(element, type);
+  element.transcriptText = payload?.transcript || '';
+  element.captions = sortCaptionEntries(payload?.captions || []);
+  element.captionsEnabled = Boolean(element.captions.length);
+  element.captionsGeneratedAt = new Date().toISOString();
+  if (type === 'video') {
+    selectedVideoCaptionSegmentIndex = 0;
+  } else if (type === 'audio') {
+    selectedAudioCaptionSegmentIndex = 0;
+  }
+};
+
+const generateCaptionsForSelectedAudio = async () => {
+  const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId);
+  if (!element || element.type !== 'audio' || !element.src) {
+    alert('Selecione um elemento de audio com fonte configurada.');
+    return;
+  }
+  try {
+    setActionButtonBusy(audioGenerateCaptionsBtn, true, 'Transcrever e gerar legenda', 'Transcrevendo...');
+    const payload = await requestMediaTranscription(element.src, 'audio');
+    applyGeneratedCaptionsToElement(element, payload, 'audio');
+    updateAudioEditorVisibility(element, { forceOpen: true });
+    renderSlide();
+    commitHistoryState();
+    alert('Legenda automatica gerada para o audio.');
+  } catch (error) {
+    alert(error.message || 'Nao foi possivel transcrever o audio.');
+  } finally {
+    setActionButtonBusy(audioGenerateCaptionsBtn, false, 'Transcrever e gerar legenda', 'Transcrevendo...');
+  }
+};
+
+const generateCaptionsForSelectedVideo = async () => {
+  const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId);
+  if (!element || element.type !== 'video' || !element.src) {
+    alert('Selecione um elemento de video com fonte configurada.');
+    return;
+  }
+  if (element.provider === 'youtube') {
+    alert('A geracao de legenda automatica nao esta disponivel para links do YouTube neste fluxo.');
+    return;
+  }
+  try {
+    setActionButtonBusy(videoGenerateCaptionsBtn, true, 'Gerar legenda automática', 'Gerando legenda...');
+    const payload = await requestMediaTranscription(element.src, 'video');
+    applyGeneratedCaptionsToElement(element, payload, 'video');
+    updateVideoEditorVisibility(element, { forceOpen: true });
+    renderSlide();
+    commitHistoryState();
+    alert('Legenda automatica gerada para o video.');
+  } catch (error) {
+    alert(error.message || 'Nao foi possivel transcrever o video.');
+  } finally {
+    setActionButtonBusy(videoGenerateCaptionsBtn, false, 'Gerar legenda automática', 'Gerando legenda...');
+  }
+};
+
+const extractAudioFromSelectedVideo = async () => {
+  const slide = getActiveSlide();
+  const element = slide?.elements.find((child) => child.id === selectedElementId);
+  if (!slide || !element || element.type !== 'video' || !element.src) {
+    alert('Selecione um elemento de video com fonte configurada.');
+    return;
+  }
+  if (element.provider === 'youtube') {
+    alert('A extracao de audio nao esta disponivel para links do YouTube neste fluxo.');
+    return;
+  }
+  try {
+    setActionButtonBusy(videoExtractAudioBtn, true, 'Extrair áudio do vídeo', 'Extraindo áudio...');
+    const response = await authorizedFetch('/api/admin/media/extract-audio', {
+      method: 'POST',
+      body: JSON.stringify({ src: element.src })
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(payload?.message || 'Nao foi possivel extrair o audio.');
+    }
+    const stage = getStageDimensions();
+    slide.elements.push({
+      id: createId('element'),
+      type: 'audio',
+      src: payload?.audioDataUrl || '',
+      width: Math.min(Math.max(260, Number(element.width) || 320), Math.max(260, stage.width - 24)),
+      height: 80,
+      x: Math.max(0, Number(element.x) || 0),
+      y: Math.min(Math.max(0, (Number(element.y) || 0) + (Number(element.height) || 190) + 18), Math.max(0, stage.height - 96)),
+      audioVisible: true,
+      audioLoop: false,
+      captionsEnabled: false,
+      initiallyHidden: false
+    });
+    renderSlide();
+    commitHistoryState();
+    alert('Audio extraido e adicionado como novo elemento no slide.');
+  } catch (error) {
+    alert(error.message || 'Nao foi possivel extrair o audio do video.');
+  } finally {
+    setActionButtonBusy(videoExtractAudioBtn, false, 'Extrair áudio do vídeo', 'Extraindo áudio...');
+  }
+};
+
+const applySelectedImageSourceFromEditor = async (preferredMode = '') => {
+  const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId);
+  if (!element || element.type !== 'image') {
+    return;
+  }
+  const mode = preferredMode || imageSourceModeSelect?.value || 'local';
+  if (mode === 'url') {
+    const nextUrl = imageSourceUrlInput?.value?.trim() || '';
+    if (!nextUrl) {
+      alert('Informe a URL da imagem.');
+      return;
+    }
+    element.src = nextUrl;
+  } else {
+    try {
+      const src = await readLocalFile(localImageInput, 'image');
+      if (!src) return;
+      element.src = src;
+    } catch (error) {
+      alert(error.message || 'Não foi possível carregar a imagem escolhida.');
+      return;
+    }
+  }
+  updateImageEditorVisibility(element, { forceOpen: true });
+  renderSlide();
+  commitHistoryState();
+};
+
+const applySelectedAudioSourceFromEditor = async (preferredMode = '') => {
+  const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId);
+  if (!element || element.type !== 'audio') {
+    return;
+  }
+  const mode = preferredMode || audioSourceModeSelect?.value || 'local';
+  if (mode === 'url') {
+    const nextUrl = audioSourceUrlInput?.value?.trim() || '';
+    if (!nextUrl) {
+      alert('Informe a URL do áudio.');
+      return;
+    }
+    element.src = nextUrl;
+  } else {
+    try {
+      const src = await readLocalFile(localAudioInput, 'audio');
+      if (!src) return;
+      element.src = src;
+    } catch (error) {
+      alert(error.message || 'Não foi possível carregar o áudio escolhido.');
+      return;
+    }
+  }
+  normalizeAudioElement(element);
+  updateAudioEditorVisibility(element, { forceOpen: true });
+  renderSlide();
+  commitHistoryState();
+};
+
+const applySelectedVideoSourceFromEditor = async (preferredMode = '') => {
+  const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId);
+  if (!element || element.type !== 'video') {
+    return;
+  }
+  const mode = preferredMode || videoSourceModeSelect?.value || 'local';
+  let nextConfig = null;
+  if (mode === 'url') {
+    const nextUrl = videoSourceUrlInput?.value?.trim() || '';
+    if (!nextUrl) {
+      alert('Informe a URL do vídeo.');
+      return;
+    }
+    nextConfig = buildVideoElementConfig(nextUrl, element.width || 320, element.height || 190);
+  } else {
+    try {
+      const src = await readLocalFile(localVideoInput, 'video');
+      if (!src) return;
+      nextConfig = buildVideoElementConfig(src, element.width || 320, element.height || 190);
+    } catch (error) {
+      alert(error.message || 'Não foi possível carregar o vídeo escolhido.');
+      return;
+    }
+  }
+  element.src = nextConfig.src || '';
+  if (nextConfig.provider === 'youtube' && nextConfig.embedSrc) {
+    element.provider = 'youtube';
+    element.embedSrc = nextConfig.embedSrc;
+  } else {
+    delete element.provider;
+    delete element.embedSrc;
+  }
+  updateVideoEditorVisibility(element, { forceOpen: true });
+  renderSlide();
+  commitHistoryState();
 };
 
 const chooseMediaConfig = async (type) => {
@@ -6419,10 +10213,16 @@ const chooseMediaConfig = async (type) => {
 };
 
 const handleElementCreation = async (type) => {
+  if (type !== 'eraser' && eraserState.active) {
+    closeEraserSession({ keepEditor: false });
+  }
+  if (type !== 'pen' && penState.active) {
+    closePenSession({ keepEditor: false });
+  }
   if (type === 'eraser') {
     const selectedElement = getActiveSlide()?.elements.find((child) => child.id === selectedElementId) || null;
     if (!selectedElement || !canUseEraserOnElement(selectedElement)) {
-      alert('Selecione uma imagem ou bloco antes de usar a borracha.');
+      alert('Selecione uma imagem, bloco ou traço da caneta antes de usar a borracha.');
       return;
     }
     await openEraserEditorForElement(selectedElement);
@@ -6443,6 +10243,12 @@ const handleElementCreation = async (type) => {
     scheduleHistoryCommit();
     return;
   }
+  if (type === 'pen') {
+    currentStageEditor = 'pen';
+    updatePenEditorVisibility(getActiveSlide()?.elements.find((child) => child.id === selectedElementId && child.type === 'pen') || null, { forceOpen: true });
+    startPenDrawingSession();
+    return;
+  }
   let config = { type };
   switch (type) {
     case 'text': {
@@ -6457,6 +10263,7 @@ const handleElementCreation = async (type) => {
       config.fontFamily = 'Inter, sans-serif';
       config.fontWeight = '400';
       config.textAlign = 'left';
+      config.initiallyHidden = false;
       break;
     }
     case 'block': {
@@ -6476,13 +10283,20 @@ const handleElementCreation = async (type) => {
       config.fontSize = 18;
       config.fontFamily = 'Inter, sans-serif';
       config.fontWeight = '500';
+      config.initiallyHidden = false;
       break;
     }
     case 'image':
+      currentStageEditor = 'image';
+      config = { type: 'image', src: IMAGE_FALLBACK_SRC, width: 280, height: 180, initiallyHidden: false };
+      break;
     case 'audio':
+      currentStageEditor = 'audio';
+      config = { type: 'audio', src: '', width: 260, height: 70, audioVisible: true, audioLoop: false, initiallyHidden: false };
+      break;
     case 'video':
-      config = await chooseMediaConfig(type);
-      if (!config) return;
+      currentStageEditor = 'video';
+      config = { type: 'video', src: '', width: 320, height: 190, videoTriggers: [createVideoTrigger({ name: 'Tempo 1' })], initiallyHidden: false };
       break;
     case 'quiz': {
       config.question = 'Qual alternativa está correta?';
@@ -6506,45 +10320,36 @@ const handleElementCreation = async (type) => {
       config.backgroundColor = '#ffffff';
       break;
     }
+    case 'input': {
+      currentStageEditor = 'floating';
+      config.placeholder = 'Digite sua resposta';
+      config.submitLabel = 'Enviar resposta';
+      config.compareText = '';
+      config.compareCaseSensitive = false;
+      config.compareImageEnabled = false;
+      config.compareImageReference = '';
+      config.successMessage = 'Resposta enviada com sucesso.';
+      config.errorMessage = 'A palavra não confere. Tente novamente.';
+      config.allowImage = true;
+      config.allowAudio = true;
+      config.width = 360;
+      config.height = 88;
+      config.interactionTriggers = [createInteractionTrigger('input', { name: 'Envio 1' })];
+      config.actionConfig = config.interactionTriggers[0].actionConfig;
+      config.initiallyHidden = false;
+      break;
+    }
     case 'floatingButton': {
-      const label = promptValue('Texto do botão flutuante', 'Explorar agora');
-      if (label === null) return;
-      config.label = label;
+      config.label = 'Explorar agora';
       config.shape = 'rectangle';
       config.width = 170;
       config.height = 60;
       config.fontSize = 18;
       config.fontFamily = 'Inter, sans-serif';
       config.fontWeight = '700';
-      config.actionConfig = {
-        type: 'none',
-        targetSlideId: '',
-        targetElementId: '',
-        ruleGroup: '',
-        requireAllButtonsInGroup: false,
-        text: 'Novo texto',
-        url: '',
-        textColor: DEFAULT_INSERT_TEXT_STYLE.textColor,
-        backgroundColor: DEFAULT_INSERT_TEXT_STYLE.backgroundColor,
-        textAlign: DEFAULT_INSERT_TEXT_STYLE.textAlign,
-        fontFamily: DEFAULT_INSERT_TEXT_STYLE.fontFamily,
-        fontWeight: DEFAULT_INSERT_TEXT_STYLE.fontWeight,
-        fontSize: DEFAULT_INSERT_TEXT_STYLE.fontSize,
-        hasTextBackground: DEFAULT_INSERT_TEXT_STYLE.hasTextBackground,
-        hasTextBorder: DEFAULT_INSERT_TEXT_STYLE.hasTextBorder,
-        hasTextBlock: DEFAULT_INSERT_TEXT_STYLE.hasTextBlock,
-        insertX: 120,
-        insertY: 120,
-        insertWidth: 280,
-        insertHeight: 180,
-        moveByX: 160,
-        moveByY: 0,
-        moveDuration: 0.8,
-        videoTime: 0,
-        quizQuestion: 'Nova pergunta',
-        quizOptions: createDefaultQuizOptions(),
-        quizCorrectOption: 0
-      };
+      config.interactionTriggers = [createInteractionTrigger('floatingButton', { name: 'Ação 1' })];
+      config.actionConfig = config.interactionTriggers[0].actionConfig;
+      config.initiallyHidden = false;
       break;
     }
     case 'detector': {
@@ -6552,26 +10357,20 @@ const handleElementCreation = async (type) => {
       config.height = 120;
       config.x = 240;
       config.y = 220;
-      config.actionConfig = {
-        type: 'none',
-        targetSlideId: '',
-        targetElementId: '',
-        text: 'Novo texto',
-        url: '',
-        insertX: 120,
-        insertY: 120,
-        insertWidth: 280,
-        insertHeight: 180,
-        moveByX: 160,
-        moveByY: 0,
-        moveDuration: 0.8,
-        videoTime: 0,
-        quizQuestion: 'Nova pergunta',
-        quizOptions: createDefaultQuizOptions(),
-        quizCorrectOption: 0,
-        requireAllButtonsInGroup: false,
-        ruleGroup: ''
-      };
+      config.interactionTriggers = [createInteractionTrigger('detector', { name: 'Gatilho 1' })];
+      config.actionConfig = config.interactionTriggers[0].actionConfig;
+      config.initiallyHidden = false;
+      break;
+    }
+    case 'timedTrigger': {
+      currentStageEditor = 'floating';
+      config.width = 180;
+      config.height = 56;
+      config.x = 220;
+      config.y = 90;
+      config.interactionTriggers = [createInteractionTrigger('timedTrigger', { name: 'Tempo 1', time: 3 })];
+      config.actionConfig = config.interactionTriggers[0].actionConfig;
+      config.initiallyHidden = false;
       break;
     }
     default:
@@ -6649,14 +10448,14 @@ const createQuizNode = (element) => {
     <p class="builder-quiz-question">${renderPlainTextHtml(element.question)}</p>
     <div class="builder-quiz-options">
       ${element.options
-        .map(
-          (option, index) => `
+      .map(
+        (option, index) => `
             <label class="builder-quiz-option">
               <input type="radio" name="quiz-${element.id}" value="${index}" />
               <span>${renderPlainTextHtml(option)}</span>
             </label>`
-        )
-        .join('')}
+      )
+      .join('')}
     </div>
     <button type="button" class="secondary-btn builder-quiz-action">${escapeHtml(element.actionLabel)}</button>
     <div class="builder-quiz-feedback" aria-live="polite"></div>
@@ -6690,6 +10489,223 @@ const createQuizNode = (element) => {
     } else {
       playWrongAnswerSound();
     }
+    if (previewState.active && element.playSourceVideoOnValidate && element.sourceVideoElementId) {
+      controlPreviewVideoElement(getPreviewActiveSlide(), element.sourceVideoElementId, 'playVideo');
+    }
+  });
+  return node;
+};
+
+const readLocalFileAsDataUrl = (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+    reader.onerror = () => reject(new Error('Não foi possível ler o arquivo selecionado.'));
+    reader.readAsDataURL(file);
+  });
+
+const comparePreviewInputImageWithReference = async ({ referenceImage, submittedImage }) => {
+  const response = await authorizedFetch('/api/admin/input/compare-image', {
+    method: 'POST',
+    body: JSON.stringify({
+      referenceImage,
+      submittedImage
+    })
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(payload?.message || 'Nao foi possivel comparar as imagens.');
+  }
+  syncProfessorCreditsFromPayload(payload);
+  return {
+    matched: Boolean(payload?.matched),
+    confidence: Math.max(0, Math.min(1, Number(payload?.confidence) || 0)),
+    reason: String(payload?.reason || '').trim()
+  };
+};
+
+const createInputElementNode = (element, { runActions = null, preview = false } = {}) => {
+  normalizeInputElement(element);
+  normalizeFloatingActionConfig(element);
+  const hasCompareText = Boolean(String(element.compareText || '').trim());
+  const showTextField = !element.compareImageEnabled || hasCompareText;
+  const referencePreview = element.compareImageEnabled && element.compareImageReference
+    ? `<div class="builder-input-reference">
+        <span class="builder-input-reference-label">Referencia visual</span>
+        <img src="${escapeAttribute(element.compareImageReference)}" alt="Imagem de referencia" class="builder-input-reference-image" />
+      </div>`
+    : '';
+  const inputBgColor = element.backgroundColor || '#ffffff';
+  const inputTextColor = element.inputTextColor || '#0f142c';
+  const labelColor = element.labelColor || '#9ca3af';
+  const buttonBgColor = element.submitButtonColor || '#6d63ff';
+  const buttonTextColor = element.submitButtonTextColor || '#ffffff';
+  const textFieldMarkup = showTextField
+    ? `<textarea class="builder-input-text" style="background-color: ${inputBgColor}; color: ${inputTextColor};" placeholder="${escapeHtml(element.placeholder || 'Digite sua resposta')}"></textarea>`
+    : `<div class="builder-input-text builder-input-text-passive" style="background-color: ${inputBgColor}; color: ${inputTextColor};">Envie uma imagem para validar</div>`;
+  const node = document.createElement('div');
+  node.className = 'builder-input-element';
+  node.innerHTML = `
+    ${referencePreview}
+    <div class="builder-input-composer">
+      <div class="builder-input-composer-main">
+        ${textFieldMarkup}
+      </div>
+      <div class="builder-input-composer-actions">
+        <button type="button" class="secondary-btn builder-input-upload builder-input-upload-icon builder-input-image-btn ${element.allowImage ? '' : 'hidden'}" aria-label="Anexar imagem" title="Anexar imagem">+</button>
+        <button type="button" class="secondary-btn builder-input-upload builder-input-upload-icon builder-input-audio-btn ${element.allowAudio ? '' : 'hidden'}" aria-label="Anexar audio" title="Anexar audio">Mic</button>
+        <button type="button" class="primary-btn builder-input-submit" style="background-color: ${buttonBgColor}; color: ${buttonTextColor};" aria-label="${escapeAttribute(element.submitLabel || 'Enviar resposta')}" title="${escapeAttribute(element.submitLabel || 'Enviar resposta')}">
+          <span class="builder-input-submit-icon" aria-hidden="true">➤</span>
+        </button>
+      </div>
+    </div>
+    <input class="builder-input-image-file hidden" type="file" accept="image/*" />
+    <input class="builder-input-audio-file hidden" type="file" accept="audio/*" />
+    <div class="builder-input-preview hidden"></div>
+    <div class="builder-input-feedback" aria-live="polite"></div>
+  `;
+  const textArea = node.querySelector('.builder-input-text');
+  const imageBtn = node.querySelector('.builder-input-image-btn');
+  const audioBtn = node.querySelector('.builder-input-audio-btn');
+  const imageInput = node.querySelector('.builder-input-image-file');
+  const audioInput = node.querySelector('.builder-input-audio-file');
+  const previewNode = node.querySelector('.builder-input-preview');
+  const feedbackNode = node.querySelector('.builder-input-feedback');
+  const submitBtn = node.querySelector('.builder-input-submit');
+  const state = {
+    image: '',
+    audio: ''
+  };
+  const setFileInputValue = (control, value = '') => {
+    if (control instanceof HTMLInputElement) {
+      control.value = value;
+    }
+  };
+  const refreshPreview = () => {
+    if (!previewNode) {
+      return;
+    }
+    const parts = [];
+    if (state.image) {
+      parts.push(`<img src="${state.image}" alt="Imagem anexada" class="builder-input-preview-image" />`);
+    }
+    if (state.audio) {
+      parts.push(`<audio controls src="${state.audio}" class="builder-input-preview-audio"></audio>`);
+    }
+    previewNode.innerHTML = parts.join('');
+    previewNode.classList.toggle('hidden', parts.length === 0);
+  };
+  imageBtn?.addEventListener('click', () => {
+    if (!preview) {
+      return;
+    }
+    setFileInputValue(imageInput);
+    imageInput?.click();
+  });
+  audioBtn?.addEventListener('click', () => {
+    if (!preview) {
+      return;
+    }
+    setFileInputValue(audioInput);
+    audioInput?.click();
+  });
+  imageInput?.addEventListener('change', async () => {
+    const file = imageInput.files?.[0];
+    if (!file) return;
+    state.image = await readLocalFileAsDataUrl(file).catch(() => '');
+    setFileInputValue(imageInput);
+    refreshPreview();
+  });
+  audioInput?.addEventListener('change', async () => {
+    const file = audioInput.files?.[0];
+    if (!file) return;
+    state.audio = await readLocalFileAsDataUrl(file).catch(() => '');
+    setFileInputValue(audioInput);
+    refreshPreview();
+  });
+  if (!preview) {
+    if (textArea instanceof HTMLTextAreaElement) {
+      textArea.readOnly = true;
+      textArea.tabIndex = -1;
+    }
+    if (imageBtn instanceof HTMLButtonElement) {
+      imageBtn.tabIndex = -1;
+      imageBtn.type = 'button';
+    }
+    if (audioBtn instanceof HTMLButtonElement) {
+      audioBtn.tabIndex = -1;
+      audioBtn.type = 'button';
+    }
+    if (submitBtn instanceof HTMLButtonElement) {
+      submitBtn.tabIndex = -1;
+      submitBtn.type = 'button';
+    }
+    setFileInputValue(imageInput);
+    setFileInputValue(audioInput);
+  }
+  submitBtn?.addEventListener('click', async () => {
+    if (!preview) {
+      return;
+    }
+    const submittedText = textArea instanceof HTMLTextAreaElement ? textArea.value : '';
+    const expected = normalizeInputCompareValue(element.compareText || '', Boolean(element.compareCaseSensitive));
+    const received = normalizeInputCompareValue(submittedText, Boolean(element.compareCaseSensitive));
+    const textMatched = !expected || received === expected;
+    const finishSubmit = (matched, message) => {
+      if (feedbackNode) {
+        feedbackNode.textContent = message;
+        feedbackNode.className = `builder-input-feedback ${matched ? 'success' : 'error'}`;
+      }
+      if (matched && typeof runActions === 'function') {
+        runActions({
+          text: submittedText,
+          image: state.image,
+          audio: state.audio,
+          matched
+        });
+      }
+      if (matched) {
+        playCorrectAnswerSound();
+      } else if (expected || element.compareImageEnabled) {
+        playWrongAnswerSound();
+      }
+    };
+    if (element.compareImageEnabled) {
+      if (!state.image) {
+        finishSubmit(false, 'Anexe uma imagem para testar a comparacao visual.');
+        return;
+      }
+      if (!element.compareImageReference) {
+        finishSubmit(false, 'Defina uma imagem de referencia para validar a comparacao visual.');
+        return;
+      }
+      if (!textMatched) {
+        finishSubmit(false, element.errorMessage);
+        return;
+      }
+      if (!(submitBtn instanceof HTMLButtonElement)) {
+        finishSubmit(false, 'Nao foi possivel iniciar a comparacao.');
+        return;
+      }
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Comparando...';
+      try {
+        const compareResult = await comparePreviewInputImageWithReference({
+          referenceImage: element.compareImageReference,
+          submittedImage: state.image
+        });
+        const matched = Boolean(compareResult.matched);
+        finishSubmit(matched, matched ? element.successMessage : compareResult.reason || element.errorMessage);
+      } catch (error) {
+        finishSubmit(false, error.message || 'Nao foi possivel validar a imagem.');
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = element.submitLabel || 'Enviar resposta';
+      }
+      return;
+    }
+    const matched = textMatched;
+    finishSubmit(matched, matched ? element.successMessage : element.errorMessage);
   });
   return node;
 };
@@ -6743,23 +10759,52 @@ const createPreviewElementNode = (element, slide) => {
         node.src = IMAGE_FALLBACK_SRC;
       });
       break;
+    case 'pen':
+      node = createPenElementNode(element);
+      break;
     case 'audio':
-      node = document.createElement('audio');
-      node.className = 'builder-media-element';
-      node.src = element.src || '';
-      applyPreviewAudioPresentation(node, element);
+      {
+        const mediaNode = document.createElement('audio');
+        mediaNode.className = 'builder-media-element';
+        mediaNode.src = element.src || '';
+        applyPreviewAudioPresentation(mediaNode, element);
+        node = wrapMediaNodeWithCaptions(mediaNode, element);
+        restorePreviewMediaState(slide, element, node);
+      }
       break;
     case 'video':
-      node = document.createElement('video');
-      node.className = 'builder-media-element';
-      node.controls = true;
-      node.src = element.src || '';
-      attachPreviewVideoTimedTrigger(node, element);
+      {
+        const mediaNode = document.createElement('video');
+        mediaNode.className = 'builder-media-element';
+        mediaNode.controls = true;
+        mediaNode.src = element.src || '';
+        attachPreviewVideoTimedTrigger(mediaNode, element);
+        node = wrapMediaNodeWithCaptions(mediaNode, element);
+        restorePreviewMediaState(slide, element, node);
+      }
       break;
     case 'quiz':
       node = createQuizNode(element);
       node.style.background = element.quizBackgroundColor;
       node.style.backgroundColor = element.quizBackgroundColor;
+      break;
+    case 'input':
+      node = createInputElementNode(element, {
+        preview: true,
+        runActions: () => {
+          let shouldRerender = false;
+          (element.interactionTriggers || []).forEach((trigger) => {
+            if (trigger?.enabled === false) {
+              return;
+            }
+            const didExecute = executePreviewActionConfig(element, trigger.actionConfig || {}, slide);
+            shouldRerender = shouldRerender || didExecute;
+          });
+          if (shouldRerender) {
+            renderSlide();
+          }
+        }
+      });
       break;
     case 'floatingButton':
       node = document.createElement('button');
@@ -6768,22 +10813,33 @@ const createPreviewElementNode = (element, slide) => {
       applyElementBackground(node, element);
       applyShapeStyles(node, element.shape || 'rectangle');
       {
-        const config = element.actionConfig || {};
-        const ruleGroup = String(config.ruleGroup || '').trim();
-        const stateKey = getPreviewRuleStateKey(slide.id, ruleGroup);
-        const clickedIds = previewState.clickedRuleButtons.get(stateKey) || new Set();
-        if (clickedIds.has(element.id)) {
+        normalizeFloatingActionConfig(element);
+        const isCompleted = (element.interactionTriggers || []).some((trigger) => {
+          const ruleGroup = String(trigger?.actionConfig?.ruleGroup || '').trim();
+          if (!ruleGroup || !trigger?.actionConfig?.requireAllButtonsInGroup) {
+            return false;
+          }
+          const stateKey = getPreviewRuleStateKey(slide.id, ruleGroup);
+          const clickedIds = previewState.clickedRuleButtons.get(stateKey) || new Set();
+          return clickedIds.has(element.id);
+        });
+        if (isCompleted) {
           node.classList.add('floating-button-completed');
         }
       }
       node.addEventListener('click', (event) => {
         event.stopPropagation();
-        executePreviewFloatingButtonAction(element);
+        executePreviewFloatingButtonTriggers(element);
       });
       break;
     case 'detector':
       node = document.createElement('div');
       node.className = 'detector-element detector-element-preview';
+      node.setAttribute('aria-hidden', 'true');
+      break;
+    case 'timedTrigger':
+      node = document.createElement('div');
+      node.className = 'time-trigger-element time-trigger-element-preview';
       node.setAttribute('aria-hidden', 'true');
       break;
     default:
@@ -6846,11 +10902,17 @@ const renderElementNode = (element) => {
         node.src = IMAGE_FALLBACK_SRC;
       });
       break;
+    case 'pen':
+      node = createPenElementNode(element);
+      break;
     case 'audio':
-      node = document.createElement('audio');
-      node.className = 'builder-media-element';
-      node.src = element.src || '';
-      applyPreviewAudioPresentation(node, element, { authoring: true });
+      {
+        const mediaNode = document.createElement('audio');
+        mediaNode.className = 'builder-media-element';
+        mediaNode.src = element.src || '';
+        applyPreviewAudioPresentation(mediaNode, element, { authoring: true });
+        node = wrapMediaNodeWithCaptions(mediaNode, element);
+      }
       break;
     case 'video':
       if (element.provider === 'youtube' && element.embedSrc) {
@@ -6866,17 +10928,21 @@ const renderElementNode = (element) => {
         frame.referrerPolicy = 'strict-origin-when-cross-origin';
         node.appendChild(frame);
       } else {
-        node = document.createElement('video');
-        node.className = 'builder-media-element';
-        node.controls = true;
-        node.src = element.src || '';
-        attachPreviewVideoTimedTrigger(node, element);
+        const mediaNode = document.createElement('video');
+        mediaNode.className = 'builder-media-element';
+        mediaNode.controls = true;
+        mediaNode.src = element.src || '';
+        attachPreviewVideoTimedTrigger(mediaNode, element);
+        node = wrapMediaNodeWithCaptions(mediaNode, element);
       }
       break;
     case 'quiz':
       node = createQuizNode(element);
       node.style.background = element.quizBackgroundColor;
       node.style.backgroundColor = element.quizBackgroundColor;
+      break;
+    case 'input':
+      node = createInputElementNode(element);
       break;
     case 'floatingButton':
       node = document.createElement('button');
@@ -6890,6 +10956,12 @@ const renderElementNode = (element) => {
       node.className = 'detector-element';
       node.textContent = 'Detector';
       break;
+    case 'timedTrigger':
+      node = document.createElement('div');
+      node.className = 'time-trigger-element';
+      normalizeFloatingActionConfig(element);
+      node.textContent = `Tempo ${(Number(element.interactionTriggers?.[0]?.time) || 0).toFixed(1)}s`;
+      break;
     default:
       node = document.createElement('div');
       node.textContent = element.content || 'Elemento';
@@ -6899,7 +10971,7 @@ const renderElementNode = (element) => {
   node.style.position = 'absolute';
   node.style.left = `${element.x}px`;
   node.style.top = `${element.y}px`;
-  node.style.zIndex = String(element.zIndex ?? 0);
+  node.style.zIndex = String(selectedElementId === element.id ? 999998 : (element.zIndex ?? 0));
   if (element.width) {
     node.style.width = typeof element.width === 'number' ? `${element.width}px` : element.width;
   }
@@ -6934,13 +11006,87 @@ const renderElementNode = (element) => {
   node.style.cursor = 'grab';
   node.style.touchAction = 'none';
   node.style.userSelect = 'none';
-  enableDrag(node, element);
   node.classList.toggle('element-active', selectedElementId === element.id);
+
+  const usesClipPath = ['block', 'floatingButton'].includes(element.type) && ['triangle', 'arrow'].includes(element.shape || 'rectangle');
+  let targetForPointerEvents = node;
+
+  if (usesClipPath && !previewState.active) {
+    const wrapper = document.createElement('div');
+    wrapper.dataset.elementId = element.id;
+    wrapper.classList.toggle('eraser-source-hidden', eraserState.active && eraserState.elementId === element.id);
+    const wrapperZIndex = selectedElementId === element.id ? 999998 : (element.zIndex ?? 0);
+    wrapper.style.cssText = `position:absolute;left:${element.x}px;top:${element.y}px;z-index:${wrapperZIndex};width:${element.width || 0}px;height:${element.height || 0}px;touch-action:none;user-select:none;cursor:grab;`;
+    node.style.position = 'relative';
+    node.style.left = '0';
+    node.style.top = '0';
+    node.style.width = '100%';
+    node.style.height = '100%';
+    node.style.cursor = 'grab';
+    delete node.dataset.elementId;
+    node.classList.remove('eraser-source-hidden');
+    wrapper.appendChild(node);
+    targetForPointerEvents = wrapper;
+    wrapper.dataset.hasMenuTrigger = 'true';
+    enableDrag(wrapper, element);
+    wrapper.classList.toggle('element-active', selectedElementId === element.id);
+    wrapper.classList.toggle('will-be-hidden', Boolean(element.initiallyHidden));
+    wrapper.addEventListener('pointerenter', () => {
+      if (!previewState.active) {
+        showElementMenuTrigger(element.id);
+      }
+    });
+    wrapper.addEventListener('pointerleave', () => {
+      if (!previewState.active) {
+        scheduleHideElementMenuTrigger(element.id);
+      }
+    });
+    wrapper.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (isPickingFloatingTargetElement) {
+        const triggerElement = getSelectedActionTriggerElement();
+        const selectedTrigger = getSelectedFloatingTrigger(triggerElement);
+        const candidateIds = getFloatingTargetCandidateIds(selectedTrigger?.actionConfig?.type || 'none', triggerElement);
+        if (candidateIds.has(element.id)) {
+          if (floatingTargetElementSelect) {
+            floatingTargetElementSelect.value = element.id;
+          }
+          isPickingFloatingTargetElement = false;
+          syncFloatingButtonEditor();
+        }
+        return;
+      }
+      selectElement(element.id);
+    });
+
+    const trigger = createElementMenuTrigger(element, { skipPositioning: true });
+    trigger.style.left = `${Math.max((Number(element.width) || 0) - 34, 6)}px`;
+    trigger.style.top = '6px';
+    trigger.style.zIndex = String((Number(element.zIndex) || 0) + 2);
+    wrapper.appendChild(trigger);
+
+    return wrapper;
+  }
+
+  enableDrag(node, element);
+  node.addEventListener('pointerenter', () => {
+    if (!previewState.active) {
+      showElementMenuTrigger(element.id);
+    }
+  });
+  node.addEventListener('pointerleave', () => {
+    if (!previewState.active) {
+      scheduleHideElementMenuTrigger(element.id);
+    }
+  });
   node.addEventListener('click', (event) => {
+    event.preventDefault();
     event.stopPropagation();
     if (isPickingFloatingTargetElement) {
       const triggerElement = getSelectedActionTriggerElement();
-      const candidateIds = getFloatingTargetCandidateIds(triggerElement?.actionConfig?.type || 'none', triggerElement);
+      const selectedTrigger = getSelectedFloatingTrigger(triggerElement);
+      const candidateIds = getFloatingTargetCandidateIds(selectedTrigger?.actionConfig?.type || 'none', triggerElement);
       if (candidateIds.has(element.id)) {
         if (floatingTargetElementSelect) {
           floatingTargetElementSelect.value = element.id;
@@ -6952,11 +11098,59 @@ const renderElementNode = (element) => {
     }
     selectElement(element.id);
   });
-  node.addEventListener('dblclick', () => handleElementEdit(element));
+  node.classList.toggle('will-be-hidden', Boolean(element.initiallyHidden));
   return node;
 };
 
+const createElementMenuTrigger = (element, options = {}) => {
+  const { skipPositioning = false } = options;
+  const elementBox = getStageRelativeElementBox(element);
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'element-menu-trigger';
+  trigger.dataset.elementMenuTrigger = element.id;
+  trigger.setAttribute('aria-label', 'Abrir menu do elemento');
+  trigger.title = 'Abrir menu';
+  trigger.innerHTML = `
+    <span class="element-menu-trigger-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" focusable="false">
+        <circle cx="6.5" cy="12" r="1.8" fill="currentColor"></circle>
+        <circle cx="12" cy="12" r="1.8" fill="currentColor"></circle>
+        <circle cx="17.5" cy="12" r="1.8" fill="currentColor"></circle>
+      </svg>
+    </span>`;
+  if (!skipPositioning) {
+    trigger.style.position = 'absolute';
+    trigger.style.left = `${elementBox.left + Math.max((Number(elementBox.width) || 0) - 34, 6)}px`;
+    trigger.style.top = `${Math.max(elementBox.top + 6, 6)}px`;
+    trigger.style.zIndex = String((Number(element.zIndex) || 0) + 2);
+  }
+  trigger.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  trigger.addEventListener('pointerenter', () => {
+    showElementMenuTrigger(element.id);
+  });
+  trigger.addEventListener('pointerleave', () => {
+    scheduleHideElementMenuTrigger(element.id);
+  });
+  trigger.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    showElementMenuTrigger(element.id);
+    selectElement(element.id, { openEditor: true });
+  });
+  return trigger;
+};
+
 const handleElementEdit = async (element) => {
+  if (eraserState.active && element?.id !== eraserState.elementId) {
+    closeEraserSession({ keepEditor: false });
+  }
+  if (penState.active && element?.type !== 'pen') {
+    closePenSession({ keepEditor: false });
+  }
   switch (element.type) {
     case 'text':
       currentStageEditor = 'text';
@@ -6966,11 +11160,15 @@ const handleElementEdit = async (element) => {
       currentStageEditor = 'block';
       updateBlockEditorVisibility(element, { forceOpen: true });
       requestAnimationFrame(() => {
-        blockElementContentInput?.focus();
+        blockElementContentInput?.focus({ preventScroll: true });
         blockElementContentInput?.select?.();
       });
       return;
     }
+    case 'pen':
+      currentStageEditor = 'pen';
+      updatePenEditorVisibility(element, { forceOpen: true });
+      return;
     case 'image':
     case 'audio':
     case 'video': {
@@ -6989,23 +11187,22 @@ const handleElementEdit = async (element) => {
         updateVideoEditorVisibility(element, { forceOpen: true });
         return;
       }
-      const nextConfig = await chooseMediaConfig(element.type);
-      if (!nextConfig) return;
-      element.src = nextConfig.src;
       break;
     }
     case 'floatingButton': {
-      const edited = promptValue('Atualize o texto do elemento', element.label);
-      if (edited === null) return;
-      element.label = edited;
-      break;
+      currentStageEditor = 'floating';
+      updateFloatingButtonEditorVisibility(element, { forceOpen: true });
+      return;
     }
     case 'detector':
+    case 'timedTrigger':
+    case 'input':
       currentStageEditor = 'floating';
-      updateFloatingButtonEditorVisibility(element);
+      updateFloatingButtonEditorVisibility(element, { forceOpen: true });
       return;
     case 'quiz':
-      updateQuizEditorVisibility(element);
+      currentStageEditor = 'quiz';
+      updateQuizEditorVisibility(element, { forceOpen: true });
       return;
     default:
       return;
@@ -7024,7 +11221,19 @@ const enableDrag = (node, element) => {
     node.style.top = `${element.y}px`;
   };
   const startDrag = (event) => {
+    const target = event.target;
+    if (
+      target instanceof Element &&
+      target !== node &&
+      target.closest('input, select, .builder-quiz-node')
+    ) {
+      return;
+    }
+    if (selectedElementId !== element.id) {
+      selectElement(element.id);
+    }
     event.preventDefault();
+    showElementMenuTrigger(null);
     pointerId = event.pointerId;
     const pointer = getStagePointerPosition(event);
     offsetX = pointer.x - (element.x || 0);
@@ -7106,7 +11315,7 @@ const removeCurrentSlide = () => {
 document.addEventListener('DOMContentLoaded', () => {
   const token = getToken();
   const role = localStorage.getItem(USER_ROLE_KEY);
-  if (!token || role !== 'admin') {
+  if (!token || (role !== 'admin' && role !== 'professor')) {
     window.location.href = 'login.html';
     return;
   }
@@ -7117,10 +11326,18 @@ document.addEventListener('DOMContentLoaded', () => {
   slideCanvas = document.getElementById('slideCanvas');
   slideCanvasViewport = document.getElementById('slideCanvasViewport');
   slideName = document.getElementById('slideName');
+  builderProfessorCreditsStatus = document.getElementById('builderProfessorCreditsStatus');
   previewStageBtn = document.getElementById('previewStageBtn');
   moduleCourseSelect = document.getElementById('moduleCourseSelect');
   moduleTitleInput = document.getElementById('moduleTitleInput');
   moduleDescriptionInput = document.getElementById('moduleDescriptionInput');
+  moduleCoverModeSelect = document.getElementById('moduleCoverModeSelect');
+  moduleCoverUrlInput = document.getElementById('moduleCoverUrlInput');
+  applyModuleCoverBtn = document.getElementById('applyModuleCoverBtn');
+  clearModuleCoverBtn = document.getElementById('clearModuleCoverBtn');
+  moduleCoverPreview = document.getElementById('moduleCoverPreview');
+  moduleCoverPreviewTitle = document.getElementById('moduleCoverPreviewTitle');
+  moduleCoverPreviewMeta = document.getElementById('moduleCoverPreviewMeta');
   moduleLockNextToggle = document.getElementById('moduleLockNextToggle');
   modulePublicToggle = document.getElementById('modulePublicToggle');
   modulePublicLinkInput = document.getElementById('modulePublicLinkInput');
@@ -7148,12 +11365,15 @@ document.addEventListener('DOMContentLoaded', () => {
   elementHeightInput = document.getElementById('elementHeightInput');
   elementRotationInput = document.getElementById('elementRotationInput');
   elementLayerInput = document.getElementById('elementLayerInput');
+  elementOpacityInput = document.getElementById('elementOpacityInput');
+  elementOpacityValue = document.getElementById('elementOpacityValue');
   elementTextColorInput = document.getElementById('elementTextColorInput');
   elementFontSizeInput = document.getElementById('elementFontSizeInput');
   elementFontFamilySelect = document.getElementById('elementFontFamilySelect');
   elementFontWeightSelect = document.getElementById('elementFontWeightSelect');
   elementBgColorInput = document.getElementById('elementBgColorInput');
   elementStudentDragToggle = document.getElementById('elementStudentDragToggle');
+  elementInitiallyHiddenToggle = document.getElementById('elementInitiallyHiddenToggle');
   removeImageBackgroundBtn = document.getElementById('removeImageBackgroundBtn');
   elementAnimationTypeSelect = document.getElementById('elementAnimationTypeSelect');
   elementAnimationDurationInput = document.getElementById('elementAnimationDurationInput');
@@ -7189,6 +11409,7 @@ document.addEventListener('DOMContentLoaded', () => {
   backgroundEditorCard = document.getElementById('backgroundEditorCard');
   videoEditorCard = document.getElementById('videoEditorCard');
   backgroundMediaTypeSelect = document.getElementById('backgroundMediaTypeSelect');
+  backgroundBatchToggle = document.getElementById('backgroundBatchToggle');
   backgroundSolidColorInput = document.getElementById('backgroundSolidColorInput');
   backgroundGradientStartInput = document.getElementById('backgroundGradientStartInput');
   backgroundGradientEndInput = document.getElementById('backgroundGradientEndInput');
@@ -7198,6 +11419,12 @@ document.addEventListener('DOMContentLoaded', () => {
   backgroundMediaClearBtn = document.getElementById('backgroundMediaClearBtn');
   backgroundMediaEditorStatus = document.getElementById('backgroundMediaEditorStatus');
   animationEditorCard = document.getElementById('animationEditorCard');
+  penEditorCard = document.getElementById('penEditorCard');
+  penColorInput = document.getElementById('penColorInput');
+  penSizeInput = document.getElementById('penSizeInput');
+  penSizeNumberInput = document.getElementById('penSizeNumberInput');
+  penStartDrawingBtn = document.getElementById('penStartDrawingBtn');
+  penClearPreviewBtn = document.getElementById('penClearPreviewBtn');
   textElementContentInput = document.getElementById('textElementContentInput');
   textElementWidthInput = document.getElementById('textElementWidthInput');
   textElementHeightInput = document.getElementById('textElementHeightInput');
@@ -7234,6 +11461,9 @@ document.addEventListener('DOMContentLoaded', () => {
   imageElementObjectFitSelect = document.getElementById('imageElementObjectFitSelect');
   imageElementStudentDragToggle = document.getElementById('imageElementStudentDragToggle');
   imageReplaceSourceBtn = document.getElementById('imageReplaceSourceBtn');
+  imageSourceModeSelect = document.getElementById('imageSourceModeSelect');
+  imageSourceUrlInput = document.getElementById('imageSourceUrlInput');
+  imageApplySourceBtn = document.getElementById('imageApplySourceBtn');
   quizQuestionInput = document.getElementById('quizQuestionInput');
   quizOptionsInput = document.getElementById('quizOptionsInput');
   quizCorrectAnswerSelect = document.getElementById('quizCorrectAnswerSelect');
@@ -7250,6 +11480,31 @@ document.addEventListener('DOMContentLoaded', () => {
   floatingButtonEditorCard = document.getElementById('floatingButtonEditorCard');
   floatingEditorBadge = document.getElementById('floatingEditorBadge');
   floatingEditorTitle = document.getElementById('floatingEditorTitle');
+  floatingButtonLabelInput = document.getElementById('floatingButtonLabelInput');
+  floatingInputPlaceholderInput = document.getElementById('floatingInputPlaceholderInput');
+  floatingInputSubmitLabelInput = document.getElementById('floatingInputSubmitLabelInput');
+  floatingInputCompareTextInput = document.getElementById('floatingInputCompareTextInput');
+  floatingInputCompareCaseToggle = document.getElementById('floatingInputCompareCaseToggle');
+  floatingInputCompareImageToggle = document.getElementById('floatingInputCompareImageToggle');
+  floatingInputCompareImageUrlInput = document.getElementById('floatingInputCompareImageUrlInput');
+  floatingInputCompareImageFileInput = document.getElementById('floatingInputCompareImageFileInput');
+  floatingInputCompareImageClearBtn = document.getElementById('floatingInputCompareImageClearBtn');
+  floatingInputCompareImagePreview = document.getElementById('floatingInputCompareImagePreview');
+  floatingInputSuccessInput = document.getElementById('floatingInputSuccessInput');
+  floatingInputErrorInput = document.getElementById('floatingInputErrorInput');
+  floatingInputAllowImageToggle = document.getElementById('floatingInputAllowImageToggle');
+  floatingInputAllowAudioToggle = document.getElementById('floatingInputAllowAudioToggle');
+  floatingInputBackgroundColorInput = document.getElementById('floatingInputBackgroundColorInput');
+  floatingInputLabelColorInput = document.getElementById('floatingInputLabelColorInput');
+  floatingInputTextColorInput = document.getElementById('floatingInputTextColorInput');
+  floatingInputButtonBackgroundColorInput = document.getElementById('floatingInputButtonBackgroundColorInput');
+  floatingInputButtonTextColorInput = document.getElementById('floatingInputButtonTextColorInput');
+  floatingTriggerTimeInput = document.getElementById('floatingTriggerTimeInput');
+  floatingTriggerList = document.getElementById('floatingTriggerList');
+  floatingAddTriggerBtn = document.getElementById('floatingAddTriggerBtn');
+  floatingDuplicateTriggerBtn = document.getElementById('floatingDuplicateTriggerBtn');
+  floatingRemoveTriggerBtn = document.getElementById('floatingRemoveTriggerBtn');
+  floatingActionTypeLabel = document.getElementById('floatingActionTypeLabel');
   eraserEditorCard = document.getElementById('eraserEditorCard');
   eraserModeSelect = document.getElementById('eraserModeSelect');
   eraserShapeSelect = document.getElementById('eraserShapeSelect');
@@ -7311,16 +11566,99 @@ document.addEventListener('DOMContentLoaded', () => {
   floatingQuizButtonBackgroundColorInput = document.getElementById('floatingQuizButtonBackgroundColorInput');
   floatingQuizPointsInput = document.getElementById('floatingQuizPointsInput');
   floatingQuizLockOnWrongToggle = document.getElementById('floatingQuizLockOnWrongToggle');
+  videoTriggerList = document.getElementById('videoTriggerList');
+  videoAddTriggerBtn = document.getElementById('videoAddTriggerBtn');
+  videoDuplicateTriggerBtn = document.getElementById('videoDuplicateTriggerBtn');
+  videoRemoveTriggerBtn = document.getElementById('videoRemoveTriggerBtn');
   videoTriggerTimeInput = document.getElementById('videoTriggerTimeInput');
   videoTriggerActionSelect = document.getElementById('videoTriggerActionSelect');
   videoTriggerSeekTimeInput = document.getElementById('videoTriggerSeekTimeInput');
   videoTriggerTargetElementSelect = document.getElementById('videoTriggerTargetElementSelect');
+  videoTriggerTargetSlideSelect = document.getElementById('videoTriggerTargetSlideSelect');
+  videoTriggerUrlInput = document.getElementById('videoTriggerUrlInput');
+  videoTriggerActionTextLabel = document.getElementById('videoTriggerActionTextLabel');
+  videoTriggerActionTextInput = document.getElementById('videoTriggerActionTextInput');
+  videoTriggerReplaceModeSelect = document.getElementById('videoTriggerReplaceModeSelect');
+  videoTriggerReplaceCounterStartInput = document.getElementById('videoTriggerReplaceCounterStartInput');
+  videoTriggerReplaceCounterStepInput = document.getElementById('videoTriggerReplaceCounterStepInput');
+  videoTriggerAudioVisibleToggle = document.getElementById('videoTriggerAudioVisibleToggle');
+  videoTriggerAudioLoopToggle = document.getElementById('videoTriggerAudioLoopToggle');
+  videoTriggerTextColorInput = document.getElementById('videoTriggerTextColorInput');
+  videoTriggerTextBgColorInput = document.getElementById('videoTriggerTextBgColorInput');
+  videoTriggerTextFontSizeInput = document.getElementById('videoTriggerTextFontSizeInput');
+  videoTriggerTextFontFamilySelect = document.getElementById('videoTriggerTextFontFamilySelect');
+  videoTriggerTextFontWeightSelect = document.getElementById('videoTriggerTextFontWeightSelect');
+  videoTriggerTextAlignSelect = document.getElementById('videoTriggerTextAlignSelect');
+  videoTriggerTextBackgroundToggle = document.getElementById('videoTriggerTextBackgroundToggle');
+  videoTriggerTextBorderToggle = document.getElementById('videoTriggerTextBorderToggle');
+  videoTriggerInsertXInput = document.getElementById('videoTriggerInsertXInput');
+  videoTriggerInsertYInput = document.getElementById('videoTriggerInsertYInput');
+  videoTriggerInsertWidthInput = document.getElementById('videoTriggerInsertWidthInput');
+  videoTriggerInsertHeightInput = document.getElementById('videoTriggerInsertHeightInput');
+  videoPickPlacementBtn = document.getElementById('videoPickPlacementBtn');
+  videoPlacementHint = document.getElementById('videoPlacementHint');
+  videoTriggerMoveXInput = document.getElementById('videoTriggerMoveXInput');
+  videoTriggerMoveYInput = document.getElementById('videoTriggerMoveYInput');
+  videoTriggerMoveDurationInput = document.getElementById('videoTriggerMoveDurationInput');
+  videoTriggerQuizQuestionInput = document.getElementById('videoTriggerQuizQuestionInput');
+  videoTriggerQuizOptionsInput = document.getElementById('videoTriggerQuizOptionsInput');
+  videoTriggerQuizCorrectSelect = document.getElementById('videoTriggerQuizCorrectSelect');
+  videoTriggerQuizSuccessInput = document.getElementById('videoTriggerQuizSuccessInput');
+  videoTriggerQuizErrorInput = document.getElementById('videoTriggerQuizErrorInput');
+  videoTriggerQuizActionLabelInput = document.getElementById('videoTriggerQuizActionLabelInput');
+  videoTriggerQuizBackgroundColorInput = document.getElementById('videoTriggerQuizBackgroundColorInput');
+  videoTriggerQuizQuestionColorInput = document.getElementById('videoTriggerQuizQuestionColorInput');
+  videoTriggerQuizOptionBackgroundColorInput = document.getElementById('videoTriggerQuizOptionBackgroundColorInput');
+  videoTriggerQuizOptionTextColorInput = document.getElementById('videoTriggerQuizOptionTextColorInput');
+  videoTriggerQuizButtonBackgroundColorInput = document.getElementById('videoTriggerQuizButtonBackgroundColorInput');
+  videoTriggerQuizPointsInput = document.getElementById('videoTriggerQuizPointsInput');
+  videoTriggerQuizLockOnWrongToggle = document.getElementById('videoTriggerQuizLockOnWrongToggle');
+  videoTriggerQuizPlaySourceVideoToggle = document.getElementById('videoTriggerQuizPlaySourceVideoToggle');
+  videoCaptionEnabledToggle = document.getElementById('videoCaptionEnabledToggle');
+  videoCaptionPositionSelect = document.getElementById('videoCaptionPositionSelect');
+  videoCaptionWidthInput = document.getElementById('videoCaptionWidthInput');
+  videoCaptionFontSizeInput = document.getElementById('videoCaptionFontSizeInput');
+  videoCaptionTextColorInput = document.getElementById('videoCaptionTextColorInput');
+  videoCaptionBackgroundColorInput = document.getElementById('videoCaptionBackgroundColorInput');
+  videoCaptionAccentColorInput = document.getElementById('videoCaptionAccentColorInput');
+  videoCaptionUppercaseToggle = document.getElementById('videoCaptionUppercaseToggle');
+  videoCaptionSegmentList = document.getElementById('videoCaptionSegmentList');
+  videoCaptionSegmentEmpty = document.getElementById('videoCaptionSegmentEmpty');
+  videoCaptionSegmentStartInput = document.getElementById('videoCaptionSegmentStartInput');
+  videoCaptionSegmentEndInput = document.getElementById('videoCaptionSegmentEndInput');
+  videoCaptionSegmentTextInput = document.getElementById('videoCaptionSegmentTextInput');
+  videoCaptionSegmentAddBtn = document.getElementById('videoCaptionSegmentAddBtn');
+  videoCaptionSegmentRemoveBtn = document.getElementById('videoCaptionSegmentRemoveBtn');
+  videoGenerateCaptionsBtn = document.getElementById('videoGenerateCaptionsBtn');
+  videoExtractAudioBtn = document.getElementById('videoExtractAudioBtn');
+  videoSourceModeSelect = document.getElementById('videoSourceModeSelect');
+  videoSourceUrlInput = document.getElementById('videoSourceUrlInput');
+  videoApplySourceBtn = document.getElementById('videoApplySourceBtn');
   audioElementWidthInput = document.getElementById('audioElementWidthInput');
   audioElementHeightInput = document.getElementById('audioElementHeightInput');
   audioElementRotationInput = document.getElementById('audioElementRotationInput');
   audioElementVisibleToggle = document.getElementById('audioElementVisibleToggle');
   audioElementLoopToggle = document.getElementById('audioElementLoopToggle');
+  audioCaptionEnabledToggle = document.getElementById('audioCaptionEnabledToggle');
+  audioCaptionPositionSelect = document.getElementById('audioCaptionPositionSelect');
+  audioCaptionWidthInput = document.getElementById('audioCaptionWidthInput');
+  audioCaptionFontSizeInput = document.getElementById('audioCaptionFontSizeInput');
+  audioCaptionTextColorInput = document.getElementById('audioCaptionTextColorInput');
+  audioCaptionBackgroundColorInput = document.getElementById('audioCaptionBackgroundColorInput');
+  audioCaptionAccentColorInput = document.getElementById('audioCaptionAccentColorInput');
+  audioCaptionUppercaseToggle = document.getElementById('audioCaptionUppercaseToggle');
+  audioCaptionSegmentList = document.getElementById('audioCaptionSegmentList');
+  audioCaptionSegmentEmpty = document.getElementById('audioCaptionSegmentEmpty');
+  audioCaptionSegmentStartInput = document.getElementById('audioCaptionSegmentStartInput');
+  audioCaptionSegmentEndInput = document.getElementById('audioCaptionSegmentEndInput');
+  audioCaptionSegmentTextInput = document.getElementById('audioCaptionSegmentTextInput');
+  audioCaptionSegmentAddBtn = document.getElementById('audioCaptionSegmentAddBtn');
+  audioCaptionSegmentRemoveBtn = document.getElementById('audioCaptionSegmentRemoveBtn');
+  audioGenerateCaptionsBtn = document.getElementById('audioGenerateCaptionsBtn');
   audioReplaceSourceBtn = document.getElementById('audioReplaceSourceBtn');
+  audioSourceModeSelect = document.getElementById('audioSourceModeSelect');
+  audioSourceUrlInput = document.getElementById('audioSourceUrlInput');
+  audioApplySourceBtn = document.getElementById('audioApplySourceBtn');
   layerBringForwardBtn = document.getElementById('layerBringForwardBtn');
   layerSendBackwardBtn = document.getElementById('layerSendBackwardBtn');
   layerBringToFrontBtn = document.getElementById('layerBringToFrontBtn');
@@ -7340,7 +11678,7 @@ document.addEventListener('DOMContentLoaded', () => {
   aiAssistantAttachmentPreview = document.getElementById('aiAssistantAttachmentPreview');
   aiAssistantImageInput = document.getElementById('aiAssistantImageInput');
   aiReferenceCard = document.getElementById('aiReferenceCard');
-  [textEditorCard, blockEditorCard, imageEditorCard, quizEditorCard, audioEditorCard, floatingButtonEditorCard, videoEditorCard, backgroundEditorCard, eraserEditorCard, animationEditorCard].forEach(enableStageEditorDragging);
+  [textEditorCard, blockEditorCard, imageEditorCard, quizEditorCard, audioEditorCard, floatingButtonEditorCard, videoEditorCard, backgroundEditorCard, eraserEditorCard, penEditorCard, animationEditorCard].forEach(enableStageEditorDragging);
   document.querySelectorAll('.logout-btn').forEach((button) => button.addEventListener('click', handleLogout));
   builderPanelToggleBtn?.addEventListener('click', toggleBuilderPanel);
   document.getElementById('addSlideBtn').addEventListener('click', () => addSlide(`Slide ${builderState.slides.length + 1}`));
@@ -7348,6 +11686,10 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('clearStageBtn').addEventListener('click', clearCurrentSlide);
   previewStageBtn?.addEventListener('click', toggleStudentPreview);
   slideList.addEventListener('click', (event) => {
+    if (suppressSlideChipClick) {
+      event.preventDefault();
+      return;
+    }
     const button = event.target.closest('button[data-slide-id]');
     if (!button) return;
     setActiveSlide(button.dataset.slideId);
@@ -7363,6 +11705,74 @@ document.addEventListener('DOMContentLoaded', () => {
     renderSlideList();
     renderSlide();
     commitHistoryState();
+  });
+  slideList.addEventListener('dragstart', (event) => {
+    const button = event.target.closest('button[data-slide-id]');
+    if (!button) return;
+    draggingSlideId = button.dataset.slideId;
+    slideDropTargetId = draggingSlideId;
+    slideDropPlacement = 'after';
+    suppressSlideChipClick = false;
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', draggingSlideId);
+    }
+    syncSlideDropVisualState();
+  });
+  slideList.addEventListener('dragover', (event) => {
+    if (!draggingSlideId) {
+      return;
+    }
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = 'move';
+    }
+    const button = event.target.closest('button[data-slide-id]');
+    if (!button) {
+      const lastSlide = builderState.slides[builderState.slides.length - 1];
+      if (lastSlide && (slideDropTargetId !== lastSlide.id || slideDropPlacement !== 'after')) {
+        slideDropTargetId = lastSlide.id;
+        slideDropPlacement = 'after';
+        syncSlideDropVisualState();
+      }
+      return;
+    }
+    const targetSlideId = button.dataset.slideId;
+    if (!targetSlideId || targetSlideId === draggingSlideId) {
+      return;
+    }
+    const bounds = button.getBoundingClientRect();
+    const nextPlacement = event.clientX < bounds.left + bounds.width / 2 ? 'before' : 'after';
+    if (slideDropTargetId !== targetSlideId || slideDropPlacement !== nextPlacement) {
+      slideDropTargetId = targetSlideId;
+      slideDropPlacement = nextPlacement;
+      syncSlideDropVisualState();
+    }
+  });
+  slideList.addEventListener('drop', (event) => {
+    if (!draggingSlideId) {
+      return;
+    }
+    event.preventDefault();
+    const fallbackId = builderState.slides[builderState.slides.length - 1]?.id || '';
+    const targetSlideId = slideDropTargetId || fallbackId;
+    const moved = moveSlideInStrip(draggingSlideId, targetSlideId, slideDropPlacement);
+    clearSlideDragState();
+    if (moved) {
+      renderSlideList();
+      renderSlide();
+      commitHistoryState();
+      suppressSlideChipClick = true;
+      window.setTimeout(() => {
+        suppressSlideChipClick = false;
+      }, 80);
+    }
+  });
+  slideList.addEventListener('dragend', () => {
+    if (!draggingSlideId && !slideDropTargetId) {
+      return;
+    }
+    clearSlideDragState();
   });
   document.querySelector('.stage-toolbar-menu-main').addEventListener('click', (event) => {
     const button = event.target.closest('button[data-element]');
@@ -7413,6 +11823,14 @@ document.addEventListener('DOMContentLoaded', () => {
     loadCourseModules(event.target.value);
     resetHistoryState();
   });
+  moduleTitleInput?.addEventListener('input', () => {
+    syncModuleCoverPreview();
+    scheduleHistoryCommit();
+  });
+  moduleDescriptionInput?.addEventListener('input', scheduleHistoryCommit);
+  moduleCoverModeSelect?.addEventListener('change', updateModuleCoverModeUi);
+  applyModuleCoverBtn?.addEventListener('click', () => applyModuleCover(moduleCoverModeSelect?.value || 'local'));
+  clearModuleCoverBtn?.addEventListener('click', clearModuleCover);
   saveModuleBtn?.addEventListener('click', saveModule);
   copyPublicModuleLinkBtn?.addEventListener('click', copyPublicModuleLink);
   openPublicModuleLinkBtn?.addEventListener('click', () => {
@@ -7434,14 +11852,15 @@ document.addEventListener('DOMContentLoaded', () => {
       event.target.value = '';
     }
   });
-  moduleTitleInput?.addEventListener('input', scheduleHistoryCommit);
-  moduleDescriptionInput?.addEventListener('input', scheduleHistoryCommit);
   moduleLockNextToggle?.addEventListener('change', updateModuleBehavior);
   modulePublicToggle?.addEventListener('change', updateModuleBehavior);
   syncPublicModuleLinkUi();
+  updateModuleCoverModeUi();
+  syncModuleCoverPreview();
   slideBgInput?.addEventListener('input', updateSlideBackground);
   slideBgUploadBtn?.addEventListener('click', chooseSlideBackgroundMedia);
   backgroundMediaTypeSelect?.addEventListener('change', () => updateBackgroundMediaEditorFields());
+  backgroundBatchToggle?.addEventListener('change', () => updateBackgroundMediaEditorFields());
   backgroundMediaLocalBtn?.addEventListener('click', () => applyBackgroundMediaFromEditor(backgroundMediaTypeSelect?.value || 'image-local'));
   backgroundMediaApplyBtn?.addEventListener('click', () => applyBackgroundMediaFromEditor());
   backgroundMediaClearBtn?.addEventListener('click', clearBackgroundMediaFromEditor);
@@ -7476,6 +11895,7 @@ document.addEventListener('DOMContentLoaded', () => {
   elementAnimationDurationInput?.addEventListener('input', applyElementStyles);
   elementAnimationDelayInput?.addEventListener('input', applyElementStyles);
   elementAnimationLoopToggle?.addEventListener('change', applyElementStyles);
+  elementInitiallyHiddenToggle?.addEventListener('change', applyElementStyles);
   elementGradientToggle?.addEventListener('change', updateGradientFieldsVisibility);
   removeSelectedElementBtn?.addEventListener('click', removeSelectedElement);
   undoActionBtn?.addEventListener('click', undoLastAction);
@@ -7504,9 +11924,18 @@ document.addEventListener('DOMContentLoaded', () => {
   layerSendToBackBtn?.addEventListener('click', () => updateSelectedElementLayer('back'));
   removeImageBackgroundBtn?.addEventListener('click', removeBackgroundFromSelectedImage);
   imageReplaceSourceBtn?.addEventListener('click', replaceSelectedImageSource);
+  imageApplySourceBtn?.addEventListener('click', () => applySelectedImageSourceFromEditor(imageSourceModeSelect?.value || 'local'));
+  imageSourceModeSelect?.addEventListener('change', () => {
+    document.getElementById('imageSourceUrlField')?.classList.toggle('hidden', (imageSourceModeSelect?.value || 'local') !== 'url');
+  });
   blockAttachTextureBtn?.addEventListener('click', replaceSelectedBlockTexture);
   blockClearTextureBtn?.addEventListener('click', clearSelectedBlockTexture);
   audioReplaceSourceBtn?.addEventListener('click', replaceSelectedAudioSource);
+  audioApplySourceBtn?.addEventListener('click', () => applySelectedAudioSourceFromEditor(audioSourceModeSelect?.value || 'local'));
+  audioSourceModeSelect?.addEventListener('change', () => {
+    document.getElementById('audioSourceUrlField')?.classList.toggle('hidden', (audioSourceModeSelect?.value || 'local') !== 'url');
+  });
+  audioGenerateCaptionsBtn?.addEventListener('click', generateCaptionsForSelectedAudio);
   centerTextStageBtn?.addEventListener('click', () => centerSelectedText('stage'));
   centerTextBlockBtn?.addEventListener('click', () => centerSelectedText('block'));
   const syncTextEditor = () => {
@@ -7613,7 +12042,7 @@ document.addEventListener('DOMContentLoaded', () => {
     event.stopPropagation();
     if (!aiAssistantPromptInput) return;
     aiAssistantPromptInput.value = AI_REFERENCE_PROMPT;
-    aiAssistantPromptInput.focus();
+    aiAssistantPromptInput.focus({ preventScroll: true });
     pushAiAssistantFeedback('Referência carregada', 'O pedido de exemplo foi preenchido para você ajustar como quiser.', 'success');
   });
   aiProposalHistoryList?.addEventListener('click', (event) => {
@@ -7640,7 +12069,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (historyAction === 'reuse-prompt') {
       if (aiAssistantPromptInput) {
         aiAssistantPromptInput.value = entry.prompt || '';
-        aiAssistantPromptInput.focus();
+        aiAssistantPromptInput.focus({ preventScroll: true });
       }
       updateAiAssistantStatus('Prompt carregado novamente no assistente.', 'success');
       return;
@@ -7702,6 +12131,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (currentStageEditor === 'eraser' && target.closest('#slideCanvas')) {
       return;
     }
+    if (penState.active && target.closest('#slideCanvas')) {
+      return;
+    }
     if (isPickingFloatingInsertPosition && target.closest('#slideCanvas')) {
       return;
     }
@@ -7717,8 +12149,9 @@ document.addEventListener('DOMContentLoaded', () => {
     closeStageEditors();
   });
   window.addEventListener('resize', () => {
-    ['text', 'block', 'image', 'audio', 'quiz', 'floating', 'video', 'background', 'eraser', 'animation'].forEach(positionStageEditorCard);
+    ['text', 'block', 'image', 'audio', 'quiz', 'floating', 'video', 'background', 'eraser', 'pen', 'animation'].forEach(positionStageEditorCard);
     renderEraserOverlay();
+    renderPenOverlay();
   });
   const syncQuizEditor = () => {
     const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId);
@@ -7787,7 +12220,44 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   eraserClearBtn?.addEventListener('click', clearEraserMask);
   eraserApplyBtn?.addEventListener('click', applyEraserChanges);
+  penColorInput?.addEventListener('input', () => {
+    renderPenPreview();
+    applyPenEditorToElement();
+  });
+  penSizeInput?.addEventListener('input', () => {
+    syncPenSizeInputs('range');
+    renderPenPreview();
+    applyPenEditorToElement();
+  });
+  penSizeNumberInput?.addEventListener('input', () => {
+    syncPenSizeInputs('number');
+    renderPenPreview();
+    applyPenEditorToElement();
+  });
+  penStartDrawingBtn?.addEventListener('click', startPenDrawingSession);
+  penClearPreviewBtn?.addEventListener('click', () => {
+    resetPenDraftState();
+    renderPenPreview();
+    syncPenEditorControls(getActiveSlide()?.elements.find((child) => child.id === selectedElementId) || null);
+  });
   [
+    floatingButtonLabelInput,
+    floatingInputPlaceholderInput,
+    floatingInputSubmitLabelInput,
+    floatingInputCompareTextInput,
+    floatingInputCompareCaseToggle,
+    floatingInputCompareImageToggle,
+    floatingInputCompareImageUrlInput,
+    floatingInputSuccessInput,
+    floatingInputErrorInput,
+    floatingInputAllowImageToggle,
+    floatingInputAllowAudioToggle,
+    floatingInputBackgroundColorInput,
+    floatingInputLabelColorInput,
+    floatingInputTextColorInput,
+    floatingInputButtonBackgroundColorInput,
+    floatingInputButtonTextColorInput,
+    floatingTriggerTimeInput,
     floatingActionTypeSelect,
     floatingTargetSlideSelect,
     floatingTargetElementSelect,
@@ -7836,25 +12306,175 @@ document.addEventListener('DOMContentLoaded', () => {
     control?.addEventListener('input', syncFloatingButtonEditor);
     control?.addEventListener('change', syncFloatingButtonEditor);
   });
-  [videoTriggerTimeInput, videoTriggerActionSelect, videoTriggerSeekTimeInput].forEach((control) => {
+  floatingInputCompareImageFileInput?.addEventListener('change', async () => {
+    const file = floatingInputCompareImageFileInput.files?.[0];
+    if (!file) {
+      return;
+    }
+    const dataUrl = await readLocalFileAsDataUrl(file).catch(() => '');
+    if (floatingInputCompareImageUrlInput && dataUrl) {
+      floatingInputCompareImageUrlInput.value = dataUrl;
+    }
+    if (floatingInputCompareImageFileInput) {
+      floatingInputCompareImageFileInput.value = '';
+    }
+    syncFloatingButtonEditor();
+  });
+  floatingInputCompareImageClearBtn?.addEventListener('click', () => {
+    if (floatingInputCompareImageUrlInput) {
+      floatingInputCompareImageUrlInput.value = '';
+    }
+    if (floatingInputCompareImageFileInput) {
+      floatingInputCompareImageFileInput.value = '';
+    }
+    syncFloatingButtonEditor();
+  });
+  [
+    videoTriggerTimeInput,
+    videoTriggerActionSelect,
+    videoTriggerSeekTimeInput,
+    videoTriggerActionTextInput,
+    videoTriggerReplaceModeSelect,
+    videoTriggerReplaceCounterStartInput,
+    videoTriggerReplaceCounterStepInput,
+    videoTriggerAudioVisibleToggle,
+    videoTriggerAudioLoopToggle,
+    videoTriggerTextColorInput,
+    videoTriggerTextBgColorInput,
+    videoTriggerTextFontSizeInput,
+    videoTriggerTextFontFamilySelect,
+    videoTriggerTextFontWeightSelect,
+    videoTriggerTextAlignSelect,
+    videoTriggerTextBackgroundToggle,
+    videoTriggerTextBorderToggle,
+    videoTriggerInsertXInput,
+    videoTriggerInsertYInput,
+    videoTriggerInsertWidthInput,
+    videoTriggerInsertHeightInput,
+    videoTriggerMoveXInput,
+    videoTriggerMoveYInput,
+    videoTriggerMoveDurationInput,
+    videoTriggerQuizQuestionInput,
+    videoTriggerQuizOptionsInput,
+    videoTriggerQuizCorrectSelect,
+    videoTriggerQuizSuccessInput,
+    videoTriggerQuizErrorInput,
+    videoTriggerQuizActionLabelInput,
+    videoTriggerQuizBackgroundColorInput,
+    videoTriggerQuizQuestionColorInput,
+    videoTriggerQuizOptionBackgroundColorInput,
+    videoTriggerQuizOptionTextColorInput,
+    videoTriggerQuizButtonBackgroundColorInput,
+    videoTriggerQuizPointsInput,
+    videoTriggerQuizLockOnWrongToggle,
+    videoTriggerQuizPlaySourceVideoToggle
+  ].forEach((control) => {
     control?.addEventListener('input', syncVideoEditor);
     control?.addEventListener('change', syncVideoEditor);
   });
   [videoTriggerTargetElementSelect].forEach((control) => {
     control?.addEventListener('change', syncVideoEditor);
   });
+  [videoTriggerTargetSlideSelect, videoTriggerUrlInput].forEach((control) => {
+    control?.addEventListener('input', syncVideoEditor);
+    control?.addEventListener('change', syncVideoEditor);
+  });
+  [videoCaptionEnabledToggle, videoCaptionPositionSelect, videoCaptionWidthInput, videoCaptionFontSizeInput, videoCaptionTextColorInput, videoCaptionBackgroundColorInput, videoCaptionAccentColorInput, videoCaptionUppercaseToggle].forEach((control) => {
+    control?.addEventListener('input', syncVideoEditor);
+    control?.addEventListener('change', syncVideoEditor);
+  });
+  [videoCaptionSegmentStartInput, videoCaptionSegmentEndInput].forEach((control) => {
+    control?.addEventListener('input', () => applyCaptionSegmentFieldChanges('video'));
+    control?.addEventListener('change', () => applyCaptionSegmentFieldChanges('video'));
+  });
+  videoCaptionSegmentTextInput?.addEventListener('input', () => applyCaptionSegmentTextDraft('video'));
+  videoCaptionSegmentTextInput?.addEventListener('change', () => applyCaptionSegmentFieldChanges('video'));
+  videoCaptionSegmentAddBtn?.addEventListener('click', () => addCaptionSegment('video'));
+  videoCaptionSegmentRemoveBtn?.addEventListener('click', () => removeCaptionSegment('video'));
+  videoCaptionSegmentList?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-caption-segment-type="video"]');
+    if (!button) {
+      return;
+    }
+    selectedVideoCaptionSegmentIndex = Number(button.dataset.captionSegmentIndex) || 0;
+    const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId && child.type === 'video');
+    if (element) {
+      renderCaptionSegmentEditor('video', element);
+    }
+  });
+  videoApplySourceBtn?.addEventListener('click', () => applySelectedVideoSourceFromEditor(videoSourceModeSelect?.value || 'local'));
+  videoSourceModeSelect?.addEventListener('change', () => {
+    document.getElementById('videoSourceUrlField')?.classList.toggle('hidden', (videoSourceModeSelect?.value || 'local') !== 'url');
+  });
+  videoGenerateCaptionsBtn?.addEventListener('click', generateCaptionsForSelectedVideo);
+  videoExtractAudioBtn?.addEventListener('click', extractAudioFromSelectedVideo);
   [imageElementWidthInput, imageElementHeightInput, imageElementRotationInput, imageElementObjectFitSelect, imageElementStudentDragToggle].forEach((control) => {
     control?.addEventListener('input', syncImageEditor);
     control?.addEventListener('change', syncImageEditor);
   });
-  [audioElementWidthInput, audioElementHeightInput, audioElementRotationInput, audioElementVisibleToggle, audioElementLoopToggle].forEach((control) => {
+  [audioElementWidthInput, audioElementHeightInput, audioElementRotationInput, audioElementVisibleToggle, audioElementLoopToggle, audioCaptionEnabledToggle, audioCaptionPositionSelect, audioCaptionWidthInput, audioCaptionFontSizeInput, audioCaptionTextColorInput, audioCaptionBackgroundColorInput, audioCaptionAccentColorInput, audioCaptionUppercaseToggle].forEach((control) => {
     control?.addEventListener('input', syncAudioEditor);
     control?.addEventListener('change', syncAudioEditor);
   });
+  [audioCaptionSegmentStartInput, audioCaptionSegmentEndInput].forEach((control) => {
+    control?.addEventListener('input', () => applyCaptionSegmentFieldChanges('audio'));
+    control?.addEventListener('change', () => applyCaptionSegmentFieldChanges('audio'));
+  });
+  audioCaptionSegmentTextInput?.addEventListener('input', () => applyCaptionSegmentTextDraft('audio'));
+  audioCaptionSegmentTextInput?.addEventListener('change', () => applyCaptionSegmentFieldChanges('audio'));
+  audioCaptionSegmentAddBtn?.addEventListener('click', () => addCaptionSegment('audio'));
+  audioCaptionSegmentRemoveBtn?.addEventListener('click', () => removeCaptionSegment('audio'));
+  audioCaptionSegmentList?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-caption-segment-type="audio"]');
+    if (!button) {
+      return;
+    }
+    selectedAudioCaptionSegmentIndex = Number(button.dataset.captionSegmentIndex) || 0;
+    const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId && child.type === 'audio');
+    if (element) {
+      renderCaptionSegmentEditor('audio', element);
+    }
+  });
   floatingPickPlacementBtn?.addEventListener('click', toggleFloatingPlacementPicker);
+  videoPickPlacementBtn?.addEventListener('click', toggleVideoPlacementPicker);
   floatingPickTargetElementBtn?.addEventListener('click', toggleFloatingTargetElementPicker);
+  floatingAddTriggerBtn?.addEventListener('click', addFloatingTrigger);
+  floatingDuplicateTriggerBtn?.addEventListener('click', duplicateFloatingTrigger);
+  floatingRemoveTriggerBtn?.addEventListener('click', removeFloatingTrigger);
+  floatingTriggerList?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-floating-trigger-id]');
+    if (!button) {
+      return;
+    }
+    selectedFloatingTriggerId = button.dataset.floatingTriggerId || null;
+    const element = getSelectedActionTriggerElement();
+    if (element) {
+      updateFloatingButtonEditorVisibility(element, { forceOpen: true });
+      updateFloatingPlacementPreview();
+    }
+  });
+  videoAddTriggerBtn?.addEventListener('click', addVideoTrigger);
+  videoDuplicateTriggerBtn?.addEventListener('click', duplicateVideoTrigger);
+  videoRemoveTriggerBtn?.addEventListener('click', removeVideoTrigger);
+  videoTriggerList?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-video-trigger-id]');
+    if (!button) {
+      return;
+    }
+    selectedVideoTriggerId = button.dataset.videoTriggerId || null;
+    const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId && child.type === 'video');
+    if (element) {
+      updateVideoEditorVisibility(element, { forceOpen: true });
+    }
+  });
   slideCanvas?.addEventListener('click', (event) => {
     if (previewState.active) {
+      return;
+    }
+    if (penState.active) {
+      return;
+    }
+    if (handleVideoPlacementPick(event)) {
       return;
     }
     if (handleFloatingPlacementPick(event)) {
@@ -7913,6 +12533,12 @@ document.addEventListener('DOMContentLoaded', () => {
       isPickingFloatingInsertPosition = false;
       isPickingFloatingTargetElement = false;
       updateFloatingPlacementPreview();
+      updateVideoPlacementPreview();
+      return;
+    }
+    if (event.key === 'Escape' && currentStageEditor === 'pen') {
+      event.preventDefault();
+      closePenSession({ keepEditor: false });
     }
   });
   syncKeyboardMoveStepInput();
@@ -7921,6 +12547,7 @@ document.addEventListener('DOMContentLoaded', () => {
     elementHeightInput,
     elementRotationInput,
     elementLayerInput,
+    elementOpacityInput,
     elementTextColorInput,
     elementFontSizeInput,
     elementFontFamilySelect,
@@ -7948,13 +12575,23 @@ document.addEventListener('DOMContentLoaded', () => {
   resetHistoryState();
   renderAiAssistantAttachmentPreview();
   loadAiProposalHistory();
-  loadBuilderCourses();
+  loadBuilderCourses().finally(() => {
+    draftRestoreCompleted = true;
+    const restored = restoreBuilderDraftIfAvailable();
+    if (!restored) {
+      scheduleBuilderAutosave();
+    }
+  });
   loadTemplateStore();
   loadAiAssistantSettings();
+  loadBuilderProfessorCreditsStatus();
   renderAiAssistantActions();
   renderAiAssistantFeedback();
   renderAiAssistantDebug();
   renderAiProposalHistory();
+  renderBuilderProfessorCreditsStatus();
+  window.addEventListener('pagehide', persistBuilderDraftLocally);
+  window.addEventListener('beforeunload', persistBuilderDraftLocally);
   window.addEventListener('resize', () => {
     ensureActiveSlideBounds();
     syncBuilderPanelLayout();

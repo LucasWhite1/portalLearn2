@@ -7,9 +7,14 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT UNIQUE NOT NULL,
   phone TEXT,
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('student', 'admin')),
+  role TEXT NOT NULL CHECK (role IN ('student', 'admin', 'professor')),
   class_name TEXT,
+  owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
   is_active BOOLEAN DEFAULT TRUE,
+  ai_credits NUMERIC(12,2) NOT NULL DEFAULT 0,
+  ai_credits_updated_at TIMESTAMPTZ DEFAULT NOW(),
+  student_limit INT,
+  storage_limit_bytes BIGINT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -18,7 +23,20 @@ CREATE TABLE IF NOT EXISTS courses (
   title TEXT NOT NULL,
   description TEXT,
   slug TEXT UNIQUE NOT NULL,
+  cover_image TEXT NOT NULL DEFAULT '',
+  show_in_store BOOLEAN NOT NULL DEFAULT FALSE,
+  owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS course_access_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  course_id UUID NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (user_id, course_id)
 );
 
 CREATE TABLE IF NOT EXISTS modules (
@@ -52,6 +70,7 @@ CREATE TABLE IF NOT EXISTS notifications (
   target_type TEXT NOT NULL CHECK (target_type IN ('student', 'class', 'all')),
   target_value TEXT,
   created_by UUID REFERENCES users(id),
+  owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -62,6 +81,7 @@ CREATE TABLE IF NOT EXISTS admin_ai_settings (
   base_url TEXT NOT NULL,
   model TEXT NOT NULL,
   encrypted_api_key TEXT NOT NULL,
+  ai_credit_cost_per_call NUMERIC(12,2) NOT NULL DEFAULT 0.5,
   system_prompt TEXT,
   require_confirmation BOOLEAN NOT NULL DEFAULT TRUE,
   is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -104,6 +124,17 @@ VALUES (
   'student',
   'Turma Master'
 );
+
+INSERT INTO users (full_name, email, phone, password_hash, role, class_name)
+VALUES (
+  'Professor Exemplo',
+  'professor@curso.com',
+  '+55 11 11111-1111',
+  crypt('ProfessorPass2026!', gen_salt('bf')),
+  'professor',
+  'Professor'
+)
+ON CONFLICT (email) DO NOTHING;
 
 WITH student AS (
   SELECT id FROM users WHERE email = 'aluno@curso.com'

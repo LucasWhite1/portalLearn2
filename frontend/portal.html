@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
@@ -13,6 +13,7 @@
       <p>Conteúdos ao vivo, notificações e suporte.</p>
       <ul class="nav-menu">
         <li><button type="button" class="nav-link" data-target="courseList">📚 <span>Conteúdos</span></button></li>
+        <li><button type="button" class="nav-link" data-target="courseStoreSection">🛍️ <span>Loja de cursos</span></button></li>
         <li><button type="button" class="nav-link" data-target="portalProgressSection">⭐ <span>Progresso</span></button></li>
         <li><button type="button" class="nav-link" data-target="notificationPanel">🔔 <span>Notificações</span></button></li>
         <li><button type="button" class="nav-link" data-target="portalTutoringSection">🧑‍🏫 <span>Meu Tutoring</span></button></li>
@@ -20,7 +21,7 @@
       </ul>
     </aside>
     <main class="main-panel">
-      <section class="dashboard-hero">
+      <section class="dashboard-hero" data-section="courseList">
         <div>
           <div class="badge">PROGRESSO CONECTADO</div>
           <h1>Olá, <span id="studentDisplayName">Aluno</span></h1>
@@ -28,12 +29,12 @@
         </div>
       </section>
 
-      <section class="module-preview">
+      <section class="module-preview" data-section="courseList">
         <h2>Trilhas em produção</h2>
         <p>Seu progresso fica registrado aqui; módulos interativos são liberados pelos admins e aparecem automaticamente quando estiverem prontos.</p>
       </section>
 
-      <div class="card-grid" id="portalProgressSection">
+      <div class="card-grid" id="portalProgressSection" data-section="portalProgressSection">
         <div class="card">
           <h2>Vídeo em andamento</h2>
           <p id="videoTitle">Sem aula selecionada</p>
@@ -54,14 +55,22 @@
         </div>
       </div>
 
-      <section class="list-panel course-list-panel" id="courseList">
+      <section class="list-panel course-list-panel" id="courseList" data-section="courseList">
         <h2>Seus cursos matriculados</h2>
         <div class="course-grid" id="courseGrid">
           <p class="muted" style="margin:0;">Assim que a API retornar dados, os cards aparecem aqui.</p>
         </div>
       </section>
 
-      <section class="module-preview" id="portalTutoringSection">
+      <section class="list-panel course-list-panel" id="courseStoreSection" data-section="courseStoreSection">
+        <h2>Loja de cursos</h2>
+        <p class="muted" style="margin:0;">Veja outros cursos disponíveis no portal e solicite acesso quando quiser entrar em uma nova trilha.</p>
+        <div class="course-grid course-store-grid" id="courseStoreGrid">
+          <p class="muted" style="margin:0;">A vitrine de cursos aparece aqui.</p>
+        </div>
+      </section>
+
+      <section class="module-preview" id="portalTutoringSection" data-section="portalTutoringSection">
         <h2>Meu Tutoring</h2>
         <p>Acompanhe exatamente onde você parou, quanto já concluiu e qual é o próximo passo recomendado para continuar a trilha.</p>
         <div class="card-grid">
@@ -88,7 +97,7 @@
         </div>
       </section>
 
-      <section class="notification-panel" id="notificationPanel">
+      <section class="notification-panel" id="notificationPanel" data-section="notificationPanel">
         <h2>Notificações</h2>
         <div class="notification">
           <p style="margin: 0; color: #8b92b1;">Nenhuma notificação disponível.</p>
@@ -96,6 +105,35 @@
       </section>
     </main>
   </div>
+
+  <!-- Modal de Chat do Curso -->
+  <div id="chatModal" class="chat-modal hidden" role="dialog" aria-modal="true" aria-label="Chat do curso">
+    <div class="chat-modal-backdrop" id="chatModalBackdrop"></div>
+    <div class="chat-modal-card">
+      <div class="chat-modal-header">
+        <div>
+          <h3 id="chatModalTitle">Chat do Curso</h3>
+          <p id="chatModalSubtitle" style="margin:0; font-size:0.85rem; color:#8b92b1;">Tire dúvidas com o professor e outros alunos</p>
+        </div>
+        <button class="secondary-btn small" id="chatModalClose" type="button" aria-label="Fechar chat">✕</button>
+      </div>
+      <div class="chat-messages" id="chatMessages">
+        <p style="margin:0; color:#8b92b1; text-align:center;">Carregando mensagens...</p>
+      </div>
+      <form class="chat-input-area" id="chatForm">
+        <input
+          type="text"
+          id="chatInput"
+          placeholder="Digite sua mensagem... (máx. 1000 caracteres)"
+          maxlength="1000"
+          autocomplete="off"
+          required
+        />
+        <button type="submit" class="primary-btn" id="chatSendBtn" style="width:auto; padding:0.75rem 1.25rem;">Enviar</button>
+      </form>
+    </div>
+  </div>
+
   <script src="script.js" type="module"></script>
 </body>
 </html>

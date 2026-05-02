@@ -5,11 +5,11 @@ function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization || '';
   const [scheme, token] = authHeader.split(' ');
   if (scheme !== 'Bearer' || !isSessionToken(token)) {
-    return res.status(401).json({ message: 'Sessão expirada ou não encontrada' });
+    return res.status(401).json({ message: 'Sessao expirada ou nao encontrada' });
   }
   const user = getSession(token);
   if (!user) {
-    return res.status(401).json({ message: 'Sessão expirada ou não encontrada' });
+    return res.status(401).json({ message: 'Sessao expirada ou nao encontrada' });
   }
   req.user = user;
   next();
@@ -17,8 +17,9 @@ function requireAuth(req, res, next) {
 
 function requireRole(role) {
   return (req, res, next) => {
-    if (!req.user || req.user.role !== role) {
-      return res.status(403).json({ message: 'Permissão negada' });
+    const allowedRoles = Array.isArray(role) ? role : [role];
+    if (!req.user || !allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({ message: 'Permissao negada' });
     }
     next();
   };

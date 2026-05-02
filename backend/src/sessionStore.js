@@ -1,7 +1,7 @@
 ﻿const { randomBytes } = require('crypto');
 
 const sessions = new Map();
-const SESSION_TTL = 1000 * 60 * 60; // 1h
+const SESSION_TTL = 1000 * 60 * 60 * 24; // 24h
 
 function createSession(user) {
   const token = randomBytes(24).toString('hex');

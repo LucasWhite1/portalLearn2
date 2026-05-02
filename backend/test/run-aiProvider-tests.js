@@ -78,9 +78,10 @@ const tests = [
         }))
       }));
       const summary = __test.summarizeSlides(slides);
-      assert.equal(summary.length, 6);
-      assert.equal(summary[0].elements.length, 12);
-      assert.ok(summary[0].elements[0].label.length <= 80);
+      assert.equal(summary.totalSlides, 8);
+      assert.equal(summary.includedSlides, 3);
+      assert.equal(summary.slides[0].elements.length, 6);
+      assert.ok(summary.slides[0].elements[0].label.length <= 48);
     }
   },
   {
@@ -119,6 +120,68 @@ const tests = [
       assert.equal(__test.isRecoverableJsonError(new Error('A IA retornou JSON truncado ou incompleto.')), true);
       assert.equal(__test.isRecoverableJsonError(new Error("Expected ',' or '}' after property value in JSON at position 123")), true);
       assert.equal(__test.isRecoverableJsonError(new Error('Falha de rede externa.')), false);
+    }
+  },
+  {
+    name: 'parse image comparison reply from plain text fallback fields',
+    run() {
+      const parsed = __test.parseNanoBananaJsonReply('matched=true confidence=0.91 reason="Mesmo conteudo visual"');
+      assert.equal(parsed.matched, true);
+      assert.equal(parsed.confidence, 0.91);
+      assert.equal(parsed.reason, 'Mesmo conteudo visual');
+    }
+  },
+  {
+    name: 'detect identical image attachments locally before calling provider',
+    run() {
+      const reference = { mimeType: 'image/png', data: 'YWJjMTIz', name: 'referencia.png' };
+      const same = { mimeType: 'image/jpeg', data: 'YWJjMTIz', name: 'resposta.jpg' };
+      const different = { mimeType: 'image/png', data: 'ZGlmZmVyZW50ZQ==', name: 'outra.png' };
+      assert.equal(__test.areImageAttachmentsIdentical(reference, same), true);
+      assert.equal(__test.areImageAttachmentsIdentical(reference, different), false);
+    }
+  },
+  {
+    name: 'do not infer story flow when request forbids creating more slides',
+    run() {
+      assert.equal(
+        __test.requestSuggestsStoryFlow('Crie um layout apenas para este slide atual e nao crie outros slides.'),
+        false
+      );
+      assert.equal(__test.requestExplicitlyForbidsNewSlides('Nao crie outros slides.'), true);
+    }
+  },
+  {
+    name: 'post process keeps single-slide request on the current slide',
+    run() {
+      const existingSlides = [{ id: 'slide-inicial', title: 'Slide 1', backgroundColor: '#fff', elements: [] }];
+      const actions = __test.postProcessActions(
+        [
+          {
+            type: 'update_slide',
+            slideId: 'slide-inicial',
+            slide: { title: 'Layout profissional', backgroundColor: '#f8fafc' }
+          },
+          {
+            type: 'add_element',
+            slideId: 'slide-inicial',
+            element: {
+              type: 'floatingButton',
+              label: 'Continuar',
+              x: 900,
+              y: 560,
+              width: 180,
+              height: 60
+            }
+          }
+        ],
+        'Crie um layout profissional apenas para este slide atual e nao crie outros slides. Adicione um botao com acao funcional.',
+        existingSlides
+      );
+      assert.equal(actions.some((action) => action.type === 'add_slide'), false);
+      const buttonAction = actions.find((action) => action.type === 'add_element' && action.element?.type === 'floatingButton');
+      assert.ok(buttonAction);
+      assert.notEqual(buttonAction.element.actionConfig?.type, 'none');
     }
   }
 ];

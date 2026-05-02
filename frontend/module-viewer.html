@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -11,16 +12,19 @@
       width: 100%;
       max-width: 100%;
     }
+
     .builder-main {
       display: block;
       width: 100%;
       margin: 0;
       padding: 0;
     }
+
     .builder-stage {
       width: 100%;
       margin: 0;
     }
+
     .stage-shell {
       padding: 1.25rem 1.5rem 2rem;
       width: 100%;
@@ -28,6 +32,7 @@
       margin: 0;
       min-height: 0;
     }
+
     .stage-viewer {
       max-width: none;
       margin: 0;
@@ -37,6 +42,7 @@
       aspect-ratio: var(--module-stage-aspect, 16 / 9);
       max-height: none;
     }
+
     .stage-content-wrapper {
       position: absolute;
       top: 0;
@@ -44,18 +50,143 @@
       transform-origin: top left;
       pointer-events: auto;
     }
+
+    .module-selection-panel.replay-mode {
+      display: grid;
+      gap: 1rem;
+      align-content: start;
+    }
+
+    .replay-status-card,
+    .replay-timeline-card {
+      background: #fff;
+      border: 1px solid rgba(15, 20, 44, 0.08);
+      border-radius: 18px;
+      padding: 1rem;
+      box-shadow: 0 18px 50px rgba(15, 20, 44, 0.08);
+    }
+
+    .replay-status-card p,
+    .replay-timeline-card p {
+      margin: 0;
+    }
+
+    .replay-status-grid {
+      display: grid;
+      gap: 0.6rem;
+      margin-top: 0.85rem;
+    }
+
+    .replay-status-grid strong {
+      display: block;
+      font-size: 1rem;
+      color: #0f142c;
+    }
+
+    .replay-status-grid span {
+      display: block;
+      font-size: 0.82rem;
+      color: #66708f;
+      margin-top: 0.15rem;
+    }
+
+    .replay-timeline-list {
+      display: grid;
+      gap: 0.7rem;
+      margin-top: 0.85rem;
+      max-height: 28rem;
+      overflow: auto;
+      padding-right: 0.25rem;
+    }
+
+    .replay-timeline-item {
+      border: 1px solid rgba(15, 20, 44, 0.09);
+      border-radius: 14px;
+      padding: 0.85rem 0.9rem;
+      text-align: left;
+      background: #fff;
+      cursor: pointer;
+    }
+
+    .replay-timeline-item.active {
+      border-color: #2d6cdf;
+      box-shadow: 0 0 0 3px rgba(45, 108, 223, 0.12);
+    }
+
+    .replay-timeline-item strong,
+    .replay-timeline-item span,
+    .replay-timeline-item small {
+      display: block;
+    }
+
+    .replay-timeline-item span {
+      margin-top: 0.25rem;
+      color: #46506d;
+      font-size: 0.86rem;
+      line-height: 1.45;
+    }
+
+    .replay-timeline-item small {
+      margin-top: 0.45rem;
+      color: #7b84a0;
+      font-size: 0.76rem;
+    }
+
+    .replay-overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 9999;
+    }
+
+    .replay-overlay-callout {
+      position: absolute;
+      max-width: min(320px, calc(100% - 24px));
+      background: rgba(15, 20, 44, 0.9);
+      color: #fff;
+      border-radius: 14px;
+      padding: 0.7rem 0.85rem;
+      box-shadow: 0 14px 36px rgba(15, 20, 44, 0.28);
+      font-size: 0.8rem;
+      line-height: 1.45;
+    }
+
+    .replay-overlay-target {
+      position: absolute;
+      border: 3px solid #ff8a3d;
+      border-radius: 18px;
+      box-shadow: 0 0 0 9999px rgba(15, 20, 44, 0.18), 0 0 0 6px rgba(255, 138, 61, 0.16);
+    }
+
+    .replay-overlay-point {
+      position: absolute;
+      width: 18px;
+      height: 18px;
+      margin-left: -9px;
+      margin-top: -9px;
+      border-radius: 999px;
+      background: #ff8a3d;
+      box-shadow: 0 0 0 6px rgba(255, 138, 61, 0.18);
+    }
+
     @media (max-width: 768px) {
       .builder-page-shell {
         padding: 1rem;
       }
+
       .stage-shell {
         padding: 1rem;
+      }
+
+      .replay-timeline-list {
+        max-height: none;
       }
     }
   </style>
 </head>
-  <body>
-    <div class="builder-page-shell">
+
+<body>
+  <div class="builder-page-shell">
     <header class="builder-header">
       <div>
         <p class="badge">Módulo interativo</p>
@@ -64,6 +195,8 @@
       </div>
       <div class="builder-header-actions">
         <a id="viewerBackLink" class="secondary-btn" href="portal.html">Voltar ao portal</a>
+        <button id="viewerChatBtn" class="chat-btn" type="button" style="border:1px solid rgba(109,99,255,0.3);">💬 Chat
+          do curso</button>
         <button id="viewerLogoutBtn" class="secondary-btn logout-btn" type="button">Sair</button>
       </div>
     </header>
@@ -92,10 +225,45 @@
         <div id="moduleSelection" class="module-selection-panel">
           <h3>Módulos disponíveis</h3>
           <div id="moduleList" class="module-selection-list"></div>
+          <div id="replayStatusCard" class="replay-status-card" hidden>
+            <p class="badge">Replay do aluno</p>
+            <div id="replayStatusGrid" class="replay-status-grid"></div>
+          </div>
+          <div id="replayTimelineCard" class="replay-timeline-card" hidden>
+            <h3 style="margin:0;">Linha do tempo visual</h3>
+            <p class="muted" style="margin-top:0.25rem;">Clique em um passo para abrir exatamente o slide em que ele
+              aconteceu.</p>
+            <div id="replayTimelineList" class="replay-timeline-list"></div>
+          </div>
         </div>
       </section>
     </main>
   </div>
   <script type="module" src="module-viewer.js"></script>
+
+  <!-- Modal de Chat do Curso -->
+  <div id="chatModal" class="chat-modal hidden" role="dialog" aria-modal="true" aria-label="Chat do curso">
+    <div class="chat-modal-backdrop" id="chatModalBackdrop"></div>
+    <div class="chat-modal-card">
+      <div class="chat-modal-header">
+        <div>
+          <h3 id="chatModalTitle">Chat do Curso</h3>
+          <p style="margin:0; font-size:0.85rem; color:#8b92b1;">Tire dúvidas com o professor e outros alunos</p>
+        </div>
+        <button class="secondary-btn small" id="chatModalClose" type="button" aria-label="Fechar chat">✕</button>
+      </div>
+      <div class="chat-messages" id="chatMessages">
+        <p style="margin:0; color:#8b92b1; text-align:center;">Carregando mensagens...</p>
+      </div>
+      <form class="chat-input-area" id="chatForm">
+        <input type="text" id="chatInput" placeholder="Digite sua mensagem... (máx. 1000 caracteres)" maxlength="1000"
+          autocomplete="off" required />
+        <button type="submit" class="primary-btn" id="chatSendBtn"
+          style="width:auto; padding:0.75rem 1.25rem;">Enviar</button>
+      </form>
+    </div>
+  </div>
+
 </body>
+
 </html>

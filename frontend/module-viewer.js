@@ -17,6 +17,7 @@ const USER_ROLE_KEY = 'curso-platform-role';
 const DEFAULT_STAGE_SIZE = { width: 1280, height: 720 };
 const MIN_SLIDE_VIEW_SECONDS = 3;
 const MIN_VIDEO_COMPLETION_RATIO = 0.9;
+const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 const IMAGE_FALLBACK_SRC =
   "data:image/svg+xml;utf8," +
   encodeURIComponent(
@@ -60,6 +61,15 @@ const fetchPublicModule = async (moduleId) => {
   return payload;
 };
 
+const fetchAdminReplay = async (userId, courseId) => {
+  const response = await authorizedFetch(`/api/admin/reports/${encodeURIComponent(userId)}/${encodeURIComponent(courseId)}/replay`);
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(payload?.message || 'Nao foi possivel carregar o replay do aluno.');
+  }
+  return payload;
+};
+
 const handleLogout = async () => {
   try {
     await authorizedFetch('/api/auth/logout', { method: 'POST' });
@@ -76,13 +86,18 @@ const viewerState = {
   moduleId: null,
   courseId: null,
   slideIndex: 0,
-  isPublic: false
+  isPublic: false,
+  isReplay: false,
+  replayUserId: null,
+  replayEventIndex: -1
 };
 
 const params = new URLSearchParams(window.location.search);
 viewerState.isPublic = Boolean(params.get('publicModuleId'));
+viewerState.isReplay = params.get('adminReplay') === '1';
 viewerState.moduleId = params.get('moduleId') || params.get('publicModuleId');
 viewerState.courseId = params.get('courseId');
+viewerState.replayUserId = params.get('userId');
 
 const getVisibleCourseModules = (courses) => {
   if (!Array.isArray(courses)) {
@@ -114,8 +129,14 @@ let moduleList;
 let moduleSelection;
 let viewerBackLink;
 let viewerLogoutBtn;
+let replayStatusCard;
+let replayStatusGrid;
+let replayTimelineCard;
+let replayTimelineList;
 let viewerModules = [];
 let moduleStageDimensions = null;
+let replayPayload = null;
+let replayEvents = [];
 const QUIZ_ATTEMPTS_STORAGE_KEY = 'curso-platform-quiz-attempts';
 const BUTTON_RULES_STORAGE_KEY = 'curso-platform-button-rules';
 const viewerQuizAttempts = new Map();
@@ -124,13 +145,34 @@ const viewerTriggeredDetectors = new Set();
 const viewerReplaceCounters = new Map();
 const viewerHiddenElements = new Map();
 const viewerAnimationState = new Map();
+const viewerTimedSlideTriggers = new Map();
+const viewerTimedVideoTriggers = new Map();
+const viewerMediaState = new Map();
 let lastRenderedViewerSlideKey = null;
+let activeTimedViewerSlideKey = null;
+let timedViewerSlideTriggerTimers = [];
+let currentViewerSlideStartedAt = 0;
+let lastLoggedViewerSlideKey = null;
 let lastSavedVideoPosition = 0;
 let lastTrackedVideoPosition = 0;
 let currentSlideEnteredAt = 0;
 let currentSlideProgressTimer = null;
 let activeBackgroundMediaNode = null;
-let pendingBackgroundAudioUnlock = false;
+
+const isReplayMode = () => viewerState.isReplay;
+
+const formatReplayDate = (value) => {
+  if (!value) return 'Sem data';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  return parsed.toLocaleString('pt-BR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+};
 const ANIMATABLE_ELEMENT_TYPES = new Set(['text', 'block', 'floatingButton', 'image']);
 const MOTION_ANIMATION_TYPE = 'motion-recording';
 const ANIMATION_PRESETS = new Set(['none', 'fade-in', 'fade-out', 'slide-left', 'slide-right', 'rotate-in', 'pulse', 'float', 'zoom-in', MOTION_ANIMATION_TYPE]);
@@ -161,11 +203,87 @@ const escapeHtml = (value = '') =>
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 
+const escapeAttribute = (value = '') => escapeHtml(value);
+
 const renderPlainTextHtml = (value = '') =>
   escapeHtml(String(value || ''))
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
     .replace(/\n/g, '<br>');
+
+const normalizeStringList = (value = []) => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item, index) => {
+      if (typeof item === 'string') {
+        return item.trim();
+      }
+      if (item && typeof item === 'object') {
+        const candidates = [item.text, item.label, item.content, item.value, item.option];
+        const match = candidates.find((entry) => typeof entry === 'string' && entry.trim());
+        if (match) {
+          return match.trim();
+        }
+      }
+      return String(item ?? `Opcao ${index + 1}`).trim();
+    })
+    .filter(Boolean);
+};
+
+const getMeaningfulQuizOptionsSource = (primaryConfig = {}, fallbackConfig = {}) => {
+  const primaryOptions = Array.isArray(primaryConfig?.quizOptions)
+    ? primaryConfig.quizOptions
+    : (Array.isArray(primaryConfig?.options) ? primaryConfig.options : []);
+  const fallbackOptions = Array.isArray(fallbackConfig?.quizOptions)
+    ? fallbackConfig.quizOptions
+    : (Array.isArray(fallbackConfig?.options) ? fallbackConfig.options : []);
+  const primaryLooksCorrupted =
+    Array.isArray(primaryOptions) &&
+    primaryOptions.length > 0 &&
+    primaryOptions.every((item) => item == null);
+  if (primaryLooksCorrupted || (!primaryOptions.length && fallbackOptions.length)) {
+    return fallbackOptions;
+  }
+  return primaryOptions;
+};
+
+const truncateChatPreview = (value = '', max = 160) => {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  return normalized.length > max ? `${normalized.slice(0, max - 1)}...` : normalized;
+};
+
+const formatChatReplyAuthor = (message) => {
+  if (!message) return 'Mensagem';
+  return message.reply_to_role === 'admin' || message.reply_to_role === 'professor'
+    ? `${message.reply_to_full_name || 'Professor'} (Professor)`
+    : (message.reply_to_full_name || 'Aluno');
+};
+
+const buildReplyQuoteMarkup = (message) => {
+  if (!message?.reply_to_message) {
+    return '';
+  }
+  return `
+    <div class="chat-reply-quote">
+      <strong>${escapeHtml(formatChatReplyAuthor(message))}</strong>
+      <p>${escapeHtml(truncateChatPreview(message.reply_to_message, 160))}</p>
+    </div>
+  `;
+};
+
+const formatProgressEventType = (type = '') => {
+  const labels = {
+    slide_view: 'Entrou no slide',
+    quiz_answer: 'Respondeu quiz',
+    drag_end: 'Arrastou elemento',
+    text_input: 'Preencheu campo',
+    drawing: 'Rabiscou no quadro'
+  };
+  return labels[type] || type || 'Evento';
+};
 
 const getBlockTextureFit = (element) => {
   const value = String(element?.textureFit || '').trim();
@@ -224,14 +342,207 @@ const resetViewerAnimationStateForElement = (slide, elementId) => {
   viewerAnimationState.delete(getAnimationStateKey(getStableSlideKey(slide, viewerState.slideIndex), elementId));
 };
 
+const createDefaultCaptionStyle = (type = 'video') => ({
+  position: 'bottom',
+  fontSize: type === 'video' ? 28 : 20,
+  textColor: '#ffffff',
+  backgroundColor: '#0f172acc',
+  accentColor: type === 'video' ? '#facc15' : '#38bdf8',
+  uppercase: false
+});
+
+const normalizeCaptionEntries = (entries = []) =>
+  (Array.isArray(entries) ? entries : [])
+    .map((entry) => ({
+      start: Math.max(0, Number(entry?.start) || 0),
+      end: Math.max(0, Number(entry?.end) || 0),
+      text: typeof entry?.text === 'string' ? entry.text.trim() : ''
+    }))
+    .filter((entry) => entry.text && entry.end > entry.start);
+
+const normalizeCaptionStyle = (style = {}, type = 'video') => {
+  const defaults = createDefaultCaptionStyle(type);
+  const stageX = Number(style?.stageX);
+  const stageY = Number(style?.stageY);
+  return {
+    position: ['top', 'center', 'bottom'].includes(String(style?.position || '')) ? String(style.position) : defaults.position,
+    fontSize: Math.max(12, Number(style?.fontSize) || defaults.fontSize),
+    textColor: typeof style?.textColor === 'string' && style.textColor ? style.textColor : defaults.textColor,
+    backgroundColor:
+      typeof style?.backgroundColor === 'string' && style.backgroundColor ? style.backgroundColor : defaults.backgroundColor,
+    accentColor: typeof style?.accentColor === 'string' && style.accentColor ? style.accentColor : defaults.accentColor,
+    uppercase: Boolean(style?.uppercase),
+    width: style?.width !== undefined && style?.width !== '' && style?.width !== null ? Math.max(40, Number(style.width) || 40) : null,
+    freePosition: Boolean(style?.freePosition),
+    stageX: Number.isFinite(stageX) ? stageX : null,
+    stageY: Number.isFinite(stageY) ? stageY : null
+  };
+};
+
+const normalizeMediaCaptionConfig = (element, type = 'video') => {
+  if (!element || !['audio', 'video'].includes(element.type)) {
+    return;
+  }
+  element.captions = normalizeCaptionEntries(element.captions);
+  element.captionsEnabled = typeof element.captionsEnabled === 'boolean' ? element.captionsEnabled : false;
+  element.captionStyle = normalizeCaptionStyle(element.captionStyle, type);
+  element.transcriptText = typeof element.transcriptText === 'string' ? element.transcriptText : '';
+};
+
+const getCaptionSegmentAtTime = (element, currentTime) => {
+  if (currentTime < 0) return null;
+  const safeTime = Math.max(0, Number(currentTime) || 0);
+  return (element?.captions || []).find((entry) => safeTime >= entry.start && safeTime <= entry.end) || null;
+};
+
+const applyCaptionOverlayState = (overlayNode, element, currentTime) => {
+  if (!overlayNode || !element?.captionsEnabled || !(element.captions || []).length) {
+    if (overlayNode) {
+      overlayNode.textContent = '';
+      overlayNode.classList.add('is-hidden');
+    }
+    return;
+  }
+  const segment = getCaptionSegmentAtTime(element, currentTime);
+  if (!segment) {
+    overlayNode.textContent = '';
+    overlayNode.classList.add('is-hidden');
+    return;
+  }
+  const style = normalizeCaptionStyle(element.captionStyle, element.type);
+  overlayNode.textContent = style.uppercase ? segment.text.toUpperCase() : segment.text;
+  overlayNode.dataset.position = style.position;
+  overlayNode.style.setProperty('--caption-font-size', `${style.fontSize}px`);
+  overlayNode.style.setProperty('--caption-color', style.textColor);
+  overlayNode.style.setProperty('--caption-bg', style.backgroundColor);
+  overlayNode.style.setProperty('--caption-accent', style.accentColor);
+  if (style.width) {
+    overlayNode.style.setProperty('--caption-width', style.width + 'px');
+  } else {
+    overlayNode.style.removeProperty('--caption-width');
+  }
+  overlayNode.classList.toggle('is-uppercase', Boolean(style.uppercase));
+  overlayNode.classList.remove('is-hidden');
+};
+
+const getCaptionStageSize = (stageNode) => ({
+  width: Number(stageNode?.clientWidth) || Number(stageNode?.offsetWidth) || 0,
+  height: Number(stageNode?.clientHeight) || Number(stageNode?.offsetHeight) || 0
+});
+
+const getCaptionOverlayPosition = (element, overlayNode, stageNode) => {
+  const stage = getCaptionStageSize(stageNode);
+  const style = normalizeCaptionStyle(element.captionStyle, element.type);
+  const overlayWidth = Math.max(40, overlayNode.offsetWidth || style.width || Math.min(Number(element.width) || 260, stage.width));
+  const overlayHeight = Math.max(24, overlayNode.offsetHeight || Math.round(style.fontSize * 2.2));
+  const stageMaxX = Math.max(0, stage.width - overlayWidth);
+  const stageMaxY = Math.max(0, stage.height - overlayHeight);
+  if (style.freePosition && Number.isFinite(style.stageX) && Number.isFinite(style.stageY)) {
+    return {
+      x: clamp(style.stageX, 0, stageMaxX),
+      y: clamp(style.stageY, 0, stageMaxY)
+    };
+  }
+  const elementX = Number(element.x) || 0;
+  const elementY = Number(element.y) || 0;
+  const elementWidth = Math.max(overlayWidth, Number(element.width) || overlayWidth);
+  const elementHeight = Math.max(overlayHeight, Number(element.height) || overlayHeight);
+  const centeredX = elementX + Math.max(0, (elementWidth - overlayWidth) / 2);
+  let defaultY = elementY + Math.max(0, elementHeight - overlayHeight - 14);
+  if (style.position === 'top') {
+    defaultY = elementY + 14;
+  } else if (style.position === 'center') {
+    defaultY = elementY + Math.max(0, (elementHeight - overlayHeight) / 2);
+  }
+  return {
+    x: clamp(centeredX, 0, stageMaxX),
+    y: clamp(defaultY, 0, stageMaxY)
+  };
+};
+
+const positionCaptionOverlayNode = (overlayNode, element, stageNode) => {
+  if (!overlayNode || !element || !stageNode) {
+    return;
+  }
+  const position = getCaptionOverlayPosition(element, overlayNode, stageNode);
+  overlayNode.style.left = `${position.x}px`;
+  overlayNode.style.top = `${position.y}px`;
+};
+
+const createMediaCaptionOverlayNode = (element, mediaNode, stageNode) => {
+  if (!element || !(element.captions || []).length || !stageNode) {
+    return null;
+  }
+  const overlayNode = document.createElement('div');
+  overlayNode.className = 'builder-media-caption is-hidden';
+  overlayNode.dataset.captionForElementId = element.id;
+  const syncOverlay = () => {
+    applyCaptionOverlayState(overlayNode, element, mediaNode && !mediaNode.paused ? mediaNode.currentTime : -1);
+    positionCaptionOverlayNode(overlayNode, element, stageNode);
+  };
+  if (mediaNode) {
+    mediaNode.addEventListener('timeupdate', syncOverlay);
+    mediaNode.addEventListener('seeking', syncOverlay);
+    mediaNode.addEventListener('seeked', syncOverlay);
+    mediaNode.addEventListener('pause', syncOverlay);
+    mediaNode.addEventListener('play', syncOverlay);
+    mediaNode.addEventListener('ended', () => {
+      applyCaptionOverlayState(overlayNode, element, -1);
+      positionCaptionOverlayNode(overlayNode, element, stageNode);
+    });
+    mediaNode.addEventListener('loadedmetadata', syncOverlay);
+  }
+  requestAnimationFrame(syncOverlay);
+  return overlayNode;
+};
+
+const wrapMediaNodeWithCaptions = (mediaNode, element) => {
+  const shell = document.createElement('div');
+  shell.className = 'builder-media-shell';
+  if (element?.type === 'audio' && !element.audioVisible && !element.captionsEnabled) {
+    shell.style.display = 'none';
+  }
+  shell.appendChild(mediaNode);
+  return shell;
+};
+
 const normalizeAudioElement = (element) => {
   if (!element || element.type !== 'audio') {
     return;
   }
+  normalizeMediaCaptionConfig(element, 'audio');
   element.audioVisible = typeof element.audioVisible === 'boolean' ? element.audioVisible : true;
   element.audioLoop = Boolean(element.audioLoop);
   element.width = Math.max(180, Number(element.width) || 260);
   element.height = Math.max(54, Number(element.height) || 70);
+};
+
+const normalizeInputCompareValue = (value = '', caseSensitive = false) => {
+  const base = String(value ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+  return caseSensitive ? base : base.toLowerCase();
+};
+
+const normalizeInputElement = (element) => {
+  if (!element || element.type !== 'input') {
+    return;
+  }
+  element.placeholder = typeof element.placeholder === 'string' && element.placeholder ? element.placeholder : 'Digite sua resposta';
+  element.submitLabel = typeof element.submitLabel === 'string' && element.submitLabel ? element.submitLabel : 'Enviar resposta';
+  element.compareText = typeof element.compareText === 'string' ? element.compareText : '';
+  element.compareCaseSensitive = Boolean(element.compareCaseSensitive);
+  element.compareImageEnabled = Boolean(element.compareImageEnabled);
+  element.compareImageReference = typeof element.compareImageReference === 'string' ? element.compareImageReference : '';
+  element.successMessage = typeof element.successMessage === 'string' && element.successMessage ? element.successMessage : 'Resposta enviada com sucesso.';
+  element.errorMessage = typeof element.errorMessage === 'string' && element.errorMessage ? element.errorMessage : 'A palavra não confere. Tente novamente.';
+  element.allowImage = typeof element.allowImage === 'boolean' ? element.allowImage : true;
+  if (element.compareImageEnabled) {
+    element.allowImage = true;
+  }
+  element.allowAudio = Boolean(element.allowAudio);
+  const defaultHeight = element.compareImageEnabled && element.compareImageReference ? 190 : 88;
+  const minHeight = element.compareImageEnabled && element.compareImageReference ? 150 : 76;
+  element.width = Math.max(260, Number(element.width) || 360);
+  element.height = Math.max(minHeight, Number(element.height) || defaultHeight);
 };
 
 const normalizeSlideBackgroundFill = (slide = {}) => {
@@ -293,52 +604,12 @@ const buildAutoplayBackgroundEmbedUrl = (embedSrc = '') => {
   return `${embedSrc}${separator}autoplay=1&mute=1&controls=0&disablekb=1&fs=0&loop=1&playsinline=1&rel=0&modestbranding=1&enablejsapi=1${playlistParam}`;
 };
 
-const queueBackgroundAudioUnlock = (shouldQueue) => {
-  pendingBackgroundAudioUnlock = Boolean(shouldQueue);
-};
-
-const postMessageToYouTubeFrame = (frame, func) => {
-  if (!frame?.contentWindow) return;
-  frame.contentWindow.postMessage(
-    JSON.stringify({
-      event: 'command',
-      func,
-      args: []
-    }),
-    '*'
-  );
-};
-
-const unlockBackgroundMediaAudio = () => {
-  if (!pendingBackgroundAudioUnlock || !activeBackgroundMediaNode) {
-    return;
-  }
-  if (activeBackgroundMediaNode.tagName === 'VIDEO') {
-    activeBackgroundMediaNode.muted = false;
-    const playPromise = activeBackgroundMediaNode.play();
-    if (playPromise && typeof playPromise.catch === 'function') {
-      playPromise
-        .then(() => queueBackgroundAudioUnlock(false))
-        .catch(() => {});
-      return;
-    }
-    queueBackgroundAudioUnlock(false);
-    return;
-  }
-  if (activeBackgroundMediaNode.tagName === 'IFRAME') {
-    postMessageToYouTubeFrame(activeBackgroundMediaNode, 'unMute');
-    postMessageToYouTubeFrame(activeBackgroundMediaNode, 'playVideo');
-    queueBackgroundAudioUnlock(false);
-  }
-};
-
 const renderViewerBackgroundMedia = (stageNode, slide) => {
   if (!stageNode) return;
   if (activeBackgroundMediaNode?.tagName === 'VIDEO') {
     activeBackgroundMediaNode.pause();
   }
   activeBackgroundMediaNode = null;
-  queueBackgroundAudioUnlock(false);
   stageNode.querySelectorAll('.stage-background-media').forEach((node) => node.remove());
   if (!slide?.backgroundVideo) {
     return;
@@ -354,11 +625,11 @@ const renderViewerBackgroundMedia = (stageNode, slide) => {
     mediaNode = document.createElement('video');
     mediaNode.src = slide.backgroundVideo;
     mediaNode.autoplay = true;
-    mediaNode.muted = false;
+    mediaNode.muted = true;
     mediaNode.loop = true;
     mediaNode.playsInline = true;
     mediaNode.controls = false;
-    mediaNode.preload = 'auto';
+    mediaNode.preload = 'metadata';
     mediaNode.controlsList = 'nodownload noplaybackrate nofullscreen';
     mediaNode.disablePictureInPicture = true;
   }
@@ -367,21 +638,13 @@ const renderViewerBackgroundMedia = (stageNode, slide) => {
   stageNode.insertBefore(mediaNode, stageNode.firstChild);
   activeBackgroundMediaNode = mediaNode;
   if (mediaNode.tagName === 'VIDEO') {
-    const playPromise = mediaNode.play();
-    if (playPromise && typeof playPromise.catch === 'function') {
-      playPromise.catch(() => {
-        mediaNode.muted = true;
-        mediaNode.play().catch(() => {});
-        queueBackgroundAudioUnlock(true);
-      });
-    }
-    return;
+    mediaNode.play().catch(() => { });
   }
-  queueBackgroundAudioUnlock(true);
 };
 
 const normalizeRuntimeActionConfig = (config = {}) => ({
   ...config,
+  url: typeof config.url === 'string' ? config.url : '',
   text: typeof config.text === 'string' && config.text ? config.text : 'Novo texto',
   replaceMode:
     config.replaceMode === REPLACE_COUNTER_MODE || config.replaceMode === REPLACE_TEXT_MODE ? config.replaceMode : REPLACE_TEXT_MODE,
@@ -398,6 +661,40 @@ const normalizeRuntimeActionConfig = (config = {}) => ({
   videoTime: Number.isFinite(Number(config.videoTime)) ? Number(config.videoTime) : 0,
   audioVisible: typeof config.audioVisible === 'boolean' ? config.audioVisible : true,
   audioLoop: Boolean(config.audioLoop),
+  quizQuestion:
+    typeof config.quizQuestion === 'string' && config.quizQuestion
+      ? config.quizQuestion
+      : (typeof config.question === 'string' && config.question ? config.question : 'Nova pergunta'),
+  quizOptions: (() => {
+    const sourceOptions =
+      Array.isArray(config.quizOptions) && config.quizOptions.length
+        ? config.quizOptions
+        : (Array.isArray(config.options) ? config.options : []);
+    const normalizedOptions = normalizeStringList(sourceOptions);
+    return normalizedOptions.length ? normalizedOptions : ['Opcao 1', 'Opcao 2', 'Opcao 3'];
+  })(),
+  quizCorrectOption: (() => {
+    const rawValue = Number.isFinite(Number(config.quizCorrectOption)) ? Number(config.quizCorrectOption) : (Number(config.correctOption) || 0);
+    const sourceOptions =
+      Array.isArray(config.quizOptions) && config.quizOptions.length
+        ? config.quizOptions
+        : (Array.isArray(config.options) ? config.options : []);
+    const normalizedOptions = normalizeStringList(sourceOptions);
+    const optionCount = normalizedOptions.length || 3;
+    return Math.min(Math.max(rawValue, 0), optionCount - 1);
+  })(),
+  successMessage: typeof config.successMessage === 'string' && config.successMessage ? config.successMessage : 'Resposta correta!',
+  errorMessage: typeof config.errorMessage === 'string' && config.errorMessage ? config.errorMessage : 'Resposta incorreta. Tente novamente.',
+  actionLabel: typeof config.actionLabel === 'string' && config.actionLabel ? config.actionLabel : 'Validar resposta',
+  quizBackgroundColor: typeof config.quizBackgroundColor === 'string' && config.quizBackgroundColor ? config.quizBackgroundColor : '#ffffff',
+  quizQuestionColor: typeof config.quizQuestionColor === 'string' && config.quizQuestionColor ? config.quizQuestionColor : '#171934',
+  quizOptionBackgroundColor:
+    typeof config.quizOptionBackgroundColor === 'string' && config.quizOptionBackgroundColor ? config.quizOptionBackgroundColor : '#f4f6ff',
+  quizOptionTextColor: typeof config.quizOptionTextColor === 'string' && config.quizOptionTextColor ? config.quizOptionTextColor : '#25284c',
+  quizButtonBackgroundColor:
+    typeof config.quizButtonBackgroundColor === 'string' && config.quizButtonBackgroundColor ? config.quizButtonBackgroundColor : '#6d63ff',
+  points: Math.max(1, Number(config.points) || 1),
+  lockOnWrong: Boolean(config.lockOnWrong),
   ...(() => {
     const flags = getTextDecorationFlags(config, DEFAULT_INSERT_TEXT_STYLE);
     return {
@@ -408,18 +705,210 @@ const normalizeRuntimeActionConfig = (config = {}) => ({
   })()
 });
 
-const VIDEO_TRIGGER_ACTIONS = new Set(['none', 'playAudio', 'pauseVideo', 'playVideo', 'seekVideo', 'showElement', 'hideElement']);
+const createDefaultActionConfig = () => ({
+  type: 'none',
+  targetSlideId: '',
+  targetElementId: '',
+  ruleGroup: '',
+  requireAllButtonsInGroup: false,
+  text: 'Novo texto',
+  url: '',
+  textColor: DEFAULT_INSERT_TEXT_STYLE.textColor,
+  backgroundColor: DEFAULT_INSERT_TEXT_STYLE.backgroundColor,
+  textAlign: DEFAULT_INSERT_TEXT_STYLE.textAlign,
+  fontFamily: DEFAULT_INSERT_TEXT_STYLE.fontFamily,
+  fontWeight: DEFAULT_INSERT_TEXT_STYLE.fontWeight,
+  fontSize: DEFAULT_INSERT_TEXT_STYLE.fontSize,
+  hasTextBackground: DEFAULT_INSERT_TEXT_STYLE.hasTextBackground,
+  hasTextBorder: DEFAULT_INSERT_TEXT_STYLE.hasTextBorder,
+  hasTextBlock: DEFAULT_INSERT_TEXT_STYLE.hasTextBlock,
+  insertX: 120,
+  insertY: 120,
+  insertWidth: 280,
+  insertHeight: 180,
+  moveByX: 160,
+  moveByY: 0,
+  moveDuration: 0.8,
+  videoTime: 0,
+  replaceMode: REPLACE_TEXT_MODE,
+  replaceText: '',
+  replaceCounterStart: 1,
+  replaceCounterStep: 1,
+  detectorAcceptedDrag: DETECTOR_ACCEPT_ANY,
+  detectorMinMatchCount: 1,
+  detectorTriggerOnce: false,
+  quizQuestion: 'Nova pergunta',
+  quizOptions: ['Opcao 1', 'Opcao 2', 'Opcao 3'],
+  quizCorrectOption: 0,
+  successMessage: 'Resposta correta!',
+  errorMessage: 'Resposta incorreta. Tente novamente.',
+  actionLabel: 'Validar resposta',
+  quizBackgroundColor: '#ffffff',
+  quizQuestionColor: '#171934',
+  quizOptionBackgroundColor: '#f4f6ff',
+  quizOptionTextColor: '#25284c',
+  quizButtonBackgroundColor: '#6d63ff',
+  points: 1,
+  lockOnWrong: false,
+  audioVisible: true,
+  audioLoop: false
+});
+
+const normalizeInteractionTriggers = (element) => {
+  if (!element || !['floatingButton', 'detector', 'timedTrigger'].includes(element.type)) {
+    return [];
+  }
+  const sourceTriggers = Array.isArray(element.interactionTriggers) ? element.interactionTriggers : [];
+  const legacyConfig = element.actionConfig && typeof element.actionConfig === 'object' ? element.actionConfig : {};
+  element.interactionTriggers = (sourceTriggers.length ? sourceTriggers : [{ actionConfig: legacyConfig }]).map((trigger, index) => ({
+    id: typeof trigger?.id === 'string' && trigger.id.trim() ? trigger.id.trim() : `${element.id || element.type}-trigger-${index + 1}`,
+    name:
+      typeof trigger?.name === 'string' && trigger.name.trim()
+        ? trigger.name.trim()
+        : `${element.type === 'detector' ? 'Gatilho' : element.type === 'timedTrigger' ? 'Tempo' : 'Acao'} ${index + 1}`,
+    enabled: typeof trigger?.enabled === 'boolean' ? trigger.enabled : true,
+    time: Math.max(0, Number(trigger?.time ?? trigger?.triggerTime) || 0),
+    actionConfig: normalizeRuntimeActionConfig((() => {
+      const rawConfig = trigger?.actionConfig && typeof trigger.actionConfig === 'object' ? trigger.actionConfig : trigger || {};
+      const preferredQuizOptions = getMeaningfulQuizOptionsSource(rawConfig, index === 0 ? legacyConfig : {});
+      return {
+        ...rawConfig,
+        ...(preferredQuizOptions.length ? { quizOptions: preferredQuizOptions, options: preferredQuizOptions } : {})
+      };
+    })())
+  }));
+  element.actionConfig = element.interactionTriggers[0]?.actionConfig || normalizeRuntimeActionConfig(createDefaultActionConfig());
+  return element.interactionTriggers;
+};
+
+const normalizeVideoTriggers = (element) => {
+  if (!element || element.type !== 'video') {
+    return [];
+  }
+  normalizeMediaCaptionConfig(element, 'video');
+  element.width = Math.max(220, Number(element.width) || 320);
+  element.height = Math.max(140, Number(element.height) || 190);
+  const sourceTriggers = Array.isArray(element.videoTriggers)
+    ? element.videoTriggers
+    : [
+      {
+        time: element.videoTriggerTime,
+        actionConfig: {
+          type: element.videoTriggerAction,
+          targetElementId: element.videoTriggerTargetElementId,
+          videoTime: element.videoTriggerSeekTime
+        }
+      }
+    ];
+  element.videoTriggers = sourceTriggers.map((trigger, index) => ({
+    id: typeof trigger?.id === 'string' && trigger.id.trim() ? trigger.id.trim() : `${element.id || 'video'}-trigger-${index + 1}`,
+    name: typeof trigger?.name === 'string' && trigger.name.trim() ? trigger.name.trim() : `Tempo ${index + 1}`,
+    enabled: typeof trigger?.enabled === 'boolean' ? trigger.enabled : true,
+    time: Math.max(0, Number(trigger?.time ?? trigger?.videoTriggerTime) || 0),
+    actionConfig: normalizeRuntimeActionConfig((() => {
+      const rawConfig = trigger?.actionConfig && typeof trigger.actionConfig === 'object'
+        ? trigger.actionConfig
+        : {
+          type: trigger?.action ?? trigger?.videoTriggerAction ?? 'none',
+          targetElementId: trigger?.targetElementId ?? trigger?.videoTriggerTargetElementId ?? '',
+          videoTime: trigger?.seekTime ?? trigger?.videoTriggerSeekTime ?? 0,
+          question: trigger?.question,
+          options: trigger?.options,
+          correctOption: trigger?.correctOption,
+          quizQuestion: trigger?.quizQuestion,
+          quizOptions: trigger?.quizOptions,
+          quizCorrectOption: trigger?.quizCorrectOption
+        };
+      const fallbackConfig = index === 0 && element.actionConfig && typeof element.actionConfig === 'object' ? element.actionConfig : {};
+      const preferredQuizOptions = getMeaningfulQuizOptionsSource(rawConfig, fallbackConfig);
+      return {
+        ...rawConfig,
+        ...(preferredQuizOptions.length ? { quizOptions: preferredQuizOptions, options: preferredQuizOptions } : {})
+      };
+    })())
+  }));
+  element.videoTriggerTime = element.videoTriggers[0]?.time || 0;
+  element.videoTriggerAction = element.videoTriggers[0]?.actionConfig?.type || 'none';
+  element.videoTriggerSeekTime = element.videoTriggers[0]?.actionConfig?.videoTime || 0;
+  element.videoTriggerTargetElementId = element.videoTriggers[0]?.actionConfig?.targetElementId || '';
+  return element.videoTriggers;
+};
+
+const resolveVideoTriggerActionTargetElementId = (element, trigger) => {
+  const actionType = trigger?.actionConfig?.type || 'none';
+  const configuredTargetId = trigger?.actionConfig?.targetElementId || '';
+  if (configuredTargetId) {
+    return configuredTargetId;
+  }
+  if (['pauseVideo', 'playVideo', 'seekVideo'].includes(actionType)) {
+    return element?.id || '';
+  }
+  return '';
+};
+
+const getElementBaseOpacity = (element) => {
+  const value = Number(element?.opacity);
+  return Number.isFinite(value) ? Math.min(Math.max(value, 0), 1) : 1;
+};
+
+let lastExternalRedirect = {
+  url: '',
+  at: 0
+};
+let externalRedirectInFlight = false;
+
+const openExternalRedirect = (value) => {
+  const nextValue = String(value || '').trim();
+  if (!nextValue) {
+    return false;
+  }
+  try {
+    const parsed = new URL(nextValue, window.location.href);
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return false;
+    }
+    const targetUrl = parsed.toString();
+    const now = Date.now();
+    if (externalRedirectInFlight) {
+      return true;
+    }
+    if (lastExternalRedirect.url === targetUrl && now - lastExternalRedirect.at < 2500) {
+      return true;
+    }
+    lastExternalRedirect = { url: targetUrl, at: now };
+    externalRedirectInFlight = true;
+    window.location.assign(targetUrl);
+    window.setTimeout(() => {
+      externalRedirectInFlight = false;
+    }, 3000);
+    return true;
+  } catch (error) {
+    return false;
+  }
+};
+
+const VIDEO_TRIGGER_ACTIONS = new Set([
+  'none',
+  'nextSlide',
+  'jumpSlide',
+  'redirect',
+  'playAudio',
+  'pauseVideo',
+  'playVideo',
+  'seekVideo',
+  'showElement',
+  'hideElement',
+  'playAnimation'
+]);
 
 const normalizeVideoTriggerConfig = (element) => {
   if (!element || element.type !== 'video') {
     return;
   }
-  element.videoTriggerTime = Number.isFinite(Number(element.videoTriggerTime)) ? Number(element.videoTriggerTime) : 0;
+  normalizeVideoTriggers(element);
   element.videoTriggerAction = VIDEO_TRIGGER_ACTIONS.has(String(element.videoTriggerAction || 'none'))
     ? String(element.videoTriggerAction || 'none')
     : 'none';
-  element.videoTriggerSeekTime = Number.isFinite(Number(element.videoTriggerSeekTime)) ? Number(element.videoTriggerSeekTime) : 0;
-  element.videoTriggerTargetElementId = typeof element.videoTriggerTargetElementId === 'string' ? element.videoTriggerTargetElementId : '';
 };
 
 const createAttemptSlug = (value = '') =>
@@ -472,7 +961,7 @@ const loadPersistedButtonRules = () => {
       }
     });
   } catch (error) {
-    console.warn('NÃ£o foi possÃ­vel restaurar as regras de botÃµes.', error);
+    console.warn('Não foi possível restaurar as regras de botões.', error);
   }
 };
 
@@ -480,7 +969,7 @@ const persistButtonRules = () => {
   try {
     sessionStorage.setItem(BUTTON_RULES_STORAGE_KEY, JSON.stringify(Array.from(viewerButtonRuleState.entries())));
   } catch (error) {
-    console.warn('NÃ£o foi possÃ­vel salvar as regras de botÃµes.', error);
+    console.warn('Não foi possível salvar as regras de botões.', error);
   }
 };
 
@@ -508,6 +997,24 @@ const setViewerElementHidden = (slide, elementId, hidden) => {
   }
   viewerHiddenElements.set(key, hiddenIds);
   return true;
+};
+
+/** Alinha o viewer ao criador: elementos com "Começar escondido" ficam fora do DOM até uma ação showElement. */
+const hydrateViewerInitiallyHiddenFromModule = (module) => {
+  viewerHiddenElements.clear();
+  const slides = module?.builder_data?.slides || [];
+  slides.forEach((slide, slideIndex) => {
+    const slideKey = getStableSlideKey(slide, slideIndex);
+    const hiddenIds = new Set();
+    (slide.elements || []).forEach((element) => {
+      if (element?.id && element.initiallyHidden) {
+        hiddenIds.add(element.id);
+      }
+    });
+    if (hiddenIds.size > 0) {
+      viewerHiddenElements.set(slideKey, hiddenIds);
+    }
+  });
 };
 
 const setQuizAttemptState = (moduleId, slideKey, quizKey, value) => {
@@ -610,6 +1117,9 @@ const isModuleCompleted = (module) => {
 const shouldLockNextModule = (module) => Boolean(module?.builder_data?.moduleSettings?.lockNextModuleUntilCompleted);
 
 const getUnlockedModuleIds = (modules = viewerModules) => {
+  if (isReplayMode()) {
+    return new Set((modules || []).map((module) => module.id));
+  }
   const sortedModules = sortModulesForPhase(modules);
   const unlockedIds = new Set();
   sortedModules.forEach((module, index) => {
@@ -652,8 +1162,149 @@ const getLockedModuleReason = (targetModule, modules = viewerModules) => {
   return `Para liberar "${targetModule.title}", conclua antes o módulo "${previousModule.title}".`;
 };
 
+const getReplayEventTarget = (event) => {
+  if (!event || typeof event !== 'object') {
+    return null;
+  }
+  const targetModule =
+    viewerModules.find((module) => module.id === event.moduleId) ||
+    viewerModules.find((module) => module.title === event.moduleTitle) ||
+    null;
+  if (!targetModule) {
+    return null;
+  }
+  const slides = targetModule.builder_data?.slides || [];
+  const slideIndex = slides.findIndex((slide, index) => getStableSlideKey(slide, index) === event.slideId);
+  return {
+    module: targetModule,
+    slideIndex: slideIndex >= 0 ? slideIndex : 0
+  };
+};
+
+const jumpToReplayEvent = (index) => {
+  if (!isReplayMode()) {
+    return;
+  }
+  const event = replayEvents[index];
+  const target = getReplayEventTarget(event);
+  if (!target) {
+    return;
+  }
+  viewerState.replayEventIndex = index;
+  viewerState.moduleId = target.module.id;
+  viewerState.courseId = target.module.courseId;
+  viewerState.slideIndex = target.slideIndex;
+  renderModuleList();
+  loadModule(viewerModules);
+};
+
+const renderReplayHeader = () => {
+  if (!isReplayMode() || !moduleSelection || !replayStatusCard || !replayStatusGrid || !replayTimelineCard || !replayTimelineList) {
+    return;
+  }
+  moduleSelection.classList.add('replay-mode');
+  replayStatusCard.hidden = false;
+  replayTimelineCard.hidden = false;
+  const course = replayPayload?.course || {};
+  const student = replayPayload?.student || {};
+  replayStatusGrid.innerHTML = `
+    <div>
+      <strong>${escapeHtml(student.fullName || 'Aluno')}</strong>
+      <span>${escapeHtml(student.email || 'Sem email')}</span>
+    </div>
+    <div>
+      <strong>${escapeHtml(course.title || 'Curso')}</strong>
+      <span>${escapeHtml(course.currentModule || 'Sem módulo atual informado')}</span>
+    </div>
+    <div>
+      <strong>${escapeHtml(course.progress?.interactive_step || '0')}</strong>
+      <span>Progresso interativo salvo</span>
+    </div>
+    <div>
+      <strong>${formatReplayDate(course.updatedAt)}</strong>
+      <span>Última atualização registrada</span>
+    </div>
+  `;
+  if (!replayEvents.length) {
+    replayTimelineList.innerHTML = '<p class="muted">Nenhum passo visual foi salvo ainda para este aluno.</p>';
+    return;
+  }
+  replayTimelineList.innerHTML = replayEvents
+    .map(
+      (event, index) => `
+        <button type="button" class="replay-timeline-item ${viewerState.replayEventIndex === index ? 'active' : ''}" data-replay-index="${index}">
+          <strong>${escapeHtml(formatProgressEventType(event.type))}</strong>
+          <span>${escapeHtml(event.summary || event.slideTitle || 'Evento sem resumo')}</span>
+          <small>${escapeHtml(event.moduleTitle || 'Módulo')} • ${escapeHtml(event.slideTitle || event.slideId || 'Slide')} • ${escapeHtml(formatReplayDate(event.createdAt))}</small>
+        </button>
+      `
+    )
+    .join('');
+  replayTimelineList.querySelectorAll('[data-replay-index]').forEach((button) =>
+    button.addEventListener('click', () => {
+      const index = Number(button.getAttribute('data-replay-index'));
+      if (Number.isFinite(index)) {
+        jumpToReplayEvent(index);
+      }
+    })
+  );
+};
+
+const renderReplayEventOverlay = () => {
+  if (!isReplayMode() || !moduleStage) {
+    return;
+  }
+  const wrapper = ensureStageContentWrapper();
+  if (!wrapper) {
+    return;
+  }
+  wrapper.querySelector('.replay-overlay')?.remove();
+  const event = replayEvents[viewerState.replayEventIndex];
+  if (!event) {
+    return;
+  }
+  const target = getReplayEventTarget(event);
+  const currentModule = getCurrentModule();
+  if (!target || target.module.id !== currentModule?.id || target.slideIndex !== viewerState.slideIndex) {
+    return;
+  }
+  const overlay = document.createElement('div');
+  overlay.className = 'replay-overlay';
+  const hasCoords = Number.isFinite(Number(event.details?.x)) && Number.isFinite(Number(event.details?.y));
+  if (event.elementId && typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+    const targetNode = wrapper.querySelector(`[data-element-id="${CSS.escape(String(event.elementId))}"]`);
+    if (targetNode instanceof HTMLElement) {
+      const box = document.createElement('div');
+      box.className = 'replay-overlay-target';
+      box.style.left = `${targetNode.offsetLeft - 6}px`;
+      box.style.top = `${targetNode.offsetTop - 6}px`;
+      box.style.width = `${targetNode.offsetWidth + 12}px`;
+      box.style.height = `${targetNode.offsetHeight + 12}px`;
+      overlay.appendChild(box);
+    }
+  }
+  if (hasCoords) {
+    const point = document.createElement('div');
+    point.className = 'replay-overlay-point';
+    point.style.left = `${Number(event.details.x)}px`;
+    point.style.top = `${Number(event.details.y)}px`;
+    overlay.appendChild(point);
+  }
+  const callout = document.createElement('div');
+  callout.className = 'replay-overlay-callout';
+  callout.style.left = `${Math.min(Math.max(Number(event.details?.x) || 24, 24), (moduleStageDimensions?.width || DEFAULT_STAGE_SIZE.width) - 330)}px`;
+  callout.style.top = `${Math.min(Math.max((Number(event.details?.y) || 24) + 24, 24), (moduleStageDimensions?.height || DEFAULT_STAGE_SIZE.height) - 120)}px`;
+  callout.innerHTML = `
+    <strong style="display:block; margin-bottom:0.25rem;">${escapeHtml(formatProgressEventType(event.type))}</strong>
+    <span>${escapeHtml(event.summary || 'Sem resumo')}</span>
+  `;
+  overlay.appendChild(callout);
+  wrapper.appendChild(overlay);
+};
+
 const getSlideProgressKey = (moduleId, slideKey) => getQuizAttemptKey(moduleId, slideKey, '__slide__');
 const getButtonRuleKey = (moduleId, slideKey, ruleGroup) => `${moduleId || 'module'}::${slideKey || 'slide'}::rule::${ruleGroup || 'group'}`;
+const getInputResponseKey = (moduleId, slideKey, elementId) => `${moduleId || 'module'}::${slideKey || 'slide'}::${elementId || 'input'}`;
 
 const getSlideProgressState = (moduleId, slideKey) =>
   viewerQuizAttempts.get(getSlideProgressKey(moduleId, slideKey)) || null;
@@ -671,6 +1322,14 @@ const setButtonRuleState = (moduleId, slideKey, ruleGroup, value) => {
   persistButtonRules();
 };
 
+const getInputResponseState = (moduleId, slideKey, elementId, module = getCurrentModule()) => {
+  const progress = getCourseProgressState(module);
+  const responseMap = progress.input_responses && typeof progress.input_responses === 'object' ? progress.input_responses : {};
+  const key = getInputResponseKey(moduleId, slideKey, elementId);
+  const entry = responseMap[key];
+  return entry && typeof entry === 'object' ? entry : null;
+};
+
 const syncViewerFloatingRuleButtonState = (module, slide, elementId) => {
   if (!slide || !elementId) {
     return;
@@ -680,14 +1339,18 @@ const syncViewerFloatingRuleButtonState = (module, slide, elementId) => {
   if (!element || !node) {
     return;
   }
-  const config = normalizeFloatingRuleConfig(element.actionConfig || {});
   const slideKey = getStableSlideKey(slide, viewerState.slideIndex);
-  const ruleState =
-    config.requireAllButtonsInGroup && config.ruleGroup
-      ? getButtonRuleState(module?.id, slideKey, config.ruleGroup)
-      : null;
-  const clickedIds = new Set(Array.isArray(ruleState?.clickedButtonIds) ? ruleState.clickedButtonIds : []);
-  node.classList.toggle('floating-button-completed', clickedIds.has(elementId));
+  normalizeInteractionTriggers(element);
+  const isCompleted = (element.interactionTriggers || []).some((trigger) => {
+    const config = normalizeFloatingRuleConfig(trigger?.actionConfig || {});
+    const ruleState =
+      config.requireAllButtonsInGroup && config.ruleGroup
+        ? getButtonRuleState(module?.id, slideKey, config.ruleGroup)
+        : null;
+    const clickedIds = new Set(Array.isArray(ruleState?.clickedButtonIds) ? ruleState.clickedButtonIds : []);
+    return clickedIds.has(elementId);
+  });
+  node.classList.toggle('floating-button-completed', isCompleted);
 };
 
 const getSlideProgressSnapshot = (module, slide, slideIndex = viewerState.slideIndex) => {
@@ -810,8 +1473,9 @@ const getDetectorMatchingElements = (detector, slide) => {
   if (!detector || !slide) {
     return [];
   }
+  normalizeInteractionTriggers(detector);
   const detectorBox = getElementRuntimeBox(detector);
-  const config = normalizeDetectorConfig(detector.actionConfig || {});
+  const config = normalizeDetectorConfig(detector.interactionTriggers[0]?.actionConfig || detector.actionConfig || {});
   return (slide.elements || []).filter((item) => {
     if (!item || item.id === detector.id || !doesElementMatchDetectorRule(item, config.detectorAcceptedDrag)) {
       return false;
@@ -824,7 +1488,8 @@ const evaluateDetectorActivation = (detector, draggedElement, slide, moduleId, s
   if (!detector || !draggedElement || !slide) {
     return { ready: false, reason: 'invalid' };
   }
-  const config = normalizeDetectorConfig(detector.actionConfig || {});
+  normalizeInteractionTriggers(detector);
+  const config = normalizeDetectorConfig(detector.interactionTriggers[0]?.actionConfig || detector.actionConfig || {});
   if (!doesElementMatchDetectorRule(draggedElement, config.detectorAcceptedDrag)) {
     return { ready: false, reason: 'mismatch' };
   }
@@ -911,7 +1576,7 @@ const getElementRenderState = (element) => {
     width: Number(element?.width) || 0,
     height: Number(element?.height) || 0,
     rotation: Number(element?.rotation) || 0,
-    opacity: 1
+    opacity: getElementBaseOpacity(element)
   };
 };
 
@@ -940,8 +1605,8 @@ const stopRecordedMotionAnimation = (node) => {
   }
 };
 
-const registerFloatingRuleClick = (module, slide, element) => {
-  const config = normalizeFloatingRuleConfig(element?.actionConfig || {});
+const registerFloatingRuleClick = (module, slide, element, trigger) => {
+  const config = normalizeFloatingRuleConfig(trigger?.actionConfig || {});
   if (!module?.id || !slide || !element?.id || !config.requireAllButtonsInGroup) {
     return { ready: true, remaining: 0 };
   }
@@ -953,8 +1618,11 @@ const registerFloatingRuleClick = (module, slide, element) => {
     if (item?.type !== 'floatingButton' || !item?.id) {
       return false;
     }
-    const itemConfig = normalizeFloatingRuleConfig(item.actionConfig || {});
-    return itemConfig.requireAllButtonsInGroup && itemConfig.ruleGroup === config.ruleGroup;
+    normalizeInteractionTriggers(item);
+    return (item.interactionTriggers || []).some((candidateTrigger) => {
+      const itemConfig = normalizeFloatingRuleConfig(candidateTrigger?.actionConfig || {});
+      return itemConfig.requireAllButtonsInGroup && itemConfig.ruleGroup === config.ruleGroup;
+    });
   });
   if (requiredButtons.length < 2) {
     return { ready: false, remaining: 1, invalid: true };
@@ -1012,6 +1680,9 @@ const persistCurrentSlideProgress = async ({ completed = false, force = false } 
   if (!module?.id || !slide) {
     return;
   }
+  if (isReplayMode()) {
+    return;
+  }
   const slideKey = getStableSlideKey(slide, viewerState.slideIndex);
   const previous = getSlideProgressSnapshot(module, slide, viewerState.slideIndex);
   const liveViewedSeconds = currentSlideEnteredAt
@@ -1032,7 +1703,7 @@ const persistCurrentSlideProgress = async ({ completed = false, force = false } 
     return;
   }
   setSlideProgressState(module.id, slideKey, nextState);
-  if (viewerState.isPublic || !module.courseId) {
+  if (viewerState.isPublic || isReplayMode() || !module.courseId) {
     return;
   }
   const interactiveProgress = getModuleInteractiveProgress(module);
@@ -1077,7 +1748,7 @@ const scheduleCurrentSlideProgressTimer = () => {
 
 const persistModuleQuizMetrics = async () => {
   const module = getCurrentModule();
-  if (viewerState.isPublic || !module?.courseId) return;
+  if (viewerState.isPublic || isReplayMode() || !module?.courseId) return;
   const metrics = getModuleQuizMetrics(module);
   try {
     await authorizedFetch('/api/student/progress', {
@@ -1101,7 +1772,7 @@ const persistVideoProgress = async (position, { force = false, videoProgress = n
   if (!module?.id) {
     return;
   }
-  if (viewerState.isPublic) {
+  if (viewerState.isPublic || isReplayMode()) {
     lastSavedVideoPosition = safePosition;
     return;
   }
@@ -1126,31 +1797,31 @@ const persistVideoProgress = async (position, { force = false, videoProgress = n
     const nextVideoProgressMap =
       videoProgress?.key
         ? {
-            ...((getCourseProgressState(module).video_progress && typeof getCourseProgressState(module).video_progress === 'object')
-              ? getCourseProgressState(module).video_progress
-              : {}),
-            [videoProgress.key]: {
-              ...(((getCourseProgressState(module).video_progress || {})[videoProgress.key] &&
+          ...((getCourseProgressState(module).video_progress && typeof getCourseProgressState(module).video_progress === 'object')
+            ? getCourseProgressState(module).video_progress
+            : {}),
+          [videoProgress.key]: {
+            ...(((getCourseProgressState(module).video_progress || {})[videoProgress.key] &&
               typeof (getCourseProgressState(module).video_progress || {})[videoProgress.key] === 'object')
-                ? (getCourseProgressState(module).video_progress || {})[videoProgress.key]
-                : {}),
-              watchedSeconds: Math.max(
-                Number(((getCourseProgressState(module).video_progress || {})[videoProgress.key] || {}).watchedSeconds) || 0,
-                Number(videoProgress.watchedSeconds) || 0
-              ),
-              durationSeconds: Math.max(
-                Number(((getCourseProgressState(module).video_progress || {})[videoProgress.key] || {}).durationSeconds) || 0,
-                Number(videoProgress.durationSeconds) || 0
-              ),
-              completed: Boolean(
-                ((getCourseProgressState(module).video_progress || {})[videoProgress.key] || {}).completed || videoProgress.completed
-              ),
-              moduleId: videoProgress.moduleId || null,
-              slideId: videoProgress.slideId || null,
-              elementId: videoProgress.elementId || null,
-              updatedAt: new Date().toISOString()
-            }
+              ? (getCourseProgressState(module).video_progress || {})[videoProgress.key]
+              : {}),
+            watchedSeconds: Math.max(
+              Number(((getCourseProgressState(module).video_progress || {})[videoProgress.key] || {}).watchedSeconds) || 0,
+              Number(videoProgress.watchedSeconds) || 0
+            ),
+            durationSeconds: Math.max(
+              Number(((getCourseProgressState(module).video_progress || {})[videoProgress.key] || {}).durationSeconds) || 0,
+              Number(videoProgress.durationSeconds) || 0
+            ),
+            completed: Boolean(
+              ((getCourseProgressState(module).video_progress || {})[videoProgress.key] || {}).completed || videoProgress.completed
+            ),
+            moduleId: videoProgress.moduleId || null,
+            slideId: videoProgress.slideId || null,
+            elementId: videoProgress.elementId || null,
+            updatedAt: new Date().toISOString()
           }
+        }
         : getCourseProgressState(module).video_progress;
     syncCourseProgressState(module.courseId, {
       video_position: safePosition,
@@ -1161,19 +1832,45 @@ const persistVideoProgress = async (position, { force = false, videoProgress = n
   }
 };
 
+const getVideoElementProgressId = (slide, element) => {
+  const explicitId = typeof element?.id === 'string' ? element.id.trim() : '';
+  if (explicitId) {
+    return explicitId;
+  }
+  const elements = Array.isArray(slide?.elements) ? slide.elements : [];
+  const fallbackIndex = elements.indexOf(element);
+  if (fallbackIndex >= 0) {
+    return `video-index-${fallbackIndex}`;
+  }
+  return 'video-index-unknown';
+};
+
+const getVideoProgressKey = (module, slide, element) =>
+  `${module?.id || 'module'}::${getStableSlideKey(slide, viewerState.slideIndex)}::${getVideoElementProgressId(slide, element)}`;
+
+const getSavedVideoPositionForElement = (module, slide, element) => {
+  const progress = getCourseProgressState(module);
+  const progressMap = progress?.video_progress && typeof progress.video_progress === 'object' ? progress.video_progress : {};
+  const key = getVideoProgressKey(module, slide, element);
+  const entry = progressMap[key];
+  if (!entry || typeof entry !== 'object') {
+    return 0;
+  }
+  return Math.max(0, Number(entry.watchedSeconds) || 0);
+};
+
 const attachVideoProgressTracking = (videoNode, element, slide) => {
   if (!(videoNode instanceof HTMLVideoElement)) {
     return;
   }
   const module = getCurrentModule();
-  const savedPosition = Math.max(
-    Number(module?.courseProgress?.video_position) || 0,
-    lastSavedVideoPosition || 0
-  );
+  const savedPosition = getSavedVideoPositionForElement(module, slide, element);
   videoNode.addEventListener('loadedmetadata', () => {
-    if (savedPosition > 0 && savedPosition < (videoNode.duration || Infinity)) {
+    const duration = Math.max(0, Number(videoNode.duration) || 0);
+    if (duration > 0 && savedPosition > 0 && savedPosition < duration) {
       videoNode.currentTime = savedPosition;
       lastTrackedVideoPosition = savedPosition;
+      lastSavedVideoPosition = savedPosition;
     }
   });
   videoNode.addEventListener('timeupdate', () => {
@@ -1203,10 +1900,10 @@ const attachVideoProgressTracking = (videoNode, element, slide) => {
 const buildVideoProgressPayload = (element, slide, videoNode) => {
   const module = getCurrentModule();
   return {
-    key: `${module?.id || 'module'}::${getStableSlideKey(slide, viewerState.slideIndex)}::${element?.id || 'video'}`,
+    key: getVideoProgressKey(module, slide, element),
     moduleId: module?.id || '',
     slideId: getStableSlideKey(slide, viewerState.slideIndex),
-    elementId: element?.id || '',
+    elementId: getVideoElementProgressId(slide, element),
     watchedSeconds: Math.max(0, Number(videoNode?.currentTime) || 0),
     durationSeconds: Math.max(0, Number(videoNode?.duration) || 0),
     completed: Boolean(videoNode?.ended || ((Number(videoNode?.duration) || 0) > 0 && (Number(videoNode?.currentTime) || 0) >= (Number(videoNode?.duration) || 0) * 0.9))
@@ -1214,7 +1911,7 @@ const buildVideoProgressPayload = (element, slide, videoNode) => {
 };
 
 const persistQuizAttemptToBackend = async ({ module, slideKey, quizKey, attempt }) => {
-  if (viewerState.isPublic || !module?.courseId || !quizKey || !slideKey || !attempt) {
+  if (viewerState.isPublic || isReplayMode() || !module?.courseId || !quizKey || !slideKey || !attempt) {
     return;
   }
   try {
@@ -1252,6 +1949,307 @@ const persistQuizAttemptToBackend = async ({ module, slideKey, quizKey, attempt 
     }
   } catch (error) {
     console.error('Não foi possível persistir a tentativa do quiz.', error);
+  }
+};
+
+const persistInputResponseToBackend = async ({ module, slide, element, response, matched }) => {
+  if (viewerState.isPublic || isReplayMode() || !module?.courseId || !element?.id || !slide || !response) {
+    return { ok: false };
+  }
+  const inputKey = getInputResponseKey(module.id, getStableSlideKey(slide, viewerState.slideIndex), element.id);
+  const payload = {
+    key: inputKey,
+    moduleId: module.id,
+    moduleTitle: module.title,
+    slideId: getStableSlideKey(slide, viewerState.slideIndex),
+    slideTitle: slide?.title || '',
+    elementId: element.id,
+    elementType: 'input',
+    text: response.text || '',
+    image: response.image || '',
+    audio: response.audio || '',
+    matched
+  };
+  try {
+    const progressResponse = await authorizedFetch('/api/student/progress', {
+      method: 'POST',
+      body: JSON.stringify({
+        courseId: module.courseId,
+        type: 'interactive',
+        currentModule: module.title,
+        grade: getModuleQuizMetrics(module).gradePercent,
+        interactiveProgress: getModuleInteractiveProgress(module),
+        inputResponse: payload,
+        progressEvent: {
+          type: 'text_input',
+          slideId: payload.slideId,
+          slideTitle: payload.slideTitle,
+          elementId: element.id,
+          elementType: 'input',
+          summary: matched
+            ? `Enviou uma resposta válida em "${slide?.title || payload.slideId}".`
+            : `Enviou uma resposta que ainda não corresponde ao esperado em "${slide?.title || payload.slideId}".`,
+          details: {
+            submittedText: response.text || '',
+            matched,
+            hasImage: Boolean(response.image),
+            hasAudio: Boolean(response.audio)
+          }
+        }
+      })
+    });
+    const result = await progressResponse.json().catch(() => null);
+    if (progressResponse.ok) {
+      syncCourseProgressState(module.courseId, {
+        interactive_progress: result?.interactiveProgress || getCourseProgressState(module).interactive_progress,
+        interactive_step: result?.interactiveStep || getCourseProgressState(module).interactive_step,
+        input_responses: result?.inputResponses || getCourseProgressState(module).input_responses
+      });
+      return { ok: true, result };
+    }
+  } catch (error) {
+    console.error('Não foi possível salvar a resposta do input.', error);
+  }
+  return { ok: false };
+};
+
+const readLocalFileAsDataUrl = (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+    reader.onerror = () => reject(new Error('Nao foi possivel ler o arquivo selecionado.'));
+    reader.readAsDataURL(file);
+  });
+
+const compareInputImageWithReference = async ({ referenceImage, submittedImage }) => {
+  const response = await authorizedFetch('/api/student/input/compare-image', {
+    method: 'POST',
+    body: JSON.stringify({
+      referenceImage,
+      submittedImage
+    })
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(payload?.message || 'Nao foi possivel comparar as imagens.');
+  }
+  return {
+    matched: Boolean(payload?.matched),
+    confidence: Math.max(0, Math.min(1, Number(payload?.confidence) || 0)),
+    reason: String(payload?.reason || '').trim()
+  };
+};
+
+const createInputElementNode = (element, slide, { runActions = null } = {}) => {
+  normalizeInputElement(element);
+  normalizeInteractionTriggers(element);
+  const hasCompareText = Boolean(String(element.compareText || '').trim());
+  const showTextField = !element.compareImageEnabled || hasCompareText;
+  const referencePreview = element.compareImageEnabled && element.compareImageReference
+    ? `<div class="builder-input-reference">
+        <span class="builder-input-reference-label">Referencia visual</span>
+        <img src="${escapeAttribute(element.compareImageReference)}" alt="Imagem de referencia" class="builder-input-reference-image" />
+      </div>`
+    : '';
+  const textFieldMarkup = showTextField
+    ? `<textarea class="builder-input-text" placeholder="${escapeHtml(element.placeholder || 'Digite sua resposta')}"></textarea>`
+    : `<div class="builder-input-text builder-input-text-passive">Envie uma imagem para validar</div>`;
+  const node = document.createElement('div');
+  node.className = 'builder-input-element';
+  node.innerHTML = `
+    ${referencePreview}
+    <div class="builder-input-composer">
+      <div class="builder-input-composer-main">
+        ${textFieldMarkup}
+      </div>
+      <div class="builder-input-composer-actions">
+        <button type="button" class="secondary-btn builder-input-upload builder-input-upload-icon builder-input-image-btn ${element.allowImage ? '' : 'hidden'}" aria-label="Anexar imagem" title="Anexar imagem">+</button>
+        <button type="button" class="secondary-btn builder-input-upload builder-input-upload-icon builder-input-audio-btn ${element.allowAudio ? '' : 'hidden'}" aria-label="Anexar audio" title="Anexar audio">Mic</button>
+        <button type="button" class="primary-btn builder-input-submit" aria-label="${escapeAttribute(element.submitLabel || 'Enviar resposta')}" title="${escapeAttribute(element.submitLabel || 'Enviar resposta')}">
+          <span class="builder-input-submit-icon" aria-hidden="true">➤</span>
+        </button>
+      </div>
+    </div>
+    <input class="builder-input-image-file hidden" type="file" accept="image/*" />
+    <input class="builder-input-audio-file hidden" type="file" accept="audio/*" />
+    <div class="builder-input-preview hidden"></div>
+    <div class="builder-input-feedback" aria-live="polite"></div>
+  `;
+  const textArea = node.querySelector('.builder-input-text');
+  const imageBtn = node.querySelector('.builder-input-image-btn');
+  const audioBtn = node.querySelector('.builder-input-audio-btn');
+  const imageInput = node.querySelector('.builder-input-image-file');
+  const audioInput = node.querySelector('.builder-input-audio-file');
+  const previewNode = node.querySelector('.builder-input-preview');
+  const feedbackNode = node.querySelector('.builder-input-feedback');
+  const submitBtn = node.querySelector('.builder-input-submit');
+  const state = {
+    image: '',
+    audio: ''
+  };
+  const setFileInputValue = (control, value = '') => {
+    if (control instanceof HTMLInputElement) {
+      control.value = value;
+    }
+  };
+  const refreshPreview = () => {
+    if (!previewNode) {
+      return;
+    }
+    const parts = [];
+    if (state.image) {
+      parts.push(`<img src="${state.image}" alt="Imagem anexada" class="builder-input-preview-image" />`);
+    }
+    if (state.audio) {
+      parts.push(`<audio controls src="${state.audio}" class="builder-input-preview-audio"></audio>`);
+    }
+    previewNode.innerHTML = parts.join('');
+    previewNode.classList.toggle('hidden', parts.length === 0);
+  };
+  imageBtn?.addEventListener('click', () => {
+    setFileInputValue(imageInput);
+    imageInput?.click();
+  });
+  audioBtn?.addEventListener('click', () => {
+    setFileInputValue(audioInput);
+    audioInput?.click();
+  });
+  imageInput?.addEventListener('change', async () => {
+    const file = imageInput.files?.[0];
+    if (!file) return;
+    state.image = await readLocalFileAsDataUrl(file).catch(() => '');
+    setFileInputValue(imageInput);
+    refreshPreview();
+  });
+  audioInput?.addEventListener('change', async () => {
+    const file = audioInput.files?.[0];
+    if (!file) return;
+    state.audio = await readLocalFileAsDataUrl(file).catch(() => '');
+    setFileInputValue(audioInput);
+    refreshPreview();
+  });
+  submitBtn?.addEventListener('click', async () => {
+    if (showTextField && (!(textArea instanceof HTMLTextAreaElement) || !(submitBtn instanceof HTMLButtonElement))) {
+      return;
+    }
+    const submittedText = textArea instanceof HTMLTextAreaElement ? textArea.value : '';
+    const expected = normalizeInputCompareValue(element.compareText || '', Boolean(element.compareCaseSensitive));
+    const received = normalizeInputCompareValue(submittedText, Boolean(element.compareCaseSensitive));
+    const textMatched = !expected || received === expected;
+    let imageMatched = true;
+    let imageCompareReason = '';
+    let imageCompareConfidence = 0;
+
+    if (element.compareImageEnabled) {
+      if (!state.image) {
+        feedbackNode.textContent = 'Anexe uma imagem para validar sua resposta.';
+        feedbackNode.className = 'builder-input-feedback error';
+        playWrongAnswerSound();
+        await persistInputResponseToBackend({
+          module: getCurrentModule(),
+          slide,
+          element,
+          response: {
+            text: submittedText,
+            image: '',
+            audio: state.audio,
+            textMatched,
+            imageMatched: false
+          },
+          matched: false
+        });
+        return;
+      }
+      if (!element.compareImageReference || viewerState.isPublic || isReplayMode()) {
+        imageMatched = false;
+        imageCompareReason = 'A comparacao visual nao esta disponivel neste modo.';
+      } else if (textMatched) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Comparando...';
+        try {
+          const compareResult = await compareInputImageWithReference({
+            referenceImage: element.compareImageReference,
+            submittedImage: state.image
+          });
+          imageMatched = Boolean(compareResult.matched);
+          imageCompareReason = compareResult.reason || '';
+          imageCompareConfidence = compareResult.confidence || 0;
+        } catch (error) {
+          feedbackNode.textContent = error.message || 'Nao foi possivel validar a imagem.';
+          feedbackNode.className = 'builder-input-feedback error';
+          submitBtn.disabled = false;
+          submitBtn.textContent = element.submitLabel || 'Enviar resposta';
+          return;
+        }
+        submitBtn.disabled = false;
+        submitBtn.textContent = element.submitLabel || 'Enviar resposta';
+      }
+    }
+
+    const matched = textMatched && imageMatched;
+    if (feedbackNode) {
+      feedbackNode.textContent = matched
+        ? element.successMessage
+        : imageCompareReason || element.errorMessage;
+      feedbackNode.className = `builder-input-feedback ${matched ? 'success' : 'error'}`;
+    }
+    await persistInputResponseToBackend({
+      module: getCurrentModule(),
+      slide,
+      element,
+      response: {
+        text: submittedText,
+        image: state.image,
+        audio: state.audio,
+        textMatched,
+        imageMatched,
+        imageCompareReason,
+        imageCompareConfidence
+      },
+      matched
+    });
+    if (matched && typeof runActions === 'function') {
+      runActions({
+        text: submittedText,
+        image: state.image,
+        audio: state.audio,
+        matched,
+        textMatched,
+        imageMatched,
+        imageCompareReason,
+        imageCompareConfidence
+      });
+      playCorrectAnswerSound();
+    } else {
+      playWrongAnswerSound();
+    }
+  });
+  return node;
+};
+
+const persistProgressEventToBackend = async (event) => {
+  const module = getCurrentModule();
+  if (viewerState.isPublic || isReplayMode() || !module?.courseId || !event || typeof event !== 'object') {
+    return;
+  }
+  try {
+    await authorizedFetch('/api/student/progress', {
+      method: 'POST',
+      body: JSON.stringify({
+        courseId: module.courseId,
+        type: 'interactive',
+        currentModule: module.title,
+        grade: getModuleQuizMetrics(module).gradePercent,
+        interactiveProgress: getModuleInteractiveProgress(module),
+        progressEvent: {
+          ...event,
+          moduleId: module.id,
+          moduleTitle: module.title
+        }
+      })
+    });
+  } catch (error) {
+    console.error('Não foi possível salvar o evento detalhado do aluno.', error);
   }
 };
 
@@ -1307,6 +2305,9 @@ const legacyCanAdvanceFromCurrentSlide = (targetIndex) => {
 };
 
 const canAdvanceFromCurrentSlide = (targetIndex) => {
+  if (isReplayMode()) {
+    return true;
+  }
   const module = getCurrentModule();
   const slides = module?.builder_data?.slides || [];
   const currentSlide = slides[viewerState.slideIndex];
@@ -1471,7 +2472,18 @@ const normalizeQuizElement = (element) => {
     return;
   }
   element.question = element.question || 'Nova pergunta';
-  element.options = Array.isArray(element.options) && element.options.length ? element.options : ['Opção 1', 'Opção 2', 'Opção 3'];
+  const normalizedOptions = normalizeStringList(
+    Array.isArray(element.options) && element.options.length
+      ? element.options
+      : (Array.isArray(element.quizOptions) ? element.quizOptions : [])
+  );
+  // Only set defaults if element has no options at all (new quiz)
+  // Preserve existing options even if they become empty after normalization
+  if (!Array.isArray(element.options) || !element.options.length) {
+    element.options = normalizedOptions.length ? normalizedOptions : ['Opcao 1', 'Opcao 2', 'Opcao 3'];
+  } else {
+    element.options = normalizedOptions;
+  }
   element.correctOption = Math.min(Math.max(Number(element.correctOption) || 0, 0), element.options.length - 1);
   element.successMessage = element.successMessage || 'Resposta correta!';
   element.errorMessage = element.errorMessage || 'Resposta incorreta. Tente novamente.';
@@ -1501,14 +2513,14 @@ const createQuizNode = (element, slide) => {
     <p class="builder-quiz-meta">Vale ${element.points} ponto${element.points === 1 ? '' : 's'}</p>
     <div class="builder-quiz-options">
       ${element.options
-        .map(
-          (option, index) => `
+      .map(
+        (option, index) => `
             <label class="builder-quiz-option">
               <input type="radio" name="quiz-viewer-${element.id}" value="${index}" />
               <span>${renderPlainTextHtml(option)}</span>
             </label>`
-        )
-        .join('')}
+      )
+      .join('')}
     </div>
     <button type="button" class="secondary-btn builder-quiz-action">${escapeHtml(element.actionLabel)}</button>
     <div class="builder-quiz-feedback" aria-live="polite"></div>
@@ -1600,6 +2612,22 @@ const createQuizNode = (element, slide) => {
       applyLockedState(true, nextAttempt.selectedIndex);
     }
     persistQuizAttemptToBackend({ module, slideKey, quizKey, attempt: nextAttempt });
+    persistProgressEventToBackend({
+      type: 'quiz_answer',
+      slideId: slideKey,
+      slideTitle: currentSlide?.title || '',
+      elementId: element.id,
+      elementType: 'quiz',
+      summary: `${isCorrect ? 'Acertou' : 'Errou'} o quiz "${element.question || 'Pergunta'}".`,
+      details: {
+        quizQuestion: element.question || '',
+        selectedOptionText: element.options?.[Number(selected.value)] || '',
+        selectedIndex: Number(selected.value),
+        correctOptionText: element.options?.[Number(element.correctOption)] || '',
+        isCorrect,
+        lockOnWrong: Boolean(element.lockOnWrong)
+      }
+    });
     persistModuleQuizMetrics();
     persistCurrentSlideProgress({ force: true });
     updateNavigationState();
@@ -1742,9 +2770,12 @@ const createRuntimeElement = (type, source, slide) => {
   }
   return {
     ...base,
-    question: source.quizQuestion || 'Nova pergunta',
-    options: Array.isArray(source.quizOptions) && source.quizOptions.length ? source.quizOptions : ['Opção 1', 'Opção 2'],
-    correctOption: Math.max(0, Number(source.quizCorrectOption) || 0),
+    question: source.quizQuestion || source.question || 'Nova pergunta',
+    options:
+      Array.isArray(source.quizOptions) && source.quizOptions.length
+        ? source.quizOptions
+        : (Array.isArray(source.options) && source.options.length ? source.options : ['Opção 1', 'Opção 2']),
+    correctOption: Math.max(0, Number.isFinite(Number(source.quizCorrectOption)) ? Number(source.quizCorrectOption) : (Number(source.correctOption) || 0)),
     successMessage: source.successMessage || 'Resposta correta!',
     errorMessage: source.errorMessage || 'Resposta incorreta. Tente novamente.',
     actionLabel: source.actionLabel || 'Validar resposta',
@@ -1779,6 +2810,118 @@ const boxesOverlap = (first, second) =>
   first.top + first.height > second.top;
 
 const findStageNodeByElementId = (elementId) => moduleStage?.querySelector(`[data-element-id="${elementId}"]`) || null;
+const getStageMediaNode = (node) => {
+  if (!node) return null;
+  if (node instanceof HTMLAudioElement || node instanceof HTMLVideoElement) {
+    return node;
+  }
+  return node.querySelector?.('audio, video') || null;
+};
+
+const getViewerMediaStateKey = (slideId = '', elementId = '') => `${slideId}::${elementId}`;
+const getViewerTimedVideoTriggerKey = (slideId = '', elementId = '') => `${slideId}::${elementId}`;
+
+const snapshotViewerMediaState = (slide) => {
+  if (!slide?.id || !moduleStage) {
+    return;
+  }
+  moduleStage.querySelectorAll('[data-element-id]').forEach((node) => {
+    const elementId = node.getAttribute('data-element-id') || '';
+    if (!elementId) {
+      return;
+    }
+    const mediaNode = getStageMediaNode(node);
+    if (mediaNode instanceof HTMLVideoElement || mediaNode instanceof HTMLAudioElement) {
+      viewerMediaState.set(getViewerMediaStateKey(slide.id, elementId), {
+        currentTime: Math.max(0, Number(mediaNode.currentTime) || 0),
+        paused: mediaNode.paused
+      });
+    }
+  });
+};
+
+const restoreViewerMediaState = (slide, element, node) => {
+  if (!slide?.id || !element?.id) {
+    return;
+  }
+  const mediaNode = getStageMediaNode(node);
+  if (!(mediaNode instanceof HTMLVideoElement) && !(mediaNode instanceof HTMLAudioElement)) {
+    return;
+  }
+  const state = viewerMediaState.get(getViewerMediaStateKey(slide.id, element.id));
+  if (!state) {
+    return;
+  }
+  const applyState = () => {
+    if (Number.isFinite(state.currentTime) && state.currentTime > 0) {
+      try {
+        mediaNode.currentTime = state.currentTime;
+      } catch (error) { }
+    }
+    if (state.paused === false) {
+      mediaNode.play().catch(() => { });
+    }
+  };
+  if (mediaNode.readyState >= 1) {
+    applyState();
+  } else {
+    mediaNode.addEventListener('loadedmetadata', applyState, { once: true });
+  }
+};
+
+const syncViewerElementVisibilityInDom = (slide, targetElementId, hidden) => {
+  if (!slide || !targetElementId) {
+    return false;
+  }
+  const wrapper = ensureStageContentWrapper();
+  if (!wrapper) {
+    return false;
+  }
+  const element = slide.elements?.find((item) => item?.id === targetElementId);
+  if (!element) {
+    return false;
+  }
+  const existingNode = findStageNodeByElementId(targetElementId);
+  const existingOverlay = wrapper.querySelector(`[data-caption-for-element-id="${CSS.escape(String(targetElementId))}"]`);
+  if (hidden) {
+    existingNode?.remove();
+    existingOverlay?.remove();
+    return true;
+  }
+  if (existingNode) {
+    return true;
+  }
+  const node = createRendererNode(element, slide);
+  if (!(node instanceof Element)) {
+    return false;
+  }
+  const orderedElements = (slide.elements || [])
+    .slice()
+    .sort((first, second) => (Number(first.zIndex) || 0) - (Number(second.zIndex) || 0));
+  const nextVisibleSibling = orderedElements
+    .slice(orderedElements.findIndex((item) => item?.id === targetElementId) + 1)
+    .find((item) => item?.id && !isViewerElementHidden(slide, item.id) && findStageNodeByElementId(item.id));
+  const firstCaptionOverlay = wrapper.querySelector('[data-caption-for-element-id]');
+  const insertionPoint = nextVisibleSibling
+    ? findStageNodeByElementId(nextVisibleSibling.id)
+    : firstCaptionOverlay;
+  if (insertionPoint) {
+    wrapper.insertBefore(node, insertionPoint);
+  } else {
+    wrapper.appendChild(node);
+  }
+  if (['audio', 'video'].includes(element.type)) {
+    const mediaNode = node.querySelector?.('audio, video') || (node.matches?.('audio,video') ? node : null);
+    const overlayNode = createMediaCaptionOverlayNode(element, mediaNode, wrapper);
+    if (overlayNode) {
+      overlayNode.style.zIndex = String((Number(element.zIndex) || 0) + 1);
+      wrapper.appendChild(overlayNode);
+      positionCaptionOverlayNode(overlayNode, element, wrapper);
+      requestAnimationFrame(() => positionCaptionOverlayNode(overlayNode, element, wrapper));
+    }
+  }
+  return true;
+};
 
 const applyViewerAudioPresentation = (node, element) => {
   normalizeAudioElement(element);
@@ -1786,7 +2929,8 @@ const applyViewerAudioPresentation = (node, element) => {
     return;
   }
   node.loop = Boolean(element.audioLoop);
-  node.preload = 'auto';
+  node.preload = 'metadata';
+  node.autoplay = false;
   node.controls = Boolean(element.audioVisible);
   node.style.display = element.audioVisible ? '' : 'none';
 };
@@ -1799,12 +2943,12 @@ const controlViewerAudioElement = (slide, targetElementId) => {
   if (!target) {
     return false;
   }
-  const node = findStageNodeByElementId(targetElementId);
+  const node = getStageMediaNode(findStageNodeByElementId(targetElementId));
   if (!(node instanceof HTMLAudioElement)) {
     return false;
   }
   node.currentTime = 0;
-  node.play().catch(() => {});
+  node.play().catch(() => { });
   return true;
 };
 
@@ -1816,21 +2960,21 @@ const controlViewerVideoElement = (slide, targetElementId, actionType, timeSecon
   if (!target || target.provider === 'youtube') {
     return false;
   }
-  const node = findStageNodeByElementId(targetElementId);
+  const node = getStageMediaNode(findStageNodeByElementId(targetElementId));
   if (!(node instanceof HTMLVideoElement)) {
     return false;
   }
   const nextTime = Math.max(0, Number(timeSeconds) || 0);
   switch (actionType) {
     case 'playVideo':
-      node.play().catch(() => {});
+      node.play().catch(() => { });
       return true;
     case 'pauseVideo':
       node.pause();
       return true;
     case 'seekVideo':
       node.currentTime = nextTime;
-      node.play().catch(() => {});
+      node.play().catch(() => { });
       return true;
     default:
       return false;
@@ -1842,52 +2986,116 @@ const attachTimedVideoTrigger = (videoNode, element) => {
   if (!(videoNode instanceof HTMLVideoElement) || element.provider === 'youtube') {
     return;
   }
-  const triggerTime = Math.max(0, Number(element.videoTriggerTime) || 0);
-  if ((element.videoTriggerAction || 'none') === 'none' || triggerTime <= 0) {
+  const slide = getCurrentSlide();
+  if (!slide?.id || !element?.id) {
     return;
   }
-  let fired = false;
+  const triggers = (element.videoTriggers || []).filter(
+    (trigger) => trigger?.enabled !== false && (trigger.actionConfig?.type || 'none') !== 'none' && Number(trigger.time) > 0
+  );
+  if (!triggers.length) {
+    return;
+  }
+  const stateKey = getViewerTimedVideoTriggerKey(slide.id, element.id);
+  const firedIds = new Set(viewerTimedVideoTriggers.get(stateKey) || []);
+  viewerTimedVideoTriggers.set(stateKey, firedIds);
   const resetIfNeeded = () => {
-    if ((videoNode.currentTime || 0) < triggerTime) {
-      fired = false;
-    }
+    const currentTime = Number(videoNode.currentTime) || 0;
+    triggers.forEach((trigger) => {
+      if (currentTime < Math.max(0, Number(trigger.time) || 0)) {
+        firedIds.delete(trigger.id);
+      }
+    });
+    viewerTimedVideoTriggers.set(stateKey, new Set(firedIds));
   };
   videoNode.addEventListener('seeking', resetIfNeeded);
   videoNode.addEventListener('timeupdate', () => {
-    if (fired || (videoNode.currentTime || 0) < triggerTime) {
-      return;
-    }
-    fired = true;
-    const action = element.videoTriggerAction || 'none';
-    if (action === 'pauseVideo') {
-      videoNode.pause();
-      return;
-    }
-    if (action === 'playAudio') {
-      controlViewerAudioElement(getCurrentSlide(), element.videoTriggerTargetElementId || '');
-      return;
-    }
-    if (action === 'playVideo') {
-      videoNode.play().catch(() => {});
-      return;
-    }
-    if (action === 'seekVideo') {
-      videoNode.currentTime = Math.max(0, Number(element.videoTriggerSeekTime) || 0);
-      videoNode.play().catch(() => {});
-      return;
-    }
-    if (action === 'showElement') {
-      setViewerElementHidden(getCurrentSlide(), element.videoTriggerTargetElementId || '', false);
-      renderSlide(getCurrentSlide());
-      return;
-    }
-    if (action === 'hideElement') {
-      setViewerElementHidden(getCurrentSlide(), element.videoTriggerTargetElementId || '', true);
-      renderSlide(getCurrentSlide());
-    }
+    const currentTime = Number(videoNode.currentTime) || 0;
+    triggers.forEach((trigger) => {
+      if (firedIds.has(trigger.id) || currentTime < Math.max(0, Number(trigger.time) || 0)) {
+        return;
+      }
+      firedIds.add(trigger.id);
+      viewerTimedVideoTriggers.set(stateKey, new Set(firedIds));
+      const actionConfig = {
+        ...(trigger.actionConfig || {}),
+        targetElementId: resolveVideoTriggerActionTargetElementId(element, trigger)
+      };
+      executeActionConfig(element, actionConfig, getCurrentSlide(), getCurrentModule(), getCurrentModule()?.builder_data?.slides || []);
+    });
   });
   videoNode.addEventListener('ended', () => {
-    fired = false;
+    firedIds.clear();
+    viewerTimedVideoTriggers.delete(stateKey);
+  });
+};
+
+const clearTimedViewerSlideTriggerTimers = () => {
+  timedViewerSlideTriggerTimers.forEach((timerId) => window.clearTimeout(timerId));
+  timedViewerSlideTriggerTimers = [];
+};
+
+const getTimedViewerSlideTriggerKey = (slideId, triggerId) => `${slideId || 'slide'}::${triggerId || 'trigger'}`;
+
+const shouldRerenderViewerAfterTimedAction = (actionType = 'none') =>
+  !['playAudio', 'playVideo', 'pauseVideo', 'seekVideo', 'moveElement', 'playAnimation'].includes(actionType);
+
+const scheduleTimedViewerSlideTriggers = (slide) => {
+  if (!slide?.id) {
+    clearTimedViewerSlideTriggerTimers();
+    activeTimedViewerSlideKey = null;
+    currentViewerSlideStartedAt = 0;
+    return;
+  }
+  const slideKey = getStableSlideKey(slide, viewerState.slideIndex);
+  if (activeTimedViewerSlideKey !== slideKey) {
+    clearTimedViewerSlideTriggerTimers();
+    activeTimedViewerSlideKey = slideKey;
+    currentViewerSlideStartedAt = Date.now();
+  } else if (timedViewerSlideTriggerTimers.length) {
+    return;
+  }
+  const elapsedMs = Math.max(0, Date.now() - (currentViewerSlideStartedAt || Date.now()));
+  const triggers = (slide.elements || [])
+    .filter((element) => element?.type === 'timedTrigger')
+    .flatMap((element) => {
+      normalizeInteractionTriggers(element);
+      return (element.interactionTriggers || [])
+        .filter((trigger) => trigger?.enabled !== false && (trigger.actionConfig?.type || 'none') !== 'none')
+        .map((trigger) => ({ element, trigger }));
+    });
+  triggers.forEach(({ element, trigger }) => {
+    const triggerKey = getTimedViewerSlideTriggerKey(slideKey, trigger.id);
+    if (viewerTimedSlideTriggers.get(triggerKey) === true) {
+      return;
+    }
+    const delay = Math.max(0, Math.round(Math.max(0, Number(trigger.time) || 0) * 1000 - elapsedMs));
+    const timerId = window.setTimeout(() => {
+      timedViewerSlideTriggerTimers = timedViewerSlideTriggerTimers.filter((item) => item !== timerId);
+      const activeSlide = getCurrentSlide();
+      const activeSlideKey = getStableSlideKey(activeSlide, viewerState.slideIndex);
+      if (!activeSlide || activeSlideKey !== slideKey) {
+        return;
+      }
+      if (viewerTimedSlideTriggers.get(triggerKey) === true) {
+        return;
+      }
+      viewerTimedSlideTriggers.set(triggerKey, true);
+      const didExecute = executeActionConfig(
+        element,
+        trigger.actionConfig || {},
+        activeSlide,
+        getCurrentModule(),
+        getCurrentModule()?.builder_data?.slides || []
+      );
+      if (!didExecute) {
+        return;
+      }
+      if (getStableSlideKey(getCurrentSlide(), viewerState.slideIndex) !== slideKey || shouldRerenderViewerAfterTimedAction(trigger.actionConfig?.type || 'none')) {
+        renderSlide(getCurrentSlide());
+      }
+    }, delay);
+    timedViewerSlideTriggerTimers.push(timerId);
   });
 };
 
@@ -1956,6 +3164,8 @@ const executeActionConfig = (sourceElement, config, currentSlide, module, slides
       }
       return false;
     }
+    case 'redirect':
+      return openExternalRedirect(safeConfig.url);
     case 'moveElement':
       return moveSlideElementBy(
         currentSlide,
@@ -1975,13 +3185,13 @@ const executeActionConfig = (sourceElement, config, currentSlide, module, slides
       return controlViewerVideoElement(currentSlide, safeConfig.targetElementId, safeConfig.type, safeConfig.videoTime);
     case 'showElement':
       if (setViewerElementHidden(currentSlide, safeConfig.targetElementId, false)) {
-        renderSlide(currentSlide);
+        syncViewerElementVisibilityInDom(currentSlide, safeConfig.targetElementId, false);
         return true;
       }
       return false;
     case 'hideElement':
       if (setViewerElementHidden(currentSlide, safeConfig.targetElementId, true)) {
-        renderSlide(currentSlide);
+        syncViewerElementVisibilityInDom(currentSlide, safeConfig.targetElementId, true);
         return true;
       }
       return false;
@@ -2045,11 +3255,17 @@ const triggerDetectorsForElement = (draggedElement, currentSlide, module, slides
       if (!activation.ready) {
         return;
       }
-      const didTrigger = executeActionConfig(detector, detector.actionConfig || {}, currentSlide, module, slides);
-      triggered = didTrigger || triggered;
-      if (didTrigger && activation.config?.detectorTriggerOnce) {
-        viewerTriggeredDetectors.add(activation.stateKey);
-      }
+      normalizeInteractionTriggers(detector);
+      (detector.interactionTriggers || []).forEach((triggerConfig) => {
+        if (triggerConfig?.enabled === false) {
+          return;
+        }
+        const didTrigger = executeActionConfig(detector, triggerConfig.actionConfig || {}, currentSlide, module, slides);
+        triggered = didTrigger || triggered;
+        if (didTrigger && triggerConfig.actionConfig?.detectorTriggerOnce) {
+          viewerTriggeredDetectors.add(activation.stateKey);
+        }
+      });
     });
   return triggered;
 };
@@ -2061,6 +3277,9 @@ const enableViewerStudentDrag = (node, element, slide) => {
   let pointerId;
   let offsetX = 0;
   let offsetY = 0;
+  let startX = 0;
+  let startY = 0;
+  let moved = false;
   const updatePosition = () => {
     const stage = moduleStageDimensions || DEFAULT_STAGE_SIZE;
     const box = getElementRuntimeBox(element);
@@ -2072,6 +3291,7 @@ const enableViewerStudentDrag = (node, element, slide) => {
   const onMove = (event) => {
     element.x = event.clientX - offsetX;
     element.y = event.clientY - offsetY;
+    moved = true;
     updatePosition();
   };
   const stop = () => {
@@ -2081,12 +3301,33 @@ const enableViewerStudentDrag = (node, element, slide) => {
       node.releasePointerCapture?.(pointerId);
       pointerId = undefined;
     }
-    triggerDetectorsForElement(element, slide, getCurrentModule(), getCurrentModule()?.builder_data?.slides || []);
+    const triggered = triggerDetectorsForElement(element, slide, getCurrentModule(), getCurrentModule()?.builder_data?.slides || []);
+    const didChangePosition = Math.abs((Number(element.x) || 0) - startX) > 1 || Math.abs((Number(element.y) || 0) - startY) > 1;
+    if (moved && didChangePosition) {
+      persistProgressEventToBackend({
+        type: 'drag_end',
+        slideId: getStableSlideKey(slide, viewerState.slideIndex),
+        slideTitle: slide?.title || '',
+        elementId: element.id,
+        elementType: element.type,
+        summary: triggered
+          ? `Arrastou ${element.type} e acionou o alvo correto.`
+          : `Arrastou ${element.type} para uma nova posição.`,
+        details: {
+          x: Number(element.x) || 0,
+          y: Number(element.y) || 0,
+          triggeredDetector: triggered
+        }
+      });
+    }
   };
   node.addEventListener('pointerdown', (event) => {
     event.preventDefault();
     event.stopPropagation();
     const currentState = getElementRenderState(element);
+    startX = currentState.x;
+    startY = currentState.y;
+    moved = false;
     pointerId = event.pointerId;
     offsetX = event.clientX - currentState.x;
     offsetY = event.clientY - currentState.y;
@@ -2108,11 +3349,42 @@ const executeFloatingButtonAction = (element) => {
     if (ruleState.invalid) {
       alert('Essa regra precisa de um nome de grupo e de pelo menos 2 botões no mesmo slide para funcionar.');
     } else {
-      alert(`Faltam ${ruleState.remaining} botÃ£o(Ãµes) desta regra para liberar a aÃ§Ã£o.`);
+      alert(`Faltam ${ruleState.remaining} botão(ões) desta regra para liberar a ação.`);
     }
     return;
   }
   executeActionConfig(element, config, currentSlide, module, slides);
+};
+
+const executeFloatingButtonTriggers = (element) => {
+  const module = getCurrentModule();
+  const slides = module?.builder_data?.slides || [];
+  if (!slides.length) return;
+  const currentSlide = slides[viewerState.slideIndex];
+  normalizeInteractionTriggers(element);
+  let executedCount = 0;
+  let blockedRuleState = null;
+  (element.interactionTriggers || []).forEach((trigger) => {
+    if (trigger?.enabled === false) {
+      return;
+    }
+    const ruleState = registerFloatingRuleClick(module, currentSlide, element, trigger);
+    if (!ruleState.ready) {
+      blockedRuleState = blockedRuleState || ruleState;
+      return;
+    }
+    if (executeActionConfig(element, trigger.actionConfig || {}, currentSlide, module, slides)) {
+      executedCount += 1;
+    }
+  });
+  syncViewerFloatingRuleButtonState(module, currentSlide, element.id);
+  if (!executedCount && blockedRuleState) {
+    if (blockedRuleState.invalid) {
+      alert('Essa regra precisa de um nome de grupo e de pelo menos 2 botões no mesmo slide para funcionar.');
+    } else {
+      alert(`Faltam ${blockedRuleState.remaining} botão(ões) desta regra para liberar a ação.`);
+    }
+  }
 };
 
 const applyShapeStyles = (node, shape) => {
@@ -2157,6 +3429,7 @@ const applyElementAnimationStyles = (node, element, options = {}) => {
     'element-animation-float',
     'element-animation-zoom-in'
   );
+  node.style.opacity = String(getElementBaseOpacity(element));
 
   if (!ANIMATABLE_ELEMENT_TYPES.has(element.type)) {
     node.style.animation = '';
@@ -2229,6 +3502,12 @@ const applyModuleStageDimensions = (size) => {
 
 const clearStage = (message) => {
   if (!moduleStage) return;
+  viewerTimedVideoTriggers.clear();
+  viewerMediaState.clear();
+  clearTimedViewerSlideTriggerTimers();
+  activeTimedViewerSlideKey = null;
+  currentViewerSlideStartedAt = 0;
+  lastLoggedViewerSlideKey = null;
   Array.from(moduleStage.children).forEach((child) => {
     if (child.id !== 'moduleStageHint') {
       child.remove();
@@ -2267,6 +3546,9 @@ const loadModule = (modules) => {
     }
   }
   if (!module) {
+    viewerHiddenElements.clear();
+    viewerTimedVideoTriggers.clear();
+    viewerMediaState.clear();
     clearStage('Você não tem acesso a este módulo.');
     disableNavigation();
     return;
@@ -2278,21 +3560,30 @@ const loadModule = (modules) => {
   if (viewerSubtitle) {
     viewerSubtitle.textContent = viewerState.isPublic
       ? `${module.courseTitle || 'Conteudo publico'} • acesso publico`
-      : module.courseTitle;
+      : isReplayMode()
+        ? `${module.courseTitle} • replay visual do aluno`
+        : module.courseTitle;
   }
   const slides = module.builder_data?.slides || [];
   const stageSize = module.builder_data?.stageSize || null;
   moduleStageDimensions = stageSize ? { ...stageSize } : null;
   applyModuleStageDimensions(moduleStageDimensions);
   if (!slides.length) {
+    viewerHiddenElements.clear();
+    viewerTimedVideoTriggers.clear();
+    viewerMediaState.clear();
     clearStage('Este módulo ainda não possui slides.');
     disableNavigation();
     return;
   }
+  hydrateViewerInitiallyHiddenFromModule(module);
   viewerState.slideIndex = Math.min(Math.max(viewerState.slideIndex, 0), slides.length - 1);
   renderSlide(slides[viewerState.slideIndex]);
   if (moduleStageHint) {
     moduleStageHint.style.display = 'none';
+  }
+  if (isReplayMode()) {
+    renderReplayHeader();
   }
   updateNavigationState();
 };
@@ -2300,14 +3591,19 @@ const loadModule = (modules) => {
 const renderSlide = (slide) => {
   if (!moduleStage) return;
   clearCurrentSlideProgressTimer();
+  const slideKey = getStableSlideKey(slide, viewerState.slideIndex);
+  if (activeTimedViewerSlideKey !== slideKey) {
+    clearTimedViewerSlideTriggerTimers();
+    currentViewerSlideStartedAt = Date.now();
+  }
   currentSlideEnteredAt = Date.now();
   const wrapper = ensureStageContentWrapper();
   if (!wrapper) return;
-  const slideKey = getStableSlideKey(slide, viewerState.slideIndex);
   if (lastRenderedViewerSlideKey !== slideKey) {
     viewerAnimationState.clear();
     lastRenderedViewerSlideKey = slideKey;
   }
+  snapshotViewerMediaState(slide);
   wrapper.innerHTML = '';
   const backgroundStyles = getSlideBackgroundStyles(slide);
   renderViewerBackgroundMedia(moduleStage, slide);
@@ -2315,13 +3611,41 @@ const renderSlide = (slide) => {
   moduleStage.style.backgroundSize = backgroundStyles.backgroundImage ? 'cover' : '';
   moduleStage.style.backgroundPosition = backgroundStyles.backgroundImage ? 'center' : '';
   moduleStage.style.backgroundColor = backgroundStyles.backgroundColor;
+  const deferredCaptionOverlays = [];
   (slide.elements || [])
     .slice()
     .sort((a, b) => (Number(a.zIndex) || 0) - (Number(b.zIndex) || 0))
     .forEach((element) => {
-      wrapper.appendChild(createRendererNode(element, slide));
+      const node = createRendererNode(element, slide);
+      wrapper.appendChild(node);
+      if (['audio', 'video'].includes(element.type)) {
+        const mediaNode = node instanceof Element ? node.querySelector?.('audio, video') || (node.matches?.('audio,video') ? node : null) : null;
+        const overlayNode = createMediaCaptionOverlayNode(element, mediaNode, wrapper);
+        if (overlayNode) {
+          deferredCaptionOverlays.push({
+            element,
+            overlayNode,
+            zIndex: Number(element.zIndex) || 0
+          });
+        }
+      }
     });
+  deferredCaptionOverlays
+    .sort((a, b) => a.zIndex - b.zIndex)
+    .forEach(({ element, overlayNode, zIndex }) => {
+      overlayNode.style.zIndex = String(zIndex + 1);
+      wrapper.appendChild(overlayNode);
+      positionCaptionOverlayNode(overlayNode, element, wrapper);
+    });
+  if (deferredCaptionOverlays.length) {
+    requestAnimationFrame(() => {
+      deferredCaptionOverlays.forEach(({ element, overlayNode }) => positionCaptionOverlayNode(overlayNode, element, wrapper));
+    });
+  }
   updateStageScale();
+  if (isReplayMode()) {
+    renderReplayEventOverlay();
+  }
   const module = getCurrentModule();
   const currentSnapshot = getSlideProgressSnapshot(module, slide, viewerState.slideIndex);
   const slideCompleted = Boolean(
@@ -2329,6 +3653,19 @@ const renderSlide = (slide) => {
   );
   persistCurrentSlideProgress({ completed: slideCompleted, force: true });
   scheduleCurrentSlideProgressTimer();
+  scheduleTimedViewerSlideTriggers(slide);
+  if (lastLoggedViewerSlideKey !== slideKey) {
+    lastLoggedViewerSlideKey = slideKey;
+    persistProgressEventToBackend({
+      type: 'slide_view',
+      slideId: slideKey,
+      slideTitle: slide?.title || '',
+      summary: `Entrou no slide "${slide?.title || slideKey}".`,
+      details: {
+        viewedSeconds: 0
+      }
+    });
+  }
   updateNavigationState();
 };
 
@@ -2376,10 +3713,14 @@ const createRendererNode = (element, slide) => {
       });
       break;
     case 'audio':
-      node = document.createElement('audio');
-      node.className = 'builder-media-element';
-      node.src = element.src || '';
-      applyViewerAudioPresentation(node, element);
+      {
+        const mediaNode = document.createElement('audio');
+        mediaNode.className = 'builder-media-element';
+        mediaNode.src = element.src || '';
+        applyViewerAudioPresentation(mediaNode, element);
+        node = wrapMediaNodeWithCaptions(mediaNode, element);
+        restoreViewerMediaState(slide, element, node);
+      }
       break;
     case 'video':
       if (element.provider === 'youtube' && element.embedSrc) {
@@ -2395,18 +3736,41 @@ const createRendererNode = (element, slide) => {
         frame.referrerPolicy = 'strict-origin-when-cross-origin';
         node.appendChild(frame);
       } else {
-        node = document.createElement('video');
-        node.className = 'builder-media-element';
-        node.controls = true;
-        node.src = element.src || '';
-        attachVideoProgressTracking(node, element, slide);
-        attachTimedVideoTrigger(node, element);
+        const mediaNode = document.createElement('video');
+        mediaNode.className = 'builder-media-element';
+        mediaNode.controls = true;
+        mediaNode.src = element.src || '';
+        attachVideoProgressTracking(mediaNode, element, slide);
+        attachTimedVideoTrigger(mediaNode, element);
+        node = wrapMediaNodeWithCaptions(mediaNode, element);
+        restoreViewerMediaState(slide, element, node);
       }
       break;
     case 'quiz':
       node = createQuizNode(element, slide);
       node.style.background = element.quizBackgroundColor;
       node.style.backgroundColor = element.quizBackgroundColor;
+      break;
+    case 'input':
+      node = createInputElementNode(element, slide, {
+        runActions: () => {
+          const module = getCurrentModule();
+          const slides = module?.builder_data?.slides || [];
+          let executedCount = 0;
+          normalizeInteractionTriggers(element);
+          (element.interactionTriggers || []).forEach((trigger) => {
+            if (trigger?.enabled === false) {
+              return;
+            }
+            if (executeActionConfig(element, trigger.actionConfig || {}, slide, module, slides)) {
+              executedCount += 1;
+            }
+          });
+          if (executedCount && getCurrentSlide()?.id === slide?.id) {
+            renderSlide(getCurrentSlide());
+          }
+        }
+      });
       break;
     case 'floatingButton':
       node = document.createElement('button');
@@ -2415,23 +3779,32 @@ const createRendererNode = (element, slide) => {
       applyElementBackground(node, element);
       applyShapeStyles(node, element.shape || 'rectangle');
       {
-        const config = normalizeFloatingRuleConfig(element.actionConfig || {});
         const module = getCurrentModule();
         const slideKey = getStableSlideKey(slide, viewerState.slideIndex);
-        const ruleState =
-          config.requireAllButtonsInGroup && config.ruleGroup
-            ? getButtonRuleState(module?.id, slideKey, config.ruleGroup)
-            : null;
-        const clickedIds = new Set(Array.isArray(ruleState?.clickedButtonIds) ? ruleState.clickedButtonIds : []);
-        if (clickedIds.has(element.id)) {
+        normalizeInteractionTriggers(element);
+        const isCompleted = (element.interactionTriggers || []).some((trigger) => {
+          const config = normalizeFloatingRuleConfig(trigger?.actionConfig || {});
+          const ruleState =
+            config.requireAllButtonsInGroup && config.ruleGroup
+              ? getButtonRuleState(module?.id, slideKey, config.ruleGroup)
+              : null;
+          const clickedIds = new Set(Array.isArray(ruleState?.clickedButtonIds) ? ruleState.clickedButtonIds : []);
+          return clickedIds.has(element.id);
+        });
+        if (isCompleted) {
           node.classList.add('floating-button-completed');
         }
       }
-      node.addEventListener('click', () => executeFloatingButtonAction(element));
+      node.addEventListener('click', () => executeFloatingButtonTriggers(element));
       break;
     case 'detector':
       node = document.createElement('div');
       node.className = 'detector-element detector-element-viewer';
+      node.setAttribute('aria-hidden', 'true');
+      break;
+    case 'timedTrigger':
+      node = document.createElement('div');
+      node.className = 'time-trigger-element time-trigger-element-viewer';
       node.setAttribute('aria-hidden', 'true');
       break;
     case 'animatedArrow':
@@ -2522,7 +3895,7 @@ const toggleStageFullscreen = async () => {
     } else {
       await moduleStageShell.requestFullscreen();
       if (screen.orientation?.lock) {
-        await screen.orientation.lock('landscape').catch(() => {});
+        await screen.orientation.lock('landscape').catch(() => { });
       }
     }
   } catch (error) {
@@ -2553,9 +3926,8 @@ const renderModuleList = () => {
   moduleList.innerHTML = viewerModules
     .map(
       (module) => `
-      <button type="button" class="module-selection-item ${viewerState.moduleId === module.id ? 'active' : ''} ${
-        unlockedModuleIds.has(module.id) ? '' : 'locked'
-      }" data-module-id="${module.id}" data-locked="${unlockedModuleIds.has(module.id) ? 'false' : 'true'}">
+      <button type="button" class="module-selection-item ${viewerState.moduleId === module.id ? 'active' : ''} ${unlockedModuleIds.has(module.id) ? '' : 'locked'
+        }" data-module-id="${module.id}" data-locked="${unlockedModuleIds.has(module.id) ? 'false' : 'true'}">
         <strong>${module.title}</strong>
         <small class="muted" style="font-size:0.75rem;">${module.courseTitle}${unlockedModuleIds.has(module.id) ? '' : ' • Fase bloqueada'}</small>
       </button>`
@@ -2580,6 +3952,9 @@ const renderModuleList = () => {
       renderModuleList();
     })
   );
+  if (isReplayMode()) {
+    renderReplayHeader();
+  }
 };
 
 const initModuleViewerPage = async () => {
@@ -2598,10 +3973,11 @@ const initModuleViewerPage = async () => {
   moduleSelection = document.getElementById('moduleSelection');
   viewerBackLink = document.getElementById('viewerBackLink');
   viewerLogoutBtn = document.getElementById('viewerLogoutBtn');
+  replayStatusCard = document.getElementById('replayStatusCard');
+  replayStatusGrid = document.getElementById('replayStatusGrid');
+  replayTimelineCard = document.getElementById('replayTimelineCard');
+  replayTimelineList = document.getElementById('replayTimelineList');
   document.querySelectorAll('.logout-btn').forEach((btn) => btn.addEventListener('click', handleLogout));
-  document.addEventListener('pointerdown', unlockBackgroundMediaAudio, { passive: true });
-  document.addEventListener('keydown', unlockBackgroundMediaAudio);
-  document.addEventListener('touchstart', unlockBackgroundMediaAudio, { passive: true });
   prevBtn?.addEventListener('click', () => changeSlide(-1));
   nextBtn?.addEventListener('click', () => changeSlide(1));
   viewerFullscreenBtn?.addEventListener('click', toggleStageFullscreen);
@@ -2618,6 +3994,7 @@ const initModuleViewerPage = async () => {
     }
     persistCurrentSlideProgress({ force: true });
     clearCurrentSlideProgressTimer();
+    clearTimedViewerSlideTriggerTimers();
   });
 
   if (viewerState.isPublic) {
@@ -2639,10 +4016,15 @@ const initModuleViewerPage = async () => {
         }
       });
     }
+  } else if (isReplayMode()) {
+    if (viewerBackLink) {
+      viewerBackLink.textContent = 'Voltar ao admin';
+      viewerBackLink.href = 'admin.html';
+    }
   } else {
     const token = getToken();
     const role = localStorage.getItem(USER_ROLE_KEY);
-    if (!token || (role && role !== 'student' && role !== 'admin')) {
+    if (!token || (role && role !== 'student' && role !== 'admin' && role !== 'professor')) {
       window.location.href = 'login.html';
       return;
     }
@@ -2658,6 +4040,40 @@ const initModuleViewerPage = async () => {
       viewerModules = [publicModule];
       viewerState.moduleId = publicModule.id;
       viewerState.courseId = publicModule.courseId;
+    } else if (isReplayMode()) {
+      if (!viewerState.replayUserId || !viewerState.courseId) {
+        throw new Error('Informe userId e courseId para abrir o replay.');
+      }
+      replayPayload = await fetchAdminReplay(viewerState.replayUserId, viewerState.courseId);
+      replayEvents = Array.isArray(replayPayload?.events) ? replayPayload.events : [];
+      viewerModules = sortModulesForPhase(
+        (Array.isArray(replayPayload?.modules) ? replayPayload.modules : []).map((module) => ({
+          ...module,
+          courseId: replayPayload.course?.id || viewerState.courseId,
+          courseTitle: replayPayload.course?.title || 'Curso',
+          courseProgress: replayPayload.course?.progress || {}
+        }))
+      );
+      hydrateQuizAttemptsFromCourses([
+        {
+          id: replayPayload.course?.id || viewerState.courseId,
+          title: replayPayload.course?.title || 'Curso',
+          progress: replayPayload.course?.progress || {},
+          modules: Array.isArray(replayPayload?.modules) ? replayPayload.modules : []
+        }
+      ]);
+      if (!viewerState.moduleId && replayEvents.length) {
+        const initialEventIndex = replayEvents.length - 1;
+        viewerState.replayEventIndex = initialEventIndex;
+        const firstEventTarget = getReplayEventTarget(replayEvents[initialEventIndex]);
+        if (firstEventTarget?.module?.id) {
+          viewerState.moduleId = firstEventTarget.module.id;
+          viewerState.slideIndex = firstEventTarget.slideIndex;
+        }
+      }
+      if (!viewerState.moduleId && viewerModules.length) {
+        viewerState.moduleId = viewerModules[0].id;
+      }
     } else {
       const response = await authorizedFetch('/api/student/courses');
       const courses = await response.json();
@@ -2680,3 +4096,121 @@ const initModuleViewerPage = async () => {
 };
 
 document.addEventListener('DOMContentLoaded', initModuleViewerPage);
+
+// ── Chat do Curso (module-viewer) ──────────────────────────────
+let viewerChatPollTimer = null;
+let viewerLastMessageCount = 0;
+let viewerChatOpen = false;
+
+const closeCourseChat = () => {
+  document.getElementById('chatModal')?.classList.add('hidden');
+  if (viewerChatPollTimer) { clearInterval(viewerChatPollTimer); viewerChatPollTimer = null; }
+  viewerChatOpen = false;
+  viewerLastMessageCount = 0;
+};
+
+const renderViewerChatMessages = (messages) => {
+  const container = document.getElementById('chatMessages');
+  if (!container) return;
+  const sessionUser = JSON.parse(localStorage.getItem('curso-platform-user') || '{}');
+
+  if (!messages.length) {
+    container.innerHTML = '<p style="margin:0;color:#8b92b1;text-align:center;">Nenhuma mensagem ainda. Seja o primeiro!</p>';
+    return;
+  }
+
+  const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+
+  container.innerHTML = messages.map((msg) => {
+    const isAdmin = msg.role === 'admin' || msg.role === 'professor';
+    const safeMessage = escapeHtml(msg.message);
+    const safeName = escapeHtml(msg.full_name);
+    const time = new Date(msg.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    const isMine = !isAdmin && msg.full_name === sessionUser.fullName;
+    const bubbleClass = isAdmin ? 'admin-msg' : (isMine ? 'mine' : 'theirs');
+    const label = isAdmin ? `👨‍🏫 ${safeName} (Professor)` : safeName;
+    return `
+      <div class="chat-bubble ${bubbleClass}">
+        ${buildReplyQuoteMarkup(msg)}
+        ${!isMine ? `<strong style="font-size:0.78rem;display:block;margin-bottom:0.2rem;">${label}</strong>` : ''}
+        ${safeMessage}
+        <span class="chat-bubble-meta">${time}</span>
+      </div>`;
+  }).join('');
+
+  if (isNearBottom || messages.length !== viewerLastMessageCount) {
+    container.scrollTop = container.scrollHeight;
+  }
+  viewerLastMessageCount = messages.length;
+};
+
+const fetchViewerChatMessages = async (courseId) => {
+  try {
+    const response = await authorizedFetch(`/api/chat/${encodeURIComponent(courseId)}`);
+    if (!response.ok) return;
+    const messages = await response.json();
+    renderViewerChatMessages(messages);
+  } catch (e) { /* silencioso */ }
+};
+
+const openViewerChat = async () => {
+  const courseId = viewerState.courseId;
+  if (!courseId) { alert('Nenhum curso carregado para abrir o chat.'); return; }
+
+  const modal = document.getElementById('chatModal');
+  const title = document.getElementById('chatModalTitle');
+  const messages = document.getElementById('chatMessages');
+  if (!modal) return;
+
+  const courseName = viewerModules.find((m) => m.courseId === courseId)?.courseTitle || 'Curso';
+  title.textContent = `💬 ${escapeHtml(courseName)}`;
+  messages.innerHTML = '<p style="margin:0;color:#8b92b1;text-align:center;">Carregando mensagens...</p>';
+  modal.classList.remove('hidden');
+  viewerChatOpen = true;
+
+  await fetchViewerChatMessages(courseId);
+
+  if (viewerChatPollTimer) clearInterval(viewerChatPollTimer);
+  viewerChatPollTimer = setInterval(() => {
+    if (viewerChatOpen) fetchViewerChatMessages(courseId);
+  }, 5000);
+
+  document.getElementById('chatInput')?.focus();
+};
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('viewerChatBtn')?.addEventListener('click', openViewerChat);
+  document.getElementById('chatModalClose')?.addEventListener('click', closeCourseChat);
+  document.getElementById('chatModalBackdrop')?.addEventListener('click', closeCourseChat);
+
+  document.getElementById('chatForm')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const courseId = viewerState.courseId;
+    if (!courseId) return;
+
+    const input = document.getElementById('chatInput');
+    const message = input.value.slice(0, 1000).trim();
+    if (!message) return;
+
+    const btn = document.getElementById('chatSendBtn');
+    btn.disabled = true;
+    try {
+      const response = await authorizedFetch(`/api/chat/${encodeURIComponent(courseId)}`, {
+        method: 'POST',
+        body: JSON.stringify({ message })
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        alert(data?.message || 'Não foi possível enviar a mensagem.');
+        return;
+      }
+      input.value = '';
+      await fetchViewerChatMessages(courseId);
+    } catch (e) {
+      alert('Erro ao enviar mensagem. Tente novamente.');
+    } finally {
+      btn.disabled = false;
+      input.focus();
+    }
+  });
+});

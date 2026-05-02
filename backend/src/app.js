@@ -1,4 +1,4 @@
-﻿const express = require('express');
+const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const authRoutes = require('./routes/auth');
@@ -14,7 +14,7 @@ app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
-  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(self), geolocation=()');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-site');
   res.setHeader('Cache-Control', 'no-store');
   next();
@@ -26,9 +26,12 @@ app.use(express.static(frontendDir));
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 app.get('/', (req, res) => res.sendFile(path.join(frontendDir, 'login.html')));
 
+const chatRoutes = require('./routes/chat');
+
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/student', studentRoutes);
+app.use('/api/chat', chatRoutes);
 
 app.use((err, req, res, next) => {
   if (err?.type === 'entity.too.large') {

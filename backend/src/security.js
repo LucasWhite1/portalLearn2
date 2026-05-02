@@ -5,7 +5,7 @@ const SAFE_IDENTIFIER_REGEX = /^[a-zA-Z0-9:_-]{1,120}$/;
 const DEFAULT_TEXT_MAX = 2000;
 const DEFAULT_URL_MAX = 2048;
 const DEFAULT_DATA_URL_MAX = 45 * 1024 * 1024;
-const MAX_DEPTH = 8;
+const MAX_DEPTH = 12;
 const MAX_ARRAY_ITEMS = 250;
 const MAX_OBJECT_KEYS = 200;
 
@@ -66,7 +66,13 @@ function sanitizeMediaUrl(value, { allowData = true } = {}) {
     if (normalized.length > DEFAULT_DATA_URL_MAX) {
       return '';
     }
-    return /^data:(image|audio|video)\/[a-z0-9.+-]+;base64,[a-z0-9+/=\s]+$/i.test(normalized) ? normalized : '';
+    if (/^data:(image|audio|video)\/[a-z0-9.+-]+(?:;[a-z0-9.+-]+=[a-z0-9.+-]+)*;base64,[a-z0-9+/=\s]+$/i.test(normalized)) {
+      return normalized;
+    }
+    if (/^data:image\/svg\+xml(?:;[a-z0-9.+-]+=[a-z0-9.+-]+)*(?:;utf8)?,[\w!$&'()*+,;=:@\/?%\-.~\s#]+$/i.test(normalized)) {
+      return normalized;
+    }
+    return '';
   }
   const limitedUrl = normalized.slice(0, DEFAULT_URL_MAX);
   try {
@@ -99,7 +105,7 @@ function sanitizeBuilderData(builderData) {
       return Number.isFinite(value) ? value : null;
     }
     if (typeof value === 'string') {
-      if (/^(src|url|embedSrc|backgroundImage|backgroundVideo|backgroundVideoEmbedSrc|textureImage)$/i.test(key)) {
+      if (/^(src|url|embedSrc|backgroundImage|backgroundVideo|backgroundVideoEmbedSrc|textureImage|coverImage|thumbnail|compareImageReference|compareImageReferenceUrl)$/i.test(key)) {
         return sanitizeMediaUrl(value);
       }
       if (/color/i.test(key)) {

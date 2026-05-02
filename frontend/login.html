@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
@@ -24,6 +24,30 @@
           <input type="password" id="password" name="password" required placeholder="••••••••" />
         </div>
         <button type="submit" class="primary-btn">Entrar</button>
+        <p style="text-align:center; margin-top:1rem;"><a href="#" id="showForgotBtn" style="color:#8b92b1; text-decoration:none; font-size:0.9rem;">Esqueci minha senha</a></p>
+      </form>
+
+      <form id="forgotPasswordForm" style="display:none;">
+        <div class="field-group">
+          <label for="forgotEmail">Email institucional</label>
+          <input type="email" id="forgotEmail" name="forgotEmail" required placeholder="aluno@curso.com" />
+          <small style="color:#8b92b1;">Um token será enviado para este e-mail se ele existir.</small>
+        </div>
+        <button type="submit" class="primary-btn">Recuperar Senha</button>
+        <p style="text-align:center; margin-top:1rem;"><a href="#" id="showLoginFromForgotBtn" style="color:#8b92b1; text-decoration:none; font-size:0.9rem;">Voltar ao login</a></p>
+      </form>
+
+      <form id="resetPasswordForm" style="display:none;">
+        <div class="field-group">
+          <label for="resetToken">Token de Recuperação</label>
+          <input type="text" id="resetToken" name="resetToken" required placeholder="Ex: 123456" />
+        </div>
+        <div class="field-group">
+          <label for="newPassword">Nova Senha</label>
+          <input type="password" id="newPassword" name="newPassword" required placeholder="Nova senha segura" />
+        </div>
+        <button type="submit" class="primary-btn">Definir Nova Senha</button>
+        <p style="text-align:center; margin-top:1rem;"><a href="#" id="showLoginFromResetBtn" style="color:#8b92b1; text-decoration:none; font-size:0.9rem;">Cancelar</a></p>
       </form>
       <p id="loginFeedback" style="margin-top: 1rem; color: #ff6b6b; display: none;"></p>
     </div>

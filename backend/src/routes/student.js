@@ -1,13 +1,86 @@
 ﻿const express = require('express');
 const db = require('../db');
 const { requireAuth } = require('../middleware/auth');
+const { compareImagesWithNanoBanana } = require('../aiProvider');
+const { readImageSource } = require('../pixian');
 
-const { sanitizeText, isUuid } = require('../security');
+const { sanitizeText, sanitizeMediaUrl, isUuid } = require('../security');
 
 const router = express.Router();
 let quizAttemptsColumnEnsured = false;
 let interactiveProgressColumnEnsured = false;
 let videoProgressColumnEnsured = false;
+let progressEventsColumnEnsured = false;
+let inputResponsesColumnEnsured = false;
+let courseCoverColumnEnsured = false;
+let courseStoreColumnEnsured = false;
+let courseAccessRequestsTableEnsured = false;
+let ownershipColumnsEnsured = false;
+let courseColumnsEnsurePromise = null;
+let enrollmentProgressColumnsEnsurePromise = null;
+
+const ensureCourseCoverColumn = async () => {
+  if (courseCoverColumnEnsured) {
+    return;
+  }
+  if (!courseColumnsEnsurePromise) {
+    courseColumnsEnsurePromise = db.query(
+      `ALTER TABLE courses
+         ADD COLUMN IF NOT EXISTS cover_image TEXT NOT NULL DEFAULT '',
+         ADD COLUMN IF NOT EXISTS show_in_store BOOLEAN NOT NULL DEFAULT FALSE`
+    )
+      .then(() => {
+        courseCoverColumnEnsured = true;
+        courseStoreColumnEnsured = true;
+      })
+      .catch((error) => {
+        courseColumnsEnsurePromise = null;
+        throw error;
+      });
+  }
+  await courseColumnsEnsurePromise;
+};
+
+const ensureCourseStoreColumn = async () => {
+  if (courseStoreColumnEnsured) {
+    return;
+  }
+  await ensureCourseCoverColumn();
+};
+
+const ensureCourseAccessRequestsTable = async () => {
+  if (courseAccessRequestsTableEnsured) {
+    return;
+  }
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS course_access_requests (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      course_id UUID NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (user_id, course_id)
+    )
+  `);
+  courseAccessRequestsTableEnsured = true;
+};
+
+const ensureOwnershipColumns = async () => {
+  if (ownershipColumnsEnsured) {
+    return;
+  }
+  await db.query(
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL"
+  );
+  await db.query(
+    "ALTER TABLE courses ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL"
+  );
+  await db.query(
+    "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL"
+  );
+  ownershipColumnsEnsured = true;
+};
 
 router.get('/public/modules/:moduleId', async (req, res) => {
   const { moduleId } = req.params;
@@ -45,30 +118,56 @@ const ensureQuizAttemptsColumn = async () => {
   if (quizAttemptsColumnEnsured) {
     return;
   }
-  await db.query(
-    "ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS quiz_attempts JSONB NOT NULL DEFAULT '{}'::jsonb"
-  );
-  quizAttemptsColumnEnsured = true;
+  if (!enrollmentProgressColumnsEnsurePromise) {
+    enrollmentProgressColumnsEnsurePromise = db.query(
+      `ALTER TABLE enrollments
+         ADD COLUMN IF NOT EXISTS quiz_attempts JSONB NOT NULL DEFAULT '{}'::jsonb,
+         ADD COLUMN IF NOT EXISTS interactive_progress JSONB NOT NULL DEFAULT '{}'::jsonb,
+         ADD COLUMN IF NOT EXISTS video_progress JSONB NOT NULL DEFAULT '{}'::jsonb,
+         ADD COLUMN IF NOT EXISTS progress_events JSONB NOT NULL DEFAULT '[]'::jsonb,
+         ADD COLUMN IF NOT EXISTS input_responses JSONB NOT NULL DEFAULT '{}'::jsonb`
+    )
+      .then(() => {
+        quizAttemptsColumnEnsured = true;
+        interactiveProgressColumnEnsured = true;
+        videoProgressColumnEnsured = true;
+        progressEventsColumnEnsured = true;
+        inputResponsesColumnEnsured = true;
+      })
+      .catch((error) => {
+        enrollmentProgressColumnsEnsurePromise = null;
+        throw error;
+      });
+  }
+  await enrollmentProgressColumnsEnsurePromise;
 };
 
 const ensureInteractiveProgressColumn = async () => {
   if (interactiveProgressColumnEnsured) {
     return;
   }
-  await db.query(
-    "ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS interactive_progress JSONB NOT NULL DEFAULT '{}'::jsonb"
-  );
-  interactiveProgressColumnEnsured = true;
+  await ensureQuizAttemptsColumn();
 };
 
 const ensureVideoProgressColumn = async () => {
   if (videoProgressColumnEnsured) {
     return;
   }
-  await db.query(
-    "ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS video_progress JSONB NOT NULL DEFAULT '{}'::jsonb"
-  );
-  videoProgressColumnEnsured = true;
+  await ensureQuizAttemptsColumn();
+};
+
+const ensureProgressEventsColumn = async () => {
+  if (progressEventsColumnEnsured) {
+    return;
+  }
+  await ensureQuizAttemptsColumn();
+};
+
+const ensureInputResponsesColumn = async () => {
+  if (inputResponsesColumnEnsured) {
+    return;
+  }
+  await ensureQuizAttemptsColumn();
 };
 
 const normalizeSlideStatsEntry = (value = {}) => ({
@@ -77,6 +176,103 @@ const normalizeSlideStatsEntry = (value = {}) => ({
   viewedSeconds: Math.max(0, Number(value.viewedSeconds) || 0),
   updatedAt: value.updatedAt || null
 });
+
+const tryParseJson = (value) => {
+  if (typeof value !== 'string') {
+    return value;
+  }
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+};
+
+const normalizeJsonObject = (value) => {
+  const parsed = tryParseJson(value);
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+};
+
+const normalizeJsonArray = (value) => {
+  const parsed = tryParseJson(value);
+  return Array.isArray(parsed) ? parsed : null;
+};
+
+const toJsonbParam = (value) => (value === null || value === undefined ? null : JSON.stringify(value));
+
+const mediaUrlToImageAttachment = async (value, fallbackName = 'imagem') => {
+  const source = await readImageSource(value);
+  if (!source?.mimeType || !source?.buffer) {
+    return null;
+  }
+  return {
+    mimeType: String(source.mimeType).toLowerCase(),
+    data: source.buffer.toString('base64'),
+    name: source.filename || fallbackName
+  };
+};
+
+const sanitizeInputResponsePayload = (payload = {}, context = {}) => {
+  const key = sanitizeText(payload?.key || '', 220);
+  if (!key) {
+    return null;
+  }
+  const submittedText = sanitizeText(payload?.text || '', 4000, { trim: false });
+  const imageUrl = sanitizeMediaUrl(payload?.image || '');
+  const audioUrl = sanitizeMediaUrl(payload?.audio || '');
+  return {
+    key,
+    moduleId: sanitizeText(payload?.moduleId || context.moduleId || '', 120) || null,
+    moduleTitle: sanitizeText(payload?.moduleTitle || context.moduleTitle || '', 180) || null,
+    slideId: sanitizeText(payload?.slideId || '', 120) || null,
+    slideTitle: sanitizeText(payload?.slideTitle || '', 180) || null,
+    elementId: sanitizeText(payload?.elementId || '', 120) || null,
+    elementType: sanitizeText(payload?.elementType || 'input', 40) || 'input',
+    text: submittedText || '',
+    image: imageUrl || '',
+    audio: audioUrl || '',
+    matched: typeof payload?.matched === 'boolean' ? payload.matched : null,
+    submittedAt: new Date().toISOString()
+  };
+};
+
+const sanitizeProgressEventPayload = (event = {}, context = {}) => {
+  const eventType = sanitizeText(event?.type || '', 40).toLowerCase();
+  if (!eventType) {
+    return null;
+  }
+  const rawDetails = event?.details && typeof event.details === 'object' && !Array.isArray(event.details) ? event.details : {};
+  return {
+    id: sanitizeText(event?.id || '', 80) || null,
+    type: eventType,
+    createdAt: new Date().toISOString(),
+    moduleId: sanitizeText(event?.moduleId || context.moduleId || '', 120) || null,
+    moduleTitle: sanitizeText(event?.moduleTitle || context.moduleTitle || '', 180) || null,
+    slideId: sanitizeText(event?.slideId || '', 120) || null,
+    slideTitle: sanitizeText(event?.slideTitle || '', 180) || null,
+    elementId: sanitizeText(event?.elementId || '', 120) || null,
+    elementType: sanitizeText(event?.elementType || '', 60) || null,
+    summary: sanitizeText(event?.summary || '', 240) || null,
+    details: {
+      quizQuestion: sanitizeText(rawDetails.quizQuestion || '', 500) || null,
+      selectedOptionText: sanitizeText(rawDetails.selectedOptionText || '', 500) || null,
+      selectedIndex: Number.isFinite(Number(rawDetails.selectedIndex)) ? Number(rawDetails.selectedIndex) : null,
+      correctOptionText: sanitizeText(rawDetails.correctOptionText || '', 500) || null,
+      isCorrect: typeof rawDetails.isCorrect === 'boolean' ? rawDetails.isCorrect : null,
+      lockOnWrong: typeof rawDetails.lockOnWrong === 'boolean' ? rawDetails.lockOnWrong : null,
+      x: Number.isFinite(Number(rawDetails.x)) ? Number(Number(rawDetails.x).toFixed(2)) : null,
+      y: Number.isFinite(Number(rawDetails.y)) ? Number(Number(rawDetails.y).toFixed(2)) : null,
+      triggeredDetector: typeof rawDetails.triggeredDetector === 'boolean' ? rawDetails.triggeredDetector : null,
+      viewedSeconds: Number.isFinite(Number(rawDetails.viewedSeconds))
+        ? Number(Number(rawDetails.viewedSeconds).toFixed(2))
+        : null,
+      submittedText: sanitizeText(rawDetails.submittedText || '', 500) || null,
+      matched: typeof rawDetails.matched === 'boolean' ? rawDetails.matched : null,
+      hasImage: typeof rawDetails.hasImage === 'boolean' ? rawDetails.hasImage : null,
+      hasAudio: typeof rawDetails.hasAudio === 'boolean' ? rawDetails.hasAudio : null
+    }
+  };
+};
 
 router.get('/profile', async (req, res) => {
   const { id } = req.user;
@@ -88,34 +284,82 @@ router.get('/profile', async (req, res) => {
 });
 
 router.get('/courses', async (req, res) => {
+  const startedAt = Date.now();
+  const isLite = String(req.query?.lite || '').trim() === '1';
+  await ensureCourseCoverColumn();
+  await ensureCourseStoreColumn();
   await ensureQuizAttemptsColumn();
   await ensureInteractiveProgressColumn();
   await ensureVideoProgressColumn();
+  await ensureProgressEventsColumn();
+  await ensureInputResponsesColumn();
+  const ensuredAt = Date.now();
   const { rows } = await db.query(
-    `SELECT c.id, c.title, c.description, c.slug,
-            e.video_position, e.interactive_step, e.current_module, e.grade, e.updated_at, e.quiz_attempts, e.interactive_progress, e.video_progress
+    `SELECT c.id, c.title, c.description, c.slug, c.cover_image, c.show_in_store,
+            e.video_position, e.interactive_step, e.current_module, e.grade, e.updated_at, e.quiz_attempts, e.interactive_progress, e.video_progress, e.progress_events, e.input_responses
      FROM enrollments e
      JOIN courses c ON c.id = e.course_id
      WHERE e.user_id = $1
      ORDER BY c.title`,
     [req.user.id]
   );
+  const coursesAt = Date.now();
   if (!rows.length) {
+    res.setHeader('X-Courses-Endpoint-Ms', String(Date.now() - startedAt));
+    res.setHeader('X-Courses-Ensure-Ms', String(ensuredAt - startedAt));
+    res.setHeader('X-Courses-Query-Ms', String(coursesAt - ensuredAt));
+    res.setHeader('X-Courses-Modules-Ms', '0');
     return res.json([]);
   }
   const courseIds = rows.map((course) => course.id);
-  const modulesResult = await db.query(
-    `SELECT id, course_id, title, slug, description, builder_data, position, created_at
-     FROM modules
-     WHERE course_id = ANY($1)
-     ORDER BY position NULLS LAST, created_at`,
-    [courseIds]
-  );
+  const modulesResult = isLite
+    ? await db.query(
+      `SELECT id, course_id, title, slug, description, position, created_at,
+              COALESCE(builder_data->'moduleSettings', '{}'::jsonb) AS module_settings,
+              COALESCE(
+                (
+                  SELECT jsonb_agg(jsonb_build_object('id', slide_entry->>'id'))
+                  FROM jsonb_array_elements(COALESCE(builder_data->'slides', '[]'::jsonb)) AS slide_entry
+                ),
+                '[]'::jsonb
+              ) AS slide_refs
+       FROM modules
+       WHERE course_id = ANY($1)
+       ORDER BY position NULLS LAST, created_at`,
+      [courseIds]
+    )
+    : await db.query(
+      `SELECT id, course_id, title, slug, description, builder_data, position, created_at
+       FROM modules
+       WHERE course_id = ANY($1)
+       ORDER BY position NULLS LAST, created_at`,
+      [courseIds]
+    );
+  const modulesAt = Date.now();
   const modulesByCourse = modulesResult.rows.reduce((acc, module) => {
     if (!acc[module.course_id]) {
       acc[module.course_id] = [];
     }
-    acc[module.course_id].push(module);
+    acc[module.course_id].push(
+      isLite
+        ? {
+          id: module.id,
+          course_id: module.course_id,
+          title: module.title,
+          slug: module.slug,
+          description: module.description,
+          position: module.position,
+          created_at: module.created_at,
+          builder_data: {
+            moduleSettings:
+              module.module_settings && typeof module.module_settings === 'object' && !Array.isArray(module.module_settings)
+                ? module.module_settings
+                : {},
+            slides: Array.isArray(module.slide_refs) ? module.slide_refs : []
+          }
+        }
+        : module
+    );
     return acc;
   }, {});
   const courses = rows.map((course) => ({
@@ -123,6 +367,8 @@ router.get('/courses', async (req, res) => {
     title: course.title,
     description: course.description,
     slug: course.slug,
+    cover_image: course.cover_image || '',
+    show_in_store: course.show_in_store === true,
     progress: {
       video_position: course.video_position || 0,
       interactive_step: course.interactive_step || '0',
@@ -130,24 +376,138 @@ router.get('/courses', async (req, res) => {
       grade: course.grade,
       quiz_attempts: course.quiz_attempts || {},
       interactive_progress: course.interactive_progress || {},
-      video_progress: course.video_progress || {}
+      video_progress: course.video_progress || {},
+      progress_events: Array.isArray(course.progress_events) ? course.progress_events : [],
+      input_responses: course.input_responses || {}
     },
     modules: modulesByCourse[course.id] || []
   }));
+  const finishedAt = Date.now();
+  res.setHeader('X-Courses-Endpoint-Ms', String(finishedAt - startedAt));
+  res.setHeader('X-Courses-Ensure-Ms', String(ensuredAt - startedAt));
+  res.setHeader('X-Courses-Query-Ms', String(coursesAt - ensuredAt));
+  res.setHeader('X-Courses-Modules-Ms', String(modulesAt - coursesAt));
+  if (finishedAt - startedAt > 1200) {
+    console.info(
+      `[student/courses] slow request ${finishedAt - startedAt}ms (lite=${isLite ? '1' : '0'}, ensure=${ensuredAt - startedAt}ms, courses=${coursesAt - ensuredAt}ms, modules=${modulesAt - coursesAt}ms, build=${finishedAt - modulesAt}ms, user=${req.user.id})`
+    );
+  }
   res.json(courses);
 });
 
+router.get('/store-courses', async (req, res) => {
+  await ensureCourseCoverColumn();
+  await ensureCourseStoreColumn();
+  await ensureCourseAccessRequestsTable();
+  await ensureOwnershipColumns();
+  const { rows } = await db.query(
+    `SELECT c.id, c.title, c.description, c.slug, c.cover_image, c.show_in_store,
+            COALESCE(COUNT(m.id), 0) AS module_count,
+            car.status AS access_request_status
+      FROM courses c
+      LEFT JOIN modules m ON m.course_id = c.id
+      LEFT JOIN enrollments e ON e.course_id = c.id AND e.user_id = $1
+      LEFT JOIN course_access_requests car ON car.course_id = c.id AND car.user_id = $1
+      WHERE c.show_in_store = TRUE
+        AND e.course_id IS NULL
+        AND (
+          (SELECT owner_user_id FROM users WHERE id = $1) IS NOT DISTINCT FROM c.owner_user_id
+        )
+      GROUP BY c.id, c.title, c.description, c.slug, c.cover_image, c.show_in_store, car.status
+      ORDER BY c.title`,
+    [req.user.id]
+  );
+  res.json(rows);
+});
+
+router.post('/input/compare-image', async (req, res) => {
+  const referenceImage = sanitizeMediaUrl(req.body?.referenceImage || '');
+  const submittedImage = sanitizeMediaUrl(req.body?.submittedImage || '');
+  try {
+    const referenceAttachment = await mediaUrlToImageAttachment(referenceImage, 'referencia');
+    const submittedAttachment = await mediaUrlToImageAttachment(submittedImage, 'resposta-aluno');
+    if (!referenceAttachment || !submittedAttachment) {
+      return res.status(400).json({ message: 'Envie duas imagens validas em formato suportado.' });
+    }
+    const { rows } = await db.query(
+      `SELECT *
+         FROM admin_ai_settings
+        WHERE image_is_enabled = TRUE
+          AND image_encrypted_api_key IS NOT NULL
+        ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+        LIMIT 1`
+    );
+    const settingsRow = rows[0];
+    if (!settingsRow) {
+      return res.status(400).json({ message: 'A comparacao de imagem nao esta configurada no painel admin.' });
+    }
+    const result = await compareImagesWithNanoBanana({
+      imageSettings: settingsRow,
+      referenceAttachment,
+      submittedAttachment
+    });
+    return res.json({
+      matched: Boolean(result.matched),
+      confidence: result.confidence,
+      reason: result.reason || ''
+    });
+  } catch (error) {
+    console.error('Nao foi possivel comparar as imagens do input.', error);
+    return res.status(500).json({ message: error.message || 'Nao foi possivel comparar as imagens.' });
+  }
+});
+
+router.post('/store-courses/:courseId/request-access', async (req, res) => {
+  await ensureCourseStoreColumn();
+  await ensureCourseAccessRequestsTable();
+  await ensureOwnershipColumns();
+  const { courseId } = req.params;
+  if (!isUuid(courseId)) {
+    return res.status(400).json({ message: 'Curso inválido.' });
+  }
+  const { rows: courseRows } = await db.query(
+    `SELECT id, show_in_store
+     FROM courses
+     WHERE id = $1
+       AND owner_user_id IS NOT DISTINCT FROM (SELECT owner_user_id FROM users WHERE id = $2)`,
+    [courseId, req.user.id]
+  );
+  const course = courseRows[0];
+  if (!course || course.show_in_store !== true) {
+    return res.status(404).json({ message: 'Curso indisponível na loja.' });
+  }
+  const { rows: enrollmentRows } = await db.query(
+    'SELECT 1 FROM enrollments WHERE user_id = $1 AND course_id = $2',
+    [req.user.id, courseId]
+  );
+  if (enrollmentRows.length) {
+    return res.status(409).json({ message: 'Você já possui acesso a este curso.' });
+  }
+  await db.query(
+    `INSERT INTO course_access_requests (id, user_id, course_id, status, created_at, updated_at)
+     VALUES ($1, $2, $3, 'pending', NOW(), NOW())
+     ON CONFLICT (user_id, course_id)
+     DO UPDATE SET status = 'pending', updated_at = NOW()`,
+    [require('uuid').v4(), req.user.id, courseId]
+  );
+  res.status(201).json({ success: true, status: 'pending' });
+});
+
 router.get('/notifications', async (req, res) => {
-  const params = [req.user.className, req.user.id];
+  await ensureOwnershipColumns();
+  const params = [req.user.className, req.user.id, req.user.ownerUserId || null];
   const { rows } = await db.query(
     `SELECT id, message, target_type, target_value, created_at
      FROM notifications
-     WHERE target_type = 'all'
+     WHERE (
+       target_type = 'all'
        OR (target_type = 'class' AND target_value = $1)
        OR (target_type = 'student' AND target_value = $2)
+     )
+       AND (owner_user_id IS NOT DISTINCT FROM $3)
      ORDER BY created_at DESC
-     LIMIT 25`,
-    params
+      LIMIT 25`,
+     params
   );
   res.json(rows);
 });
@@ -156,8 +516,10 @@ router.get('/progress', async (req, res) => {
   await ensureQuizAttemptsColumn();
   await ensureInteractiveProgressColumn();
   await ensureVideoProgressColumn();
+  await ensureProgressEventsColumn();
+  await ensureInputResponsesColumn();
   const { rows } = await db.query(
-    `SELECT c.id, c.title, e.video_position, e.interactive_step, e.current_module, e.grade, e.updated_at, e.quiz_attempts, e.interactive_progress, e.video_progress
+    `SELECT c.id, c.title, e.video_position, e.interactive_step, e.current_module, e.grade, e.updated_at, e.quiz_attempts, e.interactive_progress, e.video_progress, e.progress_events, e.input_responses
      FROM enrollments e
      JOIN courses c ON c.id = e.course_id
      WHERE e.user_id = $1`,
@@ -170,6 +532,8 @@ router.post('/progress', async (req, res) => {
   await ensureQuizAttemptsColumn();
   await ensureInteractiveProgressColumn();
   await ensureVideoProgressColumn();
+  await ensureProgressEventsColumn();
+  await ensureInputResponsesColumn();
   const courseId = sanitizeText(req.body?.courseId || '', 80);
   const type = sanitizeText(req.body?.type || '', 20);
   const value = req.body?.value;
@@ -178,6 +542,8 @@ router.post('/progress', async (req, res) => {
   const quizAttempt = req.body?.quizAttempt;
   const interactiveProgress = req.body?.interactiveProgress;
   const videoProgress = req.body?.videoProgress;
+  const progressEvent = req.body?.progressEvent;
+  const inputResponse = req.body?.inputResponse;
   if (!isUuid(courseId) || !['video', 'interactive'].includes(type)) {
     return res.status(400).json({ message: 'courseId e type são obrigatórios' });
   }
@@ -188,15 +554,16 @@ router.post('/progress', async (req, res) => {
   let storedQuizAttempts = null;
   let storedInteractiveProgress = null;
   let storedVideoProgress = null;
+  let storedProgressEvents = null;
+  let storedInputResponses = null;
 
   if (quizAttempt?.key && typeof quizAttempt.key === 'string' && quizAttempt.key.length <= 180) {
     const { rows: existingRows } = await db.query(
       'SELECT quiz_attempts FROM enrollments WHERE user_id = $1 AND course_id = $2',
       [req.user.id, courseId]
     );
-    storedQuizAttempts = existingRows[0]?.quiz_attempts && typeof existingRows[0].quiz_attempts === 'object'
-      ? { ...existingRows[0].quiz_attempts }
-      : {};
+    const existingQuizAttempts = normalizeJsonObject(existingRows[0]?.quiz_attempts);
+    storedQuizAttempts = existingQuizAttempts ? { ...existingQuizAttempts } : {};
     if (!(quizAttempt.key in storedQuizAttempts)) {
       storedQuizAttempts[quizAttempt.key] = {
         answered: Boolean(quizAttempt.answered),
@@ -212,10 +579,8 @@ router.post('/progress', async (req, res) => {
       'SELECT interactive_progress FROM enrollments WHERE user_id = $1 AND course_id = $2',
       [req.user.id, courseId]
     );
-    storedInteractiveProgress =
-      existingRows[0]?.interactive_progress && typeof existingRows[0].interactive_progress === 'object'
-        ? { ...existingRows[0].interactive_progress }
-        : {};
+    const existingInteractiveProgress = normalizeJsonObject(existingRows[0]?.interactive_progress);
+    storedInteractiveProgress = existingInteractiveProgress ? { ...existingInteractiveProgress } : {};
     const existingModuleProgress =
       storedInteractiveProgress[interactiveProgress.moduleId] &&
       typeof storedInteractiveProgress[interactiveProgress.moduleId] === 'object'
@@ -278,10 +643,8 @@ router.post('/progress', async (req, res) => {
       'SELECT video_progress FROM enrollments WHERE user_id = $1 AND course_id = $2',
       [req.user.id, courseId]
     );
-    storedVideoProgress =
-      existingRows[0]?.video_progress && typeof existingRows[0].video_progress === 'object'
-        ? { ...existingRows[0].video_progress }
-        : {};
+    const existingVideoProgress = normalizeJsonObject(existingRows[0]?.video_progress);
+    storedVideoProgress = existingVideoProgress ? { ...existingVideoProgress } : {};
     const previous =
       storedVideoProgress[videoProgress.key] && typeof storedVideoProgress[videoProgress.key] === 'object'
         ? storedVideoProgress[videoProgress.key]
@@ -295,6 +658,40 @@ router.post('/progress', async (req, res) => {
       elementId: sanitizeText(videoProgress.elementId || previous.elementId || '', 120) || null,
       updatedAt: new Date().toISOString()
     };
+  }
+
+  if (progressEvent && typeof progressEvent === 'object') {
+    const { rows: existingRows } = await db.query(
+      'SELECT progress_events FROM enrollments WHERE user_id = $1 AND course_id = $2',
+      [req.user.id, courseId]
+    );
+    const existingEventsRaw = normalizeJsonArray(existingRows[0]?.progress_events) || [];
+    const existingEvents = existingEventsRaw
+      .map((entry) => normalizeJsonObject(entry) || (entry && typeof entry === 'object' && !Array.isArray(entry) ? entry : null))
+      .filter(Boolean);
+    const nextEvent = sanitizeProgressEventPayload(progressEvent, {
+      moduleId: interactiveProgress?.moduleId || videoProgress?.moduleId || '',
+      moduleTitle: currentModule || ''
+    });
+    if (nextEvent) {
+      storedProgressEvents = [...existingEvents, nextEvent].slice(-500);
+    }
+  }
+
+  if (inputResponse && typeof inputResponse === 'object') {
+    const { rows: existingRows } = await db.query(
+      'SELECT input_responses FROM enrollments WHERE user_id = $1 AND course_id = $2',
+      [req.user.id, courseId]
+    );
+    const existingInputResponses = normalizeJsonObject(existingRows[0]?.input_responses);
+    storedInputResponses = existingInputResponses ? { ...existingInputResponses } : {};
+    const nextResponse = sanitizeInputResponsePayload(inputResponse, {
+      moduleId: interactiveProgress?.moduleId || videoProgress?.moduleId || '',
+      moduleTitle: currentModule || ''
+    });
+    if (nextResponse?.key) {
+      storedInputResponses[nextResponse.key] = nextResponse;
+    }
   }
 
   const effectiveInteractiveProgress = storedInteractiveProgress;
@@ -312,17 +709,19 @@ router.post('/progress', async (req, res) => {
   })();
 
   await db.query(
-    `INSERT INTO enrollments (user_id, course_id, video_position, interactive_step, current_module, grade, quiz_attempts, interactive_progress, video_progress, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, '{}'::jsonb), COALESCE($8, '{}'::jsonb), COALESCE($9, '{}'::jsonb), NOW())
+    `INSERT INTO enrollments (user_id, course_id, video_position, interactive_step, current_module, grade, quiz_attempts, interactive_progress, video_progress, progress_events, input_responses, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::jsonb, '{}'::jsonb), COALESCE($8::jsonb, '{}'::jsonb), COALESCE($9::jsonb, '{}'::jsonb), COALESCE($10::jsonb, '[]'::jsonb), COALESCE($11::jsonb, '{}'::jsonb), NOW())
      ON CONFLICT (user_id, course_id)
        DO UPDATE SET
          video_position = COALESCE($3, enrollments.video_position),
          interactive_step = COALESCE($4, enrollments.interactive_step),
          current_module = COALESCE($5, enrollments.current_module),
          grade = COALESCE($6, enrollments.grade),
-         quiz_attempts = COALESCE($7, enrollments.quiz_attempts),
-         interactive_progress = COALESCE($8, enrollments.interactive_progress),
-         video_progress = COALESCE($9, enrollments.video_progress),
+         quiz_attempts = COALESCE($7::jsonb, enrollments.quiz_attempts),
+         interactive_progress = COALESCE($8::jsonb, enrollments.interactive_progress),
+         video_progress = COALESCE($9::jsonb, enrollments.video_progress),
+         progress_events = COALESCE($10::jsonb, enrollments.progress_events),
+         input_responses = COALESCE($11::jsonb, enrollments.input_responses),
          updated_at = NOW()`,
     [
       req.user.id,
@@ -331,19 +730,23 @@ router.post('/progress', async (req, res) => {
       overallInteractiveStep,
       moduleValue,
       gradeValue,
-      storedQuizAttempts,
-      storedInteractiveProgress,
-      storedVideoProgress
+      toJsonbParam(storedQuizAttempts),
+      toJsonbParam(storedInteractiveProgress),
+      toJsonbParam(storedVideoProgress),
+      toJsonbParam(storedProgressEvents),
+      toJsonbParam(storedInputResponses)
     ]
   );
-  if (storedQuizAttempts || storedInteractiveProgress || storedVideoProgress) {
+  if (storedQuizAttempts || storedInteractiveProgress || storedVideoProgress || storedProgressEvents || storedInputResponses) {
     return res.json({
       ok: true,
       quizAttempts: storedQuizAttempts || undefined,
       storedQuizAttempt: storedQuizAttempts && quizAttempt?.key ? storedQuizAttempts[quizAttempt.key] : undefined,
       interactiveProgress: storedInteractiveProgress || undefined,
       interactiveStep: overallInteractiveStep || undefined,
-      videoProgress: storedVideoProgress || undefined
+      videoProgress: storedVideoProgress || undefined,
+      progressEvents: storedProgressEvents || undefined,
+      inputResponses: storedInputResponses || undefined
     });
   }
   res.status(204).send();
