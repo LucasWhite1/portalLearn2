@@ -1,9 +1,11 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
+const crypto = require('crypto');
+const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
 const { createSession, invalidateSession } = require('../sessionStore');
 const { requireAuth } = require('../middleware/auth');
-const { sanitizeEmail, sanitizeText, createRateLimiter, isSessionToken } = require('../security');
+const { sanitizeEmail, sanitizePhone, sanitizeText, createRateLimiter, isSessionToken } = require('../security');
 const nodemailer = require('nodemailer');
 
 let resetTokenColumnsEnsured = false;
@@ -12,6 +14,9 @@ let professorCreditColumnsEnsured = false;
 let professorQuotaColumnsEnsured = false;
 let adminSmtpSettingsEnsured = false;
 let professorSmtpSettingsEnsured = false;
+let classesTableEnsured = false;
+let studentSignupLinksTableEnsured = false;
+const SIGNUP_LINK_TOKEN_REGEX = /^[a-f0-9]{64}$/i;
 
 const ensureRoleAndOwnershipSetup = async () => {
   if (roleAndOwnershipEnsured) return;
@@ -114,6 +119,106 @@ const ensureProfessorSmtpSettingsTable = async () => {
   professorSmtpSettingsEnsured = true;
 };
 
+const ensureClassesTable = async () => {
+  if (classesTableEnsured) return;
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS classes (
+      id UUID PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await db.query(
+    `INSERT INTO classes (id, name)
+     VALUES ($1, 'Turma A')
+     ON CONFLICT (name) DO NOTHING`,
+    [uuidv4()]
+  );
+  classesTableEnsured = true;
+};
+
+const ensureStudentSignupLinksTable = async () => {
+  if (studentSignupLinksTableEnsured) return;
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS student_signup_links (
+      professor_user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      revoked_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  studentSignupLinksTableEnsured = true;
+};
+
+const normalizeSignupLinkToken = (value = '') => {
+  const normalized = sanitizeText(value, 128).toLowerCase();
+  return SIGNUP_LINK_TOKEN_REGEX.test(normalized) ? normalized : '';
+};
+
+const hashSignupLinkToken = (token) => crypto.createHash('sha256').update(String(token || '')).digest('hex');
+
+const buildSessionPayload = (user) => {
+  const sessionToken = createSession({
+    id: user.id,
+    role: user.role,
+    fullName: user.full_name,
+    email: user.email,
+    className: user.class_name,
+    ownerUserId: user.owner_user_id || null,
+    aiCredits: Number.isFinite(Number(user.ai_credits)) ? Number(user.ai_credits) : 0,
+    studentLimit: Number.isFinite(Number(user.student_limit)) ? Number(user.student_limit) : null,
+    storageLimitBytes: Number.isFinite(Number(user.storage_limit_bytes)) ? Number(user.storage_limit_bytes) : null
+  });
+  return {
+    token: sessionToken,
+    user: {
+      id: user.id,
+      email: user.email,
+      fullName: user.full_name,
+      role: user.role,
+      className: user.class_name,
+      ownerUserId: user.owner_user_id || null,
+      isActive: user.is_active,
+      aiCredits: Number.isFinite(Number(user.ai_credits)) ? Number(user.ai_credits) : 0,
+      studentLimit: Number.isFinite(Number(user.student_limit)) ? Number(user.student_limit) : null,
+      storageLimitBytes: Number.isFinite(Number(user.storage_limit_bytes)) ? Number(user.storage_limit_bytes) : null
+    }
+  };
+};
+
+const getProfessorSignupAvailability = async (professorId, client = db) => {
+  await ensureProfessorQuotaColumns();
+  const { rows } = await client.query(
+    `SELECT id, full_name, role, is_active, student_limit
+       FROM users
+      WHERE id = $1`,
+    [professorId]
+  );
+  const professor = rows[0];
+  if (!professor || !['professor', 'admin'].includes(professor.role)) {
+    return null;
+  }
+  const countResult = await client.query(
+    `SELECT COUNT(*)::int AS total
+       FROM users
+      WHERE role = 'student'
+        AND owner_user_id = $1`,
+    [professorId]
+  );
+  const studentCount = Number(countResult.rows[0]?.total || 0);
+  const studentLimit = Number.isFinite(Number(professor.student_limit)) ? Number(professor.student_limit) : null;
+  const limitReached = Boolean(studentLimit && studentCount >= studentLimit);
+  return {
+    professorId,
+    professorName: professor.full_name,
+    isActive: professor.is_active !== false,
+    studentLimit,
+    studentCount,
+    limitReached: professor.role === 'professor' ? limitReached : false
+  };
+};
+
 const isSmtpConfigUsable = (settings) =>
   Boolean(settings?.host && settings?.user_email && settings?.user_pass);
 
@@ -158,6 +263,16 @@ const loginRateLimiter = createRateLimiter({
   max: 12,
   keyFn: (req) => `${req.ip}:${sanitizeEmail(req.body?.email || '')}`
 });
+const signupLinkLookupRateLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  keyFn: (req) => `${req.ip}:signup-link-lookup`
+});
+const signupLinkRegisterRateLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  keyFn: (req) => `${req.ip}:${sanitizeEmail(req.body?.email || '')}:signup-link-register`
+});
 
 router.post('/login', loginRateLimiter, async (req, res) => {
   await ensureRoleAndOwnershipSetup();
@@ -184,33 +299,7 @@ router.post('/login', loginRateLimiter, async (req, res) => {
     return res.status(403).json({ message: 'Conta bloqueada. Verifique o pagamento.' });
   }
 
-  const sessionToken = createSession({
-    id: user.id,
-    role: user.role,
-    fullName: user.full_name,
-    email: user.email,
-    className: user.class_name,
-    ownerUserId: user.owner_user_id || null,
-    aiCredits: Number.isFinite(Number(user.ai_credits)) ? Number(user.ai_credits) : 0,
-    studentLimit: Number.isFinite(Number(user.student_limit)) ? Number(user.student_limit) : null,
-    storageLimitBytes: Number.isFinite(Number(user.storage_limit_bytes)) ? Number(user.storage_limit_bytes) : null
-  });
-
-  res.json({
-    token: sessionToken,
-    user: {
-      id: user.id,
-      email: user.email,
-      fullName: user.full_name,
-      role: user.role,
-      className: user.class_name,
-      ownerUserId: user.owner_user_id || null,
-      isActive: user.is_active,
-      aiCredits: Number.isFinite(Number(user.ai_credits)) ? Number(user.ai_credits) : 0,
-      studentLimit: Number.isFinite(Number(user.student_limit)) ? Number(user.student_limit) : null,
-      storageLimitBytes: Number.isFinite(Number(user.storage_limit_bytes)) ? Number(user.storage_limit_bytes) : null
-    }
-  });
+  res.json(buildSessionPayload(user));
 });
 
 router.post('/logout', requireAuth, (req, res) => {
@@ -315,6 +404,135 @@ router.post('/reset-password', async (req, res) => {
   );
 
   res.json({ message: 'Senha atualizada com sucesso' });
+});
+
+router.get('/student-signup-link/:token', signupLinkLookupRateLimiter, async (req, res) => {
+  await ensureRoleAndOwnershipSetup();
+  await ensureProfessorQuotaColumns();
+  await ensureStudentSignupLinksTable();
+  const inviteToken = normalizeSignupLinkToken(req.params.token || '');
+  if (!inviteToken) {
+    return res.status(404).json({ message: 'Link de cadastro inválido.' });
+  }
+  const tokenHash = hashSignupLinkToken(inviteToken);
+  const { rows } = await db.query(
+    `SELECT professor_user_id, created_at
+       FROM student_signup_links
+      WHERE token_hash = $1
+        AND revoked_at IS NULL`,
+    [tokenHash]
+  );
+  const invite = rows[0];
+  if (!invite) {
+    return res.status(404).json({ message: 'Link de cadastro inválido ou expirado.' });
+  }
+  const availability = await getProfessorSignupAvailability(invite.professor_user_id, db);
+  if (!availability) {
+    return res.status(404).json({ message: 'Link de cadastro inválido ou expirado.' });
+  }
+  if (!availability.isActive) {
+    return res.json({
+      professorName: availability.professorName,
+      acceptingRegistrations: false,
+      message: 'Este link de cadastro está indisponível no momento.'
+    });
+  }
+  if (availability.limitReached) {
+    return res.json({
+      professorName: availability.professorName,
+      acceptingRegistrations: false,
+      studentLimit: availability.studentLimit,
+      studentCount: availability.studentCount,
+      message: 'O professor atingiu o limite de alunos e não pode aceitar novos cadastros agora.'
+    });
+  }
+  res.json({
+    professorName: availability.professorName,
+    acceptingRegistrations: true,
+    studentLimit: availability.studentLimit,
+    studentCount: availability.studentCount,
+    createdAt: invite.created_at
+  });
+});
+
+router.post('/student-signup-link/:token/register', signupLinkRegisterRateLimiter, async (req, res) => {
+  await ensureRoleAndOwnershipSetup();
+  await ensureProfessorQuotaColumns();
+  await ensureStudentSignupLinksTable();
+  await ensureClassesTable();
+  const inviteToken = normalizeSignupLinkToken(req.params.token || '');
+  const fullName = sanitizeText(req.body?.fullName || '', 160);
+  const email = sanitizeEmail(req.body?.email || '');
+  const phone = sanitizePhone(req.body?.phone || '');
+  const password = sanitizeText(req.body?.password || '', 256, { trim: false });
+  if (!inviteToken) {
+    return res.status(404).json({ message: 'Link de cadastro inválido.' });
+  }
+  if (!fullName || !email || !password) {
+    return res.status(400).json({ message: 'Nome, email e senha são obrigatórios.' });
+  }
+  if (password.length < 8) {
+    return res.status(400).json({ message: 'A senha precisa ter pelo menos 8 caracteres.' });
+  }
+  const tokenHash = hashSignupLinkToken(inviteToken);
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    const { rows: inviteRows } = await client.query(
+      `SELECT l.professor_user_id
+         FROM student_signup_links l
+         JOIN users u ON u.id = l.professor_user_id
+        WHERE l.token_hash = $1
+          AND l.revoked_at IS NULL
+          AND u.role = 'professor'
+        FOR UPDATE OF u`,
+      [tokenHash]
+    );
+    const invite = inviteRows[0];
+    if (!invite) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Link de cadastro inválido ou expirado.' });
+    }
+    const availability = await getProfessorSignupAvailability(invite.professor_user_id, client);
+    if (!availability?.isActive) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ message: 'Este link de cadastro está indisponível no momento.' });
+    }
+    if (availability.limitReached) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({
+        message: 'O professor atingiu o limite de alunos e não pode aceitar novos cadastros agora.',
+        code: 'PROFESSOR_STUDENT_LIMIT_REACHED',
+        quotaStatus: {
+          studentLimit: availability.studentLimit,
+          studentCount: availability.studentCount
+        }
+      });
+    }
+    const { rows: existingUsers } = await client.query('SELECT id FROM users WHERE email = $1', [email]);
+    if (existingUsers.length) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: 'Já existe um usuário cadastrado com este email.' });
+    }
+    const passwordHash = await bcrypt.hash(password, 10);
+    const userId = uuidv4();
+    await client.query(
+      `INSERT INTO users (id, full_name, email, phone, password_hash, role, class_name, is_active, owner_user_id)
+       VALUES ($1, $2, $3, $4, $5, 'student', $6, TRUE, $7)`,
+      [userId, fullName, email, phone || null, passwordHash, 'Turma A', invite.professor_user_id]
+    );
+    const { rows: createdRows } = await client.query('SELECT * FROM users WHERE id = $1', [userId]);
+    await client.query('COMMIT');
+    return res.status(201).json(buildSessionPayload(createdRows[0]));
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (error?.code === '23505') {
+      return res.status(409).json({ message: 'Já existe um usuário cadastrado com este email.' });
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
 });
 
 module.exports = router;

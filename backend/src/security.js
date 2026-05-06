@@ -7,6 +7,7 @@ const DEFAULT_URL_MAX = 2048;
 const DEFAULT_DATA_URL_MAX = 45 * 1024 * 1024;
 const MAX_DEPTH = 12;
 const MAX_ARRAY_ITEMS = 250;
+const MAX_PEN_POINT_ITEMS = 6000;
 const MAX_OBJECT_KEYS = 200;
 
 function stripControlChars(value) {
@@ -91,6 +92,13 @@ function sanitizePlainContent(value) {
 }
 
 function sanitizeBuilderData(builderData) {
+  const isPenPointEntry = (entry) =>
+    entry === null ||
+    (typeof entry === 'object' &&
+      entry !== null &&
+      Number.isFinite(Number(entry.x)) &&
+      Number.isFinite(Number(entry.y)));
+
   const sanitizeValue = (value, key = '', depth = 0) => {
     if (depth > MAX_DEPTH) {
       return null;
@@ -120,7 +128,11 @@ function sanitizeBuilderData(builderData) {
       return sanitizeText(value, 512);
     }
     if (Array.isArray(value)) {
-      return value.slice(0, MAX_ARRAY_ITEMS).map((entry) => sanitizeValue(entry, key, depth + 1)).filter((entry) => entry !== undefined);
+      const maxItems =
+        key === 'points' && value.every((entry) => isPenPointEntry(entry))
+          ? MAX_PEN_POINT_ITEMS
+          : MAX_ARRAY_ITEMS;
+      return value.slice(0, maxItems).map((entry) => sanitizeValue(entry, key, depth + 1)).filter((entry) => entry !== undefined);
     }
     if (typeof value === 'object') {
       const entries = Object.entries(value).slice(0, MAX_OBJECT_KEYS);

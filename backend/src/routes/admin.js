@@ -1,5 +1,6 @@
-﻿const express = require('express');
+const express = require('express');
 const bcrypt = require('bcrypt');
+const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs/promises');
 const path = require('path');
@@ -8,6 +9,7 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const { encryptApiKey } = require('../aiConfigCrypto');
 const {
   buildPublicAiSettings,
+  proposeMagicPenActions,
   proposeNextSlideAction,
   proposeSlideExecutionPlan,
   proposeSlideActions,
@@ -17,6 +19,7 @@ const {
 } = require('../aiProvider');
 const { readImageSource } = require('../pixian');
 const { extractAudioFromMediaSource, transcribeMediaSource } = require('../mediaProcessing');
+const { createShare, updateShare, deleteShare, clearDrawingStrokes, removeDrawingStroke } = require('../liveStageShareStore');
 const {
   sanitizeText,
   sanitizeEmail,
@@ -43,6 +46,9 @@ let professorSmtpSettingsEnsured = false;
 let ownershipColumnsEnsured = false;
 let professorCreditColumnsEnsured = false;
 let professorQuotaColumnsEnsured = false;
+let reportCorrectionColumnEnsured = false;
+let studentSignupLinksTableEnsured = false;
+const LIVE_STAGE_SHARE_ID_REGEX = /^[0-9a-f]{32}$/i;
 
 const slugify = (value) => {
   if (!value) return '';
@@ -80,6 +86,23 @@ const sanitizeModulePayload = ({ title, description, builderData, slug }) => {
   };
 };
 
+const sanitizeLiveStageSharePayload = (payload = {}) => ({
+  moduleId: isUuid(payload?.moduleId) ? payload.moduleId : null,
+  courseId: isUuid(payload?.courseId) ? payload.courseId : null,
+  title: sanitizeText(payload?.title || 'Palco ao vivo', 180) || 'Palco ao vivo',
+  description: sanitizeText(payload?.description || '', 4000) || null,
+  activeSlideId: sanitizeText(payload?.activeSlideId || '', 120) || null,
+  builderData: sanitizeBuilderData(payload?.builderData)
+});
+
+const buildLiveStageShareResponse = (share) => ({
+  shareId: share.shareId,
+  revision: share.revision,
+  updatedAt: new Date(share.updatedAt).toISOString(),
+  cameraRequests: share.cameraRequests || [],
+  drawingStrokes: share.drawingStrokes || []
+});
+
 const isGlobalAdmin = (req) => req.user?.role === 'admin';
 const isProfessor = (req) => req.user?.role === 'professor';
 
@@ -111,6 +134,94 @@ const ensureProfessorQuotaColumns = async () => {
   );
   professorQuotaColumnsEnsured = true;
 };
+
+const ensureReportCorrectionColumn = async () => {
+  if (reportCorrectionColumnEnsured) {
+    return;
+  }
+  await db.query(
+    "ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS report_corrected_at TIMESTAMPTZ"
+  );
+  reportCorrectionColumnEnsured = true;
+};
+
+const ensureStudentSignupLinksTable = async () => {
+  if (studentSignupLinksTableEnsured) {
+    return;
+  }
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS student_signup_links (
+      professor_user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      revoked_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  studentSignupLinksTableEnsured = true;
+};
+
+router.post('/live-stage-shares', async (req, res) => {
+  const payload = sanitizeLiveStageSharePayload(req.body);
+  const share = createShare({
+    ownerUserId: req.user.id,
+    ownerRole: req.user.role || null,
+    payload
+  });
+  res.status(201).json(buildLiveStageShareResponse(share));
+});
+
+router.put('/live-stage-shares/:shareId', async (req, res) => {
+  const shareId = sanitizeText(req.params?.shareId || '', 64);
+  if (!LIVE_STAGE_SHARE_ID_REGEX.test(shareId)) {
+    return res.status(400).json({ message: 'Compartilhamento ao vivo inválido.' });
+  }
+  const payload = sanitizeLiveStageSharePayload(req.body);
+  const share = updateShare(shareId, req.user.id, payload);
+  if (!share) {
+    return res.status(404).json({ message: 'Compartilhamento ao vivo não encontrado.' });
+  }
+  res.json(buildLiveStageShareResponse(share));
+});
+
+router.delete('/live-stage-shares/:shareId', async (req, res) => {
+  const shareId = sanitizeText(req.params?.shareId || '', 64);
+  if (!LIVE_STAGE_SHARE_ID_REGEX.test(shareId)) {
+    return res.status(400).json({ message: 'Compartilhamento ao vivo inválido.' });
+  }
+  const deleted = deleteShare(shareId, req.user.id);
+  if (!deleted) {
+    return res.status(404).json({ message: 'Compartilhamento ao vivo não encontrado.' });
+  }
+  res.status(204).end();
+});
+
+router.delete('/live-stage-shares/:shareId/drawing', requireAuth, requireRole(['admin', 'professor']), async (req, res) => {
+  const shareId = sanitizeText(req.params?.shareId || '', 64);
+  if (!LIVE_STAGE_SHARE_ID_REGEX.test(shareId)) {
+    return res.status(400).json({ message: 'ID de compartilhamento inválido.' });
+  }
+
+  const success = clearDrawingStrokes(shareId);
+  res.json({ success });
+});
+
+router.delete('/live-stage-shares/:shareId/drawing/:strokeId', requireAuth, requireRole(['admin', 'professor']), async (req, res) => {
+  const shareId = sanitizeText(req.params?.shareId || '', 64);
+  if (!LIVE_STAGE_SHARE_ID_REGEX.test(shareId)) {
+    return res.status(400).json({ message: 'ID de compartilhamento invÃ¡lido.' });
+  }
+
+  const strokeId = sanitizeText(req.params?.strokeId || '', 160);
+  if (!strokeId) {
+    return res.status(400).json({ message: 'ID do traÃ§o invÃ¡lido.' });
+  }
+
+  const success = removeDrawingStroke(shareId, strokeId);
+  res.json({ success });
+});
+
+const hashSignupLinkToken = (token) => crypto.createHash('sha256').update(String(token || '')).digest('hex');
 
 const getProfessorCreditsValue = (value) => {
   const numeric = Number(value);
@@ -957,6 +1068,37 @@ router.get('/me/professor-credits', async (req, res) => {
   res.json(payload);
 });
 
+router.post('/student-signup-link', async (req, res) => {
+  await ensureStudentSignupLinksTable();
+  await ensureProfessorQuotaColumns();
+  if (!isProfessor(req) && !isGlobalAdmin(req)) {
+    return res.status(403).json({ message: 'Apenas admin e professores podem gerar este link.' });
+  }
+  const quotaStatus = isProfessor(req) ? await getProfessorQuotaStatus(req.user.id) : null;
+  if (isProfessor(req) && !quotaStatus?.isActive) {
+    return res.status(403).json({ message: 'Sua conta de professor está desativada.' });
+  }
+  const studentCount = isProfessor(req)
+    ? Number(quotaStatus?.studentCount || 0)
+    : await getProfessorStudentCount(req.user.id);
+  const inviteToken = crypto.randomBytes(32).toString('hex');
+  const tokenHash = hashSignupLinkToken(inviteToken);
+  await db.query(
+    `INSERT INTO student_signup_links (professor_user_id, token_hash, revoked_at, created_at, updated_at)
+     VALUES ($1, $2, NULL, NOW(), NOW())
+     ON CONFLICT (professor_user_id)
+     DO UPDATE SET token_hash = EXCLUDED.token_hash, revoked_at = NULL, updated_at = NOW()`,
+    [req.user.id, tokenHash]
+  );
+  const origin = `${req.protocol}://${req.get('host')}`;
+  res.json({
+    professorName: req.user.fullName || (isGlobalAdmin(req) ? 'Admin' : 'Professor'),
+    inviteUrl: `${origin}/login.html?invite=${inviteToken}`,
+    studentLimit: isProfessor(req) ? quotaStatus?.studentLimit ?? null : null,
+    studentCount
+  });
+});
+
 router.post('/students', async (req, res) => {
   await ensureOwnershipColumns();
   await ensureProfessorQuotaColumns();
@@ -1101,26 +1243,107 @@ router.delete('/students/:id', async (req, res) => {
 
 router.get('/reports', async (req, res) => {
   await ensureProgressEventsColumn();
+  await ensureReportCorrectionColumn();
   await ensureOwnershipColumns();
   const params = [];
+  const reportVisibilityCondition = `
+    (
+      COALESCE(e.video_position, 0) > 0
+      OR NULLIF(COALESCE(e.interactive_step, ''), '') IS NOT NULL AND COALESCE(e.interactive_step, '0') <> '0'
+      OR NULLIF(COALESCE(e.current_module, ''), '') IS NOT NULL
+      OR e.grade IS NOT NULL
+      OR e.report_corrected_at IS NOT NULL
+      OR COALESCE(jsonb_array_length(e.progress_events), 0) > 0
+      OR COALESCE(e.quiz_attempts, '{}'::jsonb) <> '{}'::jsonb
+      OR COALESCE(e.interactive_progress, '{}'::jsonb) <> '{}'::jsonb
+      OR COALESCE(e.video_progress, '{}'::jsonb) <> '{}'::jsonb
+      OR COALESCE(e.input_responses, '{}'::jsonb) <> '{}'::jsonb
+    )`;
   let query = `SELECT u.id user_id, u.full_name, u.email, u.phone, u.class_name, c.id course_id, c.title course_title,
                       e.video_position, e.interactive_step, e.current_module, e.grade, e.updated_at,
+                      e.report_corrected_at,
                       COALESCE(jsonb_array_length(e.progress_events), 0) AS progress_event_count
                FROM enrollments e
                JOIN users u ON u.id = e.user_id
                JOIN courses c ON c.id = e.course_id`;
   if (isProfessor(req)) {
     params.push(req.user.id);
-    query += ' WHERE u.owner_user_id = $1 AND c.owner_user_id = $1';
+    query += ` WHERE u.owner_user_id = $1 AND c.owner_user_id = $1 AND ${reportVisibilityCondition}`;
+  } else {
+    query += ` WHERE ${reportVisibilityCondition}`;
   }
   query += ' ORDER BY u.full_name, c.title';
   const { rows } = await db.query(query, params);
   res.json(rows);
 });
 
-router.get('/reports/:userId/:courseId/timeline', async (req, res) => {
-  await ensureProgressEventsColumn();
+router.post('/reports/:userId/:courseId/correct', async (req, res) => {
+  await ensureReportCorrectionColumn();
   await ensureOwnershipColumns();
+  const { userId, courseId } = req.params;
+  if (!isUuid(userId) || !isUuid(courseId)) {
+    return res.status(400).json({ message: 'Parâmetros inválidos.' });
+  }
+  const params = [userId, courseId];
+  let query = `
+    UPDATE enrollments e
+    SET report_corrected_at = NOW(), updated_at = NOW()
+    FROM users u, courses c
+    WHERE e.user_id = $1
+      AND e.course_id = $2
+      AND u.id = e.user_id
+      AND c.id = e.course_id`;
+  if (isProfessor(req)) {
+    params.push(req.user.id);
+    query += ' AND u.owner_user_id = $3 AND c.owner_user_id = $3';
+  }
+  query += ' RETURNING e.user_id, e.course_id, e.report_corrected_at';
+  const { rows } = await db.query(query, params);
+  if (!rows[0]) {
+    return res.status(404).json({ message: 'Relatório não encontrado.' });
+  }
+  res.json({ ok: true, correctedAt: rows[0].report_corrected_at });
+});
+
+router.delete('/reports/:userId/:courseId/corrected', async (req, res) => {
+  await ensureReportCorrectionColumn();
+  await ensureOwnershipColumns();
+  const { userId, courseId } = req.params;
+  if (!isUuid(userId) || !isUuid(courseId)) {
+    return res.status(400).json({ message: 'Parâmetros inválidos.' });
+  }
+  const params = [userId, courseId];
+  let query = `
+    UPDATE enrollments e
+    SET video_position = 0,
+        interactive_step = NULL,
+        current_module = NULL,
+        grade = NULL,
+        quiz_attempts = '{}'::jsonb,
+        interactive_progress = '{}'::jsonb,
+        video_progress = '{}'::jsonb,
+        progress_events = '[]'::jsonb,
+        input_responses = '{}'::jsonb,
+        report_corrected_at = NULL,
+        updated_at = NOW()
+    FROM users u, courses c
+    WHERE e.user_id = $1
+      AND e.course_id = $2
+      AND u.id = e.user_id
+      AND c.id = e.course_id`;
+  if (isProfessor(req)) {
+    params.push(req.user.id);
+    query += ' AND u.owner_user_id = $3 AND c.owner_user_id = $3';
+  }
+  query += ' RETURNING e.user_id, e.course_id';
+  const { rows } = await db.query(query, params);
+  if (!rows[0]) {
+    return res.status(404).json({ message: 'Relatório não encontrado.' });
+  }
+  res.json({ ok: true });
+});
+
+router.get('/reports/:userId/:courseId/timeline', async (req, res) => {
   const { userId, courseId } = req.params;
   if (!isUuid(userId) || !isUuid(courseId)) {
     return res.status(400).json({ message: 'ParÃ¢metros invÃ¡lidos.' });
@@ -2080,6 +2303,53 @@ router.post('/ai/slide-actions/step', async (req, res) => {
     }
     res.status(error?.statusCode || 400).json({
       message: error.message || 'A IA nÃ£o conseguiu gerar a prÃ³xima aÃ§Ã£o.',
+      code: error?.code || null,
+      professorCreditsRemaining: error?.creditStatus?.aiCredits ?? null
+    });
+  }
+});
+
+router.post('/ai/magic-pen', async (req, res) => {
+  await ensureAdminAiImageColumns();
+  const request = sanitizeText(req.body?.request || '', 1800, { trim: true });
+  const slides = sanitizeBuilderData({ slides: Array.isArray(req.body?.slides) ? req.body.slides : [] }).slides || [];
+  const activeSlideId = sanitizeText(req.body?.activeSlideId || '', 120);
+  const stageSize = req.body?.stageSize && typeof req.body.stageSize === 'object' ? req.body.stageSize : null;
+  const attachments = Array.isArray(req.body?.attachments) ? req.body.attachments : [];
+  const sourceBounds = req.body?.sourceBounds && typeof req.body.sourceBounds === 'object' ? req.body.sourceBounds : null;
+  if (!request) {
+    return res.status(400).json({ message: 'Descreva o que o pincel magico deve criar.' });
+  }
+  let creditCharge = null;
+  const { rows } = await db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
+  const settingsRow = rows[0];
+  if (!settingsRow?.is_enabled) {
+    return res.status(400).json({ message: 'A integracao de IA deste admin nao esta configurada ou ativa.' });
+  }
+
+  try {
+    creditCharge = await consumeProfessorAiCredit(req, 'o pincel magico');
+    const result = await proposeMagicPenActions({
+      settingsRow,
+      request,
+      slides,
+      activeSlideId: activeSlideId || null,
+      stageSize: stageSize || null,
+      attachments,
+      sourceBounds
+    });
+    res.json({
+      ...result,
+      requireConfirmation: settingsRow.require_confirmation !== false,
+      providerLabel: settingsRow.provider_label,
+      professorCreditsRemaining: creditCharge?.remainingCredits ?? null
+    });
+  } catch (error) {
+    if (creditCharge?.charged) {
+      await creditCharge.refund();
+    }
+    res.status(error?.statusCode || 400).json({
+      message: error.message || 'A IA nao conseguiu executar o pincel magico.',
       code: error?.code || null,
       professorCreditsRemaining: error?.creditStatus?.aiCredits ?? null
     });

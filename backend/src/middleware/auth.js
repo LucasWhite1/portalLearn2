@@ -8,8 +8,8 @@ function requireAuth(req, res, next) {
     return res.status(401).json({ message: 'Sessao expirada ou nao encontrada' });
   }
   const user = getSession(token);
-  if (!user) {
-    return res.status(401).json({ message: 'Sessao expirada ou nao encontrada' });
+  if (!user || !user.role) {
+    return res.status(401).json({ message: 'Sessao expirada ou invalida. Por favor, faca login novamente.' });
   }
   req.user = user;
   next();

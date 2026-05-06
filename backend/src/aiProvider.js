@@ -28,9 +28,12 @@ const ALLOWED_ELEMENT_TYPES = new Set([
   'image',
   'audio',
   'video',
+  'camera',
   'quiz',
   'floatingButton',
-  'detector'
+  'detector',
+  'input',
+  'timedTrigger'
 ]);
 
 const DEFAULT_STAGE_SIZE = { width: 1280, height: 720 };
@@ -49,6 +52,7 @@ const MAX_TEMPLATE_REFERENCES = 2;
 const MAX_TEMPLATE_SLIDES_PER_REFERENCE = 4;
 const TEMPLATE_STORE_DIR = path.resolve(__dirname, '../../template-store');
 const TEMPLATE_REFERENCE_CACHE_TTL_MS = 30000;
+const MAGIC_PEN_ALLOWED_ROUTES = new Set(['image', 'functional', 'functional_image']);
 const TEMPLATE_TRIGGER_ACTION_TYPES = [
   'none',
   'nextSlide',
@@ -243,6 +247,29 @@ const BASIC_LAYOUT_RULES = [
   'Quiz precisa de: question, options (array de strings), correctOption (numero).',
   'Se o pedido for simples, faca a acao minima necessaria. Nao crie slides extras nao solicitados.'
 ];
+const ELEMENT_CONFIGURATION_RULES = [
+  'Quando o pedido mencionar animacao, nao basta inserir o elemento: configure animationType e, quando fizer sentido, animationDuration, animationDelay, animationLoop ou motionFrames.',
+  'Quando o pedido mencionar botao, CTA ou clique, nao basta inserir floatingButton: configure interactionTriggers ou actionConfig funcional com type e campos coerentes com a acao pedida.',
+  'Quando o pedido mencionar botao, a resposta final precisa realmente usar type floatingButton. Nao substitua um botao funcional por block, card ou faixa colorida.',
+  'Quando o pedido mencionar detector, encaixe, colisao, arraste ou validacao por area, nao basta inserir detector: configure interactionTriggers/actionConfig, detectorAcceptedDrag, detectorMinMatchCount e detectorTriggerOnce quando necessario.',
+  'Quando o pedido mencionar quiz, avaliacao ou pergunta interativa, nao basta inserir quiz: preencha question, options, correctOption, successMessage, errorMessage, actionLabel, points, lockOnWrong e cores quando o pedido sugerir estilo.',
+  'Quando o pedido mencionar campo, formulario, resposta do aluno, envio, anexo, digitacao ou validacao de resposta, prefira type input com placeholder, submitLabel, compareText/compareImage e gatilhos configurados.',
+  'Quando o pedido mencionar mostrar, esconder, mover, tocar animacao, navegar ou inserir conteudo ao clicar, use os campos de configuracao apropriados do elemento em vez de deixar o comportamento implicito.',
+  'Quando o pedido for ajustar um elemento existente, prefira update_element com os campos corretos em vez de criar outro elemento solto.',
+  'Quando houver imagem/anexo com seta, ponteiro ou direcao, preserve o lado para o qual a ponta aponta exatamente como descrito em attachmentSummary.',
+  'Quando o pedido mencionar detector, hotspot, botao, quiz, input, arrastar, encaixe ou outro recurso funcional da plataforma, trate o anexo apenas como referencia de area, posicao, tamanho e direcao. Nao transforme automaticamente o rabisco em block ou image por causa da cor ou da forma literal.',
+  'Se o pedido pedir detector, a resposta final precisa realmente usar type detector. Se pedir quiz, use type quiz. Se pedir botao, use floatingButton com configuracao funcional. Se pedir campo de resposta, use input configurado.'
+];
+
+function requestTargetsFunctionalPlatformElement(request) {
+  return /(detector|hotspot|area invisivel|área invisível|gatilho|encaixe|drop|drag|arrast|quiz|pergunta interativa|botao|botão|cta|clicar|click|input|campo|naveg|floatingbutton|nextslide|jumpslide)/i.test(
+    String(request || '')
+  );
+}
+function requestExplicitlyTargetsArrowLikeObject(request) {
+  return /(seta|flecha|arrow|ponteiro|indicador direcional|apontando|apontar)/i.test(String(request || ''));
+}
+
 function normalizeReferenceText(value = '') {
   return String(value || '')
     .normalize('NFD')
@@ -501,15 +528,40 @@ function createAiCapabilityCatalog() {
     animationTypes: TEMPLATE_ANIMATION_TYPES,
     triggerActionTypes: TEMPLATE_TRIGGER_ACTION_TYPES,
     detectorAcceptedDragExamples: ['any', 'type:image', 'type:text', 'element:element-id'],
+    usagePlaybook: {
+      text: 'Use text para conteudo visivel. Configure content, x, y, width, height, fontSize, textColor, textAlign e estilos de fundo/borda quando o prompt pedir destaque ou card textual.',
+      block: 'Use block para estrutura visual, cards, faixas, caixas de destaque e textos em containers. Configure shape, backgroundColor ou gradiente, textColor e dimensoes reais.',
+      image: 'Use image com generationPrompt quando o pedido exigir ilustracao, objeto, personagem, icone, seta desenhada, foto ou visual especifico. Defina x, y, width e height coerentes com o palco.',
+      camera: 'Use camera quando o pedido precisar transmitir webcam no proprio palco antes de capturar uma foto ou gravar um video. Defina x, y, width e height reais.',
+      floatingButton: 'Use floatingButton quando houver CTA, clique, navegacao ou acao manual. Nunca substitua botao por block colorido. Configure interactionTriggers/actionConfig completo, com type funcional e todos os campos exigidos para essa acao.',
+      detector: 'Use detector como area invisivel de encaixe/colisao/validacao. Combine com elemento visual de apoio e, em interacoes de arrastar, configure detectorAcceptedDrag e studentCanDrag no item arrastavel.',
+      input: 'Use input para resposta digitada, envio de texto, anexo de imagem/audio ou validacao de resposta do aluno. Configure placeholder, submitLabel, compareText/compareImage, mensagens e interactionTriggers.',
+      timedTrigger: 'Use timedTrigger quando a interacao depender de tempo automatico. Configure interactionTriggers com time e actionConfig reais.',
+      quiz: 'Use quiz quando o usuario pedir pergunta ou avaliacao pronta no slide. Preencha question, options, correctOption, mensagens, actionLabel, points, lockOnWrong e cores do quiz.',
+      animation: 'Quando o prompt pedir animacao, escolha animationType intencional e complemente com animationDuration, animationDelay, animationLoop ou motionFrames. Nao deixe animacao subentendida.'
+    },
+    configurationRecipes: [
+      'Botao para navegar: floatingButton + interactionTriggers/actionConfig.type nextSlide ou jumpSlide + targetSlideId.',
+      'Botao para inserir quiz: floatingButton + actionConfig.type addQuiz + quizQuestion + quizOptions + quizCorrectOption + mensagens + cores.',
+      'Botao para gerar imagem ao clicar: floatingButton + actionConfig.type addImage + generationPrompt + insertX + insertY + insertWidth + insertHeight.',
+      'Campo de resposta: input + placeholder + submitLabel + compareText ou compareImageReference + successMessage + errorMessage + interactionTriggers.',
+      'Elemento arrastavel com encaixe: image/text/block com studentCanDrag true + detector com actionConfig funcional e detectorAcceptedDrag apropriado.',
+      'Animacao personalizada: image/text/block/floatingButton com animationType motion-recording e motionFrames progressivos.',
+      'Mover elemento: floatingButton ou detector com actionConfig.type moveElement + targetElementId + moveByX/moveByY.',
+      'Disparar animacao existente: floatingButton ou detector com actionConfig.type playAnimation + targetElementId.'
+    ],
     elementTypes: {
       text: ['content', 'x', 'y', 'width', 'height', 'fontSize', 'fontFamily', 'fontWeight', 'textColor', 'textAlign', 'backgroundColor', 'hasTextBackground', 'hasTextBorder', 'hasTextBlock', 'studentCanDrag', 'opacity', 'animationType', 'animationDuration', 'animationDelay', 'animationLoop', 'motionFrames'],
       block: ['content', 'x', 'y', 'width', 'height', 'shape', 'backgroundColor', 'solidColor', 'useGradient', 'gradientStart', 'gradientEnd', 'textColor', 'fontSize', 'fontFamily', 'fontWeight', 'textAlign', 'textureImage', 'textureFit', 'studentCanDrag', 'opacity', 'animationType', 'motionFrames'],
       image: ['src', 'generationPrompt', 'x', 'y', 'width', 'height', 'objectFit', 'studentCanDrag', 'opacity', 'animationType', 'motionFrames'],
       audio: ['src', 'x', 'y', 'width', 'height', 'audioVisible', 'audioLoop', 'opacity'],
       video: ['src', 'provider', 'embedSrc', 'x', 'y', 'width', 'height', 'opacity', 'videoTriggers'],
+      camera: ['x', 'y', 'width', 'height', 'opacity'],
       quiz: ['question', 'options', 'correctOption', 'successMessage', 'errorMessage', 'actionLabel', 'quizBackgroundColor', 'quizQuestionColor', 'quizOptionBackgroundColor', 'quizOptionTextColor', 'quizButtonBackgroundColor', 'points', 'lockOnWrong', 'x', 'y', 'width', 'height'],
       floatingButton: ['label', 'x', 'y', 'width', 'height', 'shape', 'backgroundColor', 'solidColor', 'useGradient', 'gradientStart', 'gradientEnd', 'textColor', 'fontSize', 'fontFamily', 'fontWeight', 'textAlign', 'opacity', 'animationType', 'interactionTriggers'],
-      detector: ['x', 'y', 'width', 'height', 'interactionTriggers']
+      detector: ['x', 'y', 'width', 'height', 'interactionTriggers'],
+      input: ['x', 'y', 'width', 'height', 'placeholder', 'submitLabel', 'compareText', 'compareCaseSensitive', 'compareImageEnabled', 'compareImageReference', 'allowImage', 'allowAudio', 'successMessage', 'errorMessage', 'backgroundColor', 'labelColor', 'inputTextColor', 'submitButtonColor', 'submitButtonTextColor', 'interactionTriggers'],
+      timedTrigger: ['x', 'y', 'width', 'height', 'interactionTriggers']
     },
     triggerSchemas: {
       interactionTrigger: ['id', 'name', 'enabled', 'actionConfig'],
@@ -655,7 +707,9 @@ function collectTopLevelElementPatch(entry = {}) {
     'animationLoop', 'motionFrames', 'x', 'y', 'width', 'height', 'rotation', 'zIndex', 'fontSize',
     'correctOption', 'animationDuration', 'animationDelay', 'points', 'options', 'actionConfig',
     'textAlign', 'opacity', 'objectFit', 'textureImage', 'textureFit', 'audioVisible', 'audioLoop',
-    'interactionTriggers', 'videoTriggers'
+    'interactionTriggers', 'videoTriggers', 'placeholder', 'submitLabel', 'compareText', 'compareCaseSensitive',
+    'compareImageEnabled', 'compareImageReference', 'allowImage', 'allowAudio', 'labelColor', 'inputTextColor',
+    'submitButtonColor', 'submitButtonTextColor'
   ].forEach((key) => {
     if (key in entry) {
       patch[key] = entry[key];
@@ -784,6 +838,9 @@ function normalizeElementPatch(element) {
   if (typeof element.hasTextBlock === 'boolean') normalized.hasTextBlock = element.hasTextBlock;
   if (typeof element.studentCanDrag === 'boolean') normalized.studentCanDrag = element.studentCanDrag;
   if (typeof element.question === 'string') normalized.question = element.question;
+  if (typeof element.placeholder === 'string') normalized.placeholder = element.placeholder;
+  if (typeof element.submitLabel === 'string') normalized.submitLabel = element.submitLabel;
+  if (typeof element.compareText === 'string') normalized.compareText = element.compareText;
   if (typeof element.successMessage === 'string') normalized.successMessage = element.successMessage;
   if (typeof element.errorMessage === 'string') normalized.errorMessage = element.errorMessage;
   if (typeof element.actionLabel === 'string') normalized.actionLabel = element.actionLabel;
@@ -792,8 +849,17 @@ function normalizeElementPatch(element) {
   if (typeof element.quizOptionBackgroundColor === 'string') normalized.quizOptionBackgroundColor = element.quizOptionBackgroundColor.trim();
   if (typeof element.quizOptionTextColor === 'string') normalized.quizOptionTextColor = element.quizOptionTextColor.trim();
   if (typeof element.quizButtonBackgroundColor === 'string') normalized.quizButtonBackgroundColor = element.quizButtonBackgroundColor.trim();
+  if (typeof element.compareImageReference === 'string') normalized.compareImageReference = element.compareImageReference.trim();
+  if (typeof element.labelColor === 'string') normalized.labelColor = element.labelColor.trim();
+  if (typeof element.inputTextColor === 'string') normalized.inputTextColor = element.inputTextColor.trim();
+  if (typeof element.submitButtonColor === 'string') normalized.submitButtonColor = element.submitButtonColor.trim();
+  if (typeof element.submitButtonTextColor === 'string') normalized.submitButtonTextColor = element.submitButtonTextColor.trim();
   if (typeof element.lockOnWrong === 'boolean') normalized.lockOnWrong = element.lockOnWrong;
   if (typeof element.animationLoop === 'boolean') normalized.animationLoop = element.animationLoop;
+  if (typeof element.compareCaseSensitive === 'boolean') normalized.compareCaseSensitive = element.compareCaseSensitive;
+  if (typeof element.compareImageEnabled === 'boolean') normalized.compareImageEnabled = element.compareImageEnabled;
+  if (typeof element.allowImage === 'boolean') normalized.allowImage = element.allowImage;
+  if (typeof element.allowAudio === 'boolean') normalized.allowAudio = element.allowAudio;
   if (Array.isArray(element.motionFrames)) {
     normalized.motionFrames = element.motionFrames
       .filter((frame) => frame && typeof frame === 'object')
@@ -925,6 +991,22 @@ function requestExplicitlyForbidsNewSlides(request) {
 function requestSuggestsButtons(request) {
   return /(botao|botão|botoes|botões|acao|ação|interativo|interação|interacao|clicar|clique|naveg)/i.test(
     request || ''
+  );
+}
+
+function requestExplicitlyAsksForGeneratedImage(request) {
+  const normalized = String(request || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  if (!normalized) {
+    return false;
+  }
+  return (
+    /\b(gere|crie|faca|desenhe|monte|quero|transforme|renderize)\b[\s\S]{0,80}\b(imagem|ilustracao|foto|desenho|arte|icone|visual|olho|personagem|objeto|cena)\b/.test(normalized) ||
+    /\b(imagem|ilustracao|foto|desenho|arte|icone|visual)\b[\s\S]{0,60}\b(ia|gerada|gerar|criar|nova)\b/.test(normalized) ||
+    /\b(use|usar)\b[\s\S]{0,40}\b(ia de imagem|gerador de imagem)\b/.test(normalized) ||
+    normalized.includes('generationprompt')
   );
 }
 
@@ -1075,6 +1157,7 @@ function inferElementTypeFromId(elementId = '') {
   if (value.includes('botao') || value.includes('botão') || value.includes('button')) return 'floatingButton';
   if (value.includes('quiz')) return 'quiz';
   if (value.includes('imagem') || value.includes('image')) return 'image';
+  if (value.includes('camera') || value.includes('webcam') || value.includes('cam')) return 'camera';
   if (value.includes('video')) return 'video';
   if (value.includes('audio')) return 'audio';
   return '';
@@ -1865,11 +1948,19 @@ function createAiPrompt({
 }) {
   const safeStage = stageSize?.width && stageSize?.height ? stageSize : DEFAULT_STAGE_SIZE;
   const orderedSlides = summarizeSlides(slides, activeSlideId);
+  const wantsGeneratedImage = requestExplicitlyAsksForGeneratedImage(request);
 
   // Regras dinamicas baseadas no contexto (mantivemos sua logica, mas simplificada)
   const dynamicRules = [];
   if (executionPlan?.mode === 'simple') {
     dynamicRules.push('Faca apenas o pedido simples solicitado. Nao crie novos slides.');
+  }
+  if (wantsGeneratedImage) {
+    dynamicRules.push(
+      'O pedido exige uma imagem nova gerada por IA.',
+      'Sua resposta deve incluir um elemento do tipo image com generationPrompt detalhado, ou backgroundImagePrompt se o pedido for claramente um fundo.',
+      'Nao resolva esse pedido apenas com bloco, texto, placeholder ou layout sem imagem gerada.'
+    );
   }
   
   // Schema capabilities (o que a IA pode usar)
@@ -1882,13 +1973,17 @@ function createAiPrompt({
     constraints: [
         'Output MUST be a valid JSON array of actions.',
         'Strictly follow the action schemas provided.',
-        'Respect stage bounds (1280x720).'
+        'Respect stage bounds (1280x720).',
+        'When userRequest names a specific object or element, that textual request defines the final identity. Use attachmentSummary mainly for position, size, silhouette and orientation, not to rename the object.',
+        ...ELEMENT_CONFIGURATION_RULES,
+        ...dynamicRules
     ],
     context: {
       currentSlides: orderedSlides,
       activeSlideId: activeSlideId || null,
       userRequest: truncateText(request, MAX_REQUEST_LENGTH),
-      attachmentSummary: truncateText(attachmentInsights, MAX_ATTACHMENT_INSIGHTS_LENGTH)
+      attachmentSummary: truncateText(attachmentInsights, MAX_ATTACHMENT_INSIGHTS_LENGTH),
+      explicitImageRequest: wantsGeneratedImage
     },
     availableActions: capabilities.actionTypes, // Envia lista simples de tipos
     elementSchema: capabilities.elementTypes,   // Envia os campos permitidos
@@ -1896,24 +1991,37 @@ function createAiPrompt({
   };
 
   // Exemplo conciso (Few-shot learning funciona melhor com exemplos pequenos)
-  const exampleAction = {
-    type: 'add_element',
-    slideId: 'slide-intro',
-    reason: 'Exemplo de acao',
-    element: {
-      type: 'text',
-      id: 'txt-titulo',
-      content: 'Texto Gerado',
-      x: 100, y: 100, width: 300, height: 50,
-      fontSize: 24, textColor: '#000000'
+  const exampleAction = wantsGeneratedImage
+    ? {
+      type: 'add_element',
+      slideId: activeSlideId || 'slide-atual',
+      reason: 'Gerar a imagem especifica pedida pelo usuario.',
+      element: {
+        type: 'image',
+        id: 'img-principal',
+        generationPrompt: 'close de um olho de cobra com pupila vertical, textura realista, contraste alto e enquadramento limpo',
+        x: 420, y: 140, width: 420, height: 320,
+        objectFit: 'cover'
+      }
     }
-  };
+    : {
+      type: 'add_element',
+      slideId: 'slide-intro',
+      reason: 'Exemplo de acao',
+      element: {
+        type: 'text',
+        id: 'txt-titulo',
+        content: 'Texto Gerado',
+        x: 100, y: 100, width: 300, height: 50,
+        fontSize: 24, textColor: '#000000'
+      }
+    };
 
   // Monta a string final do prompt
   // Importante: Dizer explicitamente para retornar APENAS o JSON
   return JSON.stringify({
     system: `Voce e um motor de edicao de slides. Sua saida e consumida por uma maquina de estados. Nao explique, nao use markdown. Retorne apenas o JSON.
-    Regras: ${BASIC_LAYOUT_RULES.join(' ')}`,
+    Regras: ${BASIC_LAYOUT_RULES.join(' ')} ${ELEMENT_CONFIGURATION_RULES.join(' ')} ${dynamicRules.join(' ')}`.trim(),
     payload: payload,
     exampleOutput: [exampleAction] // Mostra o formato exato esperado
   });
@@ -1965,6 +2073,7 @@ function createAiStepPrompt({
   const safeStage = stageSize?.width && stageSize?.height ? stageSize : DEFAULT_STAGE_SIZE;
   const orderedSlides = summarizeSlides(slides, activeSlideId);
   const contextualInstructions = [];
+  const wantsGeneratedImage = requestExplicitlyAsksForGeneratedImage(request);
 
   if (executionPlan?.mode === 'simple') {
     contextualInstructions.push(
@@ -1991,6 +2100,13 @@ function createAiStepPrompt({
       'Prefira adaptar estruturas existentes dos templates em vez de recriar tudo do zero.'
     );
   }
+  if (wantsGeneratedImage) {
+    contextualInstructions.push(
+      'O pedido exige uma imagem nova gerada por IA.',
+      'Sua proxima acao deve criar ou atualizar um elemento do tipo image com generationPrompt detalhado, ou usar backgroundImagePrompt se o pedido for explicitamente um fundo.',
+      'Nao resolva esse pedido so com bloco, texto, placeholder ou layout sem imagem.'
+    );
+  }
 
   return JSON.stringify({
     role: 'slide_builder_stepwise',
@@ -2011,6 +2127,7 @@ function createAiStepPrompt({
       'Para text, coloque o texto visivel em content e nao em label.',
       'Para quiz, use options como array de strings simples e correctOption como numero.',
       'Para trocar o fundo, use backgroundColor, backgroundImage ou backgroundImagePrompt no slide.',
+      'Se userRequest nomear claramente o objeto final, preserve esse objeto mesmo que attachmentInsights seja ambiguo. Use o anexo principalmente para area, posicao, tamanho, silhueta e orientacao.',
       'Mantenha o layout simples, legivel e dentro do palco 1280x720.',
       'Antes de responder, confira se nenhum elemento ultrapassa o palco ou fica cortado.',
       'Cheque se os elementos nao estao montados um sobre o outro. Reorganize com espaco real entre cards, quizzes, blocos e botoes.',
@@ -2019,6 +2136,10 @@ function createAiStepPrompt({
       'Use contraste forte entre fundo, blocos e texto.',
       'Use paleta harmonica e coerente entre fundo, blocos e botoes.',
       'Use animacoes simples quando fizer sentido: fade-in, slide-left, zoom-in, pulse, float ou none.',
+      'Quando o pedido pedir animacao, responda com os campos de animacao ja configurados no proprio elemento. Nao diga apenas que o elemento sera animado.',
+      'Quando o pedido pedir que um botao faca algo, configure o actionConfig completo para essa acao. Nao deixe o botao sem comportamento real.',
+      'Quando o pedido pedir detector, arraste, encaixe ou colisao, configure o detector de forma funcional, com detectorAcceptedDrag, detectorMinMatchCount ou detectorTriggerOnce quando necessario.',
+      'Quando o pedido pedir quiz, responda com o quiz completo e configurado, com mensagens, opcoes, resposta correta e botao interno prontos.',
       'Se o pedido pedir interatividade, prefira floatingButton, quiz ou detector com comportamento funcional.',
       'Nunca crie floatingButton vazio. Se houver botao, ele precisa ter actionConfig util para navegar, revelar conteudo, abrir quiz, mover elemento ou tocar animacao.',
       'Se usar moveElement, lembre: moveByX positivo move para a direita, moveByX negativo move para a esquerda, moveByY positivo move para baixo e moveByY negativo move para cima.',
@@ -2028,6 +2149,7 @@ function createAiStepPrompt({
       'Use os recursos da plataforma de forma intencional: block para estrutura, text para conteudo, image para ilustracao, floatingButton para acao, quiz para avaliacao e detector para gatilhos invisiveis.',
       'Quando a imagem ajudar a explicar melhor, prefira incluir image com generationPrompt ou fundo com backgroundImagePrompt.',
       'Se houver imagem anexada, use apenas o resumo dela no contexto como referencia visual do pedido.',
+      'Se attachmentInsights mencionar seta, ponta, ponteiro ou direcao, preserve essa orientacao no elemento final e na imagem gerada.',
       ...contextualInstructions
     ],
     allowedActionTypes: Array.from(ALLOWED_ACTIONS),
@@ -2128,6 +2250,7 @@ function createAiExecutionPlanPrompt({
   const safeStage = stageSize?.width && stageSize?.height ? stageSize : DEFAULT_STAGE_SIZE;
   const orderedSlides = summarizeSlides(slides, activeSlideId);
   const requestedSlideCount = extractRequestedSlideCount(request);
+  const wantsGeneratedImage = requestExplicitlyAsksForGeneratedImage(request);
   return JSON.stringify({
     role: 'slide_builder_planner',
     task: truncateText(request, MAX_REQUEST_LENGTH),
@@ -2142,11 +2265,21 @@ function createAiExecutionPlanPrompt({
       'Pense como um construtor em etapas: primeiro separe o conteudo por slides e depois a execucao vai montar um slide por vez.',
       'Se o pedido mencionar quantidade de slides, respeite essa quantidade no plano.',
       'Se houver apenas um slide vazio no editor, o primeiro item do plano pode reutilizar esse slide em vez de criar outro.',
+      ...(wantsGeneratedImage
+        ? [
+          'Se o pedido explicitar gerar uma imagem, ilustracao, desenho, foto ou visual especifico, classifique como mode simple sempre que possivel.',
+          'Nesse caso, o deliverable deve deixar claro que a execucao precisa criar um elemento image com generationPrompt detalhado para disparar a IA de imagem.',
+          'Nao transforme um pedido visual especifico em layout generico sem imagem.'
+        ]
+        : []),
+      'Se o pedido mencionar animacao, detector, quiz, CTA ou configuracao funcional, descreva isso no goal ou deliverable do plano para a execucao nao esquecer de configurar os campos do elemento.',
+      'Se attachmentInsights mencionar seta, direcao ou orientacao do rabisco, preserve isso explicitamente no plano do item atual.',
       'Se templateReferences estiver presente, use essas referencias para inspirar a progressao narrativa, a distribuicao de tipos de slide e a complexidade de cada etapa sem copiar o conteudo literal.',
       'Nao inclua campos desnecessarios, comentarios ou texto fora do JSON.'
     ],
     context: {
       requestedSlideCount,
+      explicitImageRequest: wantsGeneratedImage,
       activeSlideId: activeSlideId || null,
       stageSize: safeStage,
       slides: orderedSlides,
@@ -2174,10 +2307,14 @@ function createAiReviewPrompt({ request, slides, activeSlideId, stageSize, attac
       'Cheque se textos importantes possuem bloco, faixa ou card de apoio quando isso faria a leitura ficar melhor.',
       'Cheque se a paleta de cores esta harmonica e coerente entre fundo, blocos, botoes e texto.',
       'Cheque se a proposta usa bem as ferramentas da plataforma quando o pedido pedir interatividade ou slide elaborado.',
+      'Cheque se, quando o pedido mencionar animacao, os campos animationType, animationDuration, animationDelay, animationLoop ou motionFrames foram realmente configurados em vez de apenas sugeridos em texto.',
       'Cheque se todo floatingButton possui actionConfig util e nao ficou apenas decorativo.',
+      'Cheque se quiz, detector e botoes vieram realmente configurados para cumprir o pedido, e nao apenas inseridos com valores genericos.',
+      'Se o pedido mencionar detector, hotspot, quiz ou botao funcional e a proposta devolver apenas block, image ou text sem o tipo funcional correto, considere isso errado.',
       'Cheque se nao existe botao redundante tentando validar um quiz comum.',
       'Cheque se moveElement usa a direcao correta: moveByX positivo para direita, negativo para esquerda, moveByY positivo para baixo e negativo para cima.',
       'Se a proposta disser para mover para a esquerda e o valor estiver positivo, considere isso errado. Esquerda precisa de valor negativo, como -160.',
+      'Cheque se attachmentInsights mencionar seta ou direcao e se essa orientacao foi preservada corretamente.',
       'Cheque se faltou imagem gerada quando uma ilustracao ajudaria claramente a explicar melhor o slide.',
       'Se templateReferences estiver presente, cheque se a composicao final aproveitou bem a estrutura validada sem copiar o texto literal.',
       'Se ainda houver um ajuste importante, retorne um unico objeto JSON no formato {"done": false, "action": {...}, "message": "..."}',
@@ -2641,11 +2778,13 @@ async function compareImagesWithNanoBanana({ imageSettings, referenceAttachment,
   };
 }
 
-async function describeAttachmentsWithNanoBanana({ imageSettings, attachments = [] }) {
+async function describeAttachmentsWithNanoBanana({ imageSettings, attachments = [], request = '' }) {
   const normalizedAttachments = normalizeImageAttachments(attachments);
   if (!normalizedAttachments.length || !imageSettings?.image_encrypted_api_key || imageSettings.image_is_enabled === false) {
     return '';
   }
+  const isFunctionalRequest = requestTargetsFunctionalPlatformElement(request);
+  const isArrowRequest = requestExplicitlyTargetsArrowLikeObject(request);
   const parts = [
     ...normalizedAttachments.map((attachment) => ({
       inline_data: {
@@ -2654,8 +2793,11 @@ async function describeAttachmentsWithNanoBanana({ imageSettings, attachments = 
       }
     })),
     {
-      text:
-        'Descreva em portugues, de forma curta e objetiva, o que aparece na imagem anexada e quais detalhes visuais importam para criar um slide interativo alinhado ao pedido do usuario.'
+      text: isFunctionalRequest
+        ? `Pedido do usuario: ${truncateText(request, 320)}. Descreva em portugues, de forma curta e objetiva, o rabisco anexado como referencia funcional de area, posicao, tamanho, direcao e intencao espacial. Nao descreva o anexo como arte final pronta e nao transforme automaticamente um retangulo/mancha/traço em bloco visual. Se houver seta, ponteiro, fluxo ou desenho direcional, diga explicitamente para qual lado a ponta aponta e qual e o sentido principal do traco, sem ambiguidade. Se o pedido sugerir detector, hotspot, botao, quiz, area de clique ou encaixe, destaque que o rabisco parece marcar uma zona funcional no palco.`
+        : isArrowRequest
+          ? `Pedido do usuario: ${truncateText(request, 320)}. Descreva em portugues, de forma curta e objetiva, o que aparece na imagem anexada e quais detalhes visuais importam para criar um slide interativo alinhado ao pedido do usuario. Como o pedido envolve seta, flecha ou direcao, diga explicitamente para qual lado a ponta aponta e qual e o sentido principal do traco, sem ambiguidade.`
+          : `Pedido do usuario: ${truncateText(request, 320)}. Descreva em portugues, de forma curta e objetiva, o que aparece na imagem anexada e quais detalhes visuais importam para criar um slide interativo alinhado ao pedido do usuario. O nome do objeto pedido pelo usuario tem prioridade sobre semelhancas visuais ambiguas do rabisco. Nao conclua que o objeto final e uma seta, flecha, xicara ou outro item especifico se isso nao estiver claro no texto do pedido; descreva apenas forma geral, proporcao, posicao e detalhes relevantes.`
     }
   ];
   const body = await callGoogleGenerateContent({
@@ -2663,6 +2805,318 @@ async function describeAttachmentsWithNanoBanana({ imageSettings, attachments = 
     parts
   });
   return extractGoogleText(body);
+}
+
+function normalizeMagicPenSourceBounds(sourceBounds = null, stageSize = null) {
+  const safeStage = stageSize?.width && stageSize?.height ? stageSize : DEFAULT_STAGE_SIZE;
+  const x = Math.max(0, Number(sourceBounds?.x) || 0);
+  const y = Math.max(0, Number(sourceBounds?.y) || 0);
+  const width = Math.max(40, Number(sourceBounds?.width) || 280);
+  const height = Math.max(40, Number(sourceBounds?.height) || 180);
+  return {
+    x: Math.min(x, Math.max(0, safeStage.width - 40)),
+    y: Math.min(y, Math.max(0, safeStage.height - 40)),
+    width: Math.min(width, safeStage.width),
+    height: Math.min(height, safeStage.height)
+  };
+}
+
+function heuristicClassifyMagicPenRequest(request = '') {
+  const normalized = normalizeReferenceText(request);
+  const functionalPattern = /(detector|hotspot|area invisivel|gatilho|encaixe|drop|drag|arrast|quiz|pergunta interativa|botao|cta|clicar|click|input|campo|formulario|resposta|enviar|naveg|floatingbutton|nextslide|jumpslide)/i;
+  const imagePattern = /(imagem|ilustracao|foto|desenho|arte|icone|icone|visual|personagem|objeto|cena|olho|rosto|animal|textura|logo)/i;
+  const hasFunctional = functionalPattern.test(normalized);
+  const hasImage = requestExplicitlyAsksForGeneratedImage(normalized) || imagePattern.test(normalized);
+  if (hasFunctional && hasImage) {
+    return {
+      route: 'functional_image',
+      reason: 'O pedido mistura comportamento funcional da plataforma com um visual novo gerado por IA.'
+    };
+  }
+  if (hasFunctional) {
+    return {
+      route: 'functional',
+      reason: 'O pedido descreve principalmente um elemento funcional da plataforma.'
+    };
+  }
+  return {
+    route: 'image',
+    reason: 'O pedido descreve principalmente a criacao de um visual ou imagem.'
+  };
+}
+
+function createMagicPenClassificationPrompt({ request, attachmentInsights = '' }) {
+  return JSON.stringify({
+    role: 'magic_pen_router',
+    instructions: [
+      'Classifique o pedido do pincel magico em exatamente uma rota.',
+      'Rotas permitidas: image, functional, functional_image.',
+      'image = quando o objetivo principal e gerar um visual, ilustracao, foto, icone, personagem, objeto ou cena.',
+      'functional = quando o objetivo principal e criar ou configurar elementos reais da plataforma, como floatingButton, input, detector, quiz, navegacao ou gatilhos.',
+      'functional_image = quando o pedido combina elemento funcional real com imagem gerada por IA, por exemplo botao com imagem, hotspot com ilustracao, card funcional com icone/visual novo.',
+      'Nao use markdown. Responda somente JSON valido no formato {"route":"image|functional|functional_image","reason":"texto curto em portugues"}.',
+      'Se houver duvida entre functional e functional_image, escolha functional_image somente quando a imagem gerada for parte importante do resultado final.'
+    ],
+    context: {
+      userRequest: truncateText(request, 600),
+      attachmentSummary: truncateText(attachmentInsights, 500)
+    }
+  });
+}
+
+function parseMagicPenRoutePayload(rawContent) {
+  const content = sanitizeJsonCandidate(rawContent);
+  const payload = JSON.parse(content);
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('A IA do roteador nao retornou um objeto JSON valido.');
+  }
+  const route = String(payload.route || '').trim();
+  if (!MAGIC_PEN_ALLOWED_ROUTES.has(route)) {
+    throw new Error('A IA do roteador retornou uma rota invalida.');
+  }
+  return {
+    route,
+    reason: truncateText(String(payload.reason || '').trim(), 240)
+  };
+}
+
+async function parseMagicPenRouteResponse(settingsRow, messages, rawContent) {
+  try {
+    return parseMagicPenRoutePayload(rawContent);
+  } catch (error) {
+    const repairedContent = await callCompatibleChatApi({
+      settings: settingsRow,
+      messages: [
+        ...messages,
+        {
+          role: 'assistant',
+          content: truncateText(rawContent, MAX_REPAIR_ECHO_CHARS)
+        },
+        {
+          role: 'user',
+          content:
+            'Sua resposta veio em formato invalido. Reescreva como um unico JSON valido no formato {"route":"image|functional|functional_image","reason":"texto curto"} sem markdown.'
+        }
+      ],
+      temperature: 0
+    });
+    return parseMagicPenRoutePayload(repairedContent);
+  }
+}
+
+async function classifyMagicPenRequest({
+  settingsRow,
+  request,
+  attachmentInsights = ''
+}) {
+  const fallback = heuristicClassifyMagicPenRequest(request);
+  try {
+    const messages = [
+      {
+        role: 'system',
+        content: settingsRow.system_prompt || DEFAULT_SYSTEM_PROMPT
+      },
+      {
+        role: 'user',
+        content: createMagicPenClassificationPrompt({
+          request,
+          attachmentInsights
+        })
+      }
+    ];
+    const content = await callCompatibleChatApi({
+      settings: settingsRow,
+      messages,
+      temperature: 0
+    });
+    const parsed = await parseMagicPenRouteResponse(settingsRow, messages, content);
+    return {
+      route: parsed.route,
+      reason: parsed.reason || fallback.reason
+    };
+  } catch (error) {
+    return fallback;
+  }
+}
+
+function buildMagicPenImagePrompt({
+  request,
+  attachmentInsights = '',
+  sourceBounds = null,
+  stageSize = null
+}) {
+  const safeStage = stageSize?.width && stageSize?.height ? stageSize : DEFAULT_STAGE_SIZE;
+  const bounds = normalizeMagicPenSourceBounds(sourceBounds, safeStage);
+  return [
+    'Modo pincel magico de imagem.',
+    'Use a imagem anexada como rabisco-base do professor.',
+    'O objetivo e gerar a arte final pedida pelo texto, respeitando o rabisco como referencia principal de composicao, silhueta, orientacao e proporcao.',
+    'Nao trate o rabisco como arte final literal, mas preserve a intencao espacial dele.',
+    'Nao ignore o prompt do professor.',
+    'Nao adicione textos tipograficos, molduras extras, mockups, interfaces ou elementos fora do pedido.',
+    'Se o prompt nomear claramente o objeto final, esse nome tem prioridade sobre semelhancas ambiguas do rabisco.',
+    'Se houver seta, ponteiro ou direcao no rabisco, preserve exatamente a orientacao.',
+    `Area alvo no palco ${safeStage.width}x${safeStage.height}: x=${Math.round(bounds.x)}, y=${Math.round(bounds.y)}, largura=${Math.round(bounds.width)}, altura=${Math.round(bounds.height)}.`,
+    'Gere uma imagem pronta para ser colocada exatamente nessa mesma area do slide, sem depender de recorte manual posterior.',
+    attachmentInsights ? `Resumo visual do rabisco: ${attachmentInsights}` : '',
+    `Pedido do professor: ${String(request || '').trim()}`
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+function buildMagicPenFunctionalRequest({
+  request,
+  route,
+  sourceBounds = null,
+  stageSize = null
+}) {
+  const safeStage = stageSize?.width && stageSize?.height ? stageSize : DEFAULT_STAGE_SIZE;
+  const bounds = normalizeMagicPenSourceBounds(sourceBounds, safeStage);
+  const wantsGeneratedImage = route === 'functional_image';
+  return [
+    'Modo pincel magico funcional.',
+    'Trabalhe somente no slide atual. Nao crie outros slides.',
+    'O rabisco anexado marca a area principal que deve ser usada no resultado final.',
+    `Area principal do rabisco no palco ${safeStage.width}x${safeStage.height}: x=${Math.round(bounds.x)}, y=${Math.round(bounds.y)}, largura=${Math.round(bounds.width)}, altura=${Math.round(bounds.height)}.`,
+    'O elemento principal deve nascer nessa mesma area ou encaixado estritamente dentro dela, preservando posicao e tamanho com alta fidelidade.',
+    'Se o pedido mencionar botao, use exatamente floatingButton e configure actionConfig ou interactionTriggers reais. Nao responda com block colorido fingindo ser botao.',
+    'Se o pedido mencionar detector, use exatamente detector. Se mencionar quiz, use exatamente quiz. Se mencionar campo de resposta, use exatamente input.',
+    'Quando o pedido pedir comportamento funcional, configure esse comportamento de verdade nos campos da plataforma.',
+    wantsGeneratedImage
+      ? 'Este pedido tambem exige imagem gerada por IA. Sua resposta deve incluir image com generationPrompt ou actionConfig.type addImage com generationPrompt, em vez de substituir a imagem por block, card ou placeholder.'
+      : 'Se o pedido for apenas funcional, nao gere imagem nova a menos que o prompt peça isso explicitamente.',
+    wantsGeneratedImage
+      ? 'A primeira imagem gerada ligada ao pedido deve usar a mesma area do rabisco como referencia principal de insercao.'
+      : '',
+    `Pedido do professor: ${String(request || '').trim()}`
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+function applyMagicPenBoundsToVisualActions(actions = [], sourceBounds = null, stageSize = null) {
+  if (!Array.isArray(actions) || !actions.length || !sourceBounds) {
+    return actions;
+  }
+  const bounds = normalizeMagicPenSourceBounds(sourceBounds, stageSize);
+  let visualPlaced = false;
+  actions.forEach((action) => {
+    if (visualPlaced || !action || typeof action !== 'object') {
+      return;
+    }
+    const element = action.element;
+    if (!element || typeof element !== 'object') {
+      return;
+    }
+    if (
+      ['add_element', 'update_element'].includes(action.type) &&
+      element.type === 'image' &&
+      (typeof element.src === 'string' || typeof element.generationPrompt === 'string')
+    ) {
+      element.x = bounds.x;
+      element.y = bounds.y;
+      element.width = bounds.width;
+      element.height = bounds.height;
+      element.objectFit = element.objectFit || 'cover';
+      visualPlaced = true;
+      return;
+    }
+    if (
+      element.actionConfig &&
+      typeof element.actionConfig === 'object' &&
+      element.actionConfig.type === 'addImage' &&
+      (typeof element.actionConfig.url === 'string' || typeof element.actionConfig.generationPrompt === 'string')
+    ) {
+      element.actionConfig.insertX = bounds.x;
+      element.actionConfig.insertY = bounds.y;
+      element.actionConfig.insertWidth = bounds.width;
+      element.actionConfig.insertHeight = bounds.height;
+      visualPlaced = true;
+    }
+  });
+  return actions;
+}
+
+async function proposeMagicPenActions({
+  settingsRow,
+  request,
+  slides,
+  activeSlideId,
+  stageSize,
+  attachments = [],
+  sourceBounds = null
+}) {
+  const normalizedAttachments = normalizeImageAttachments(attachments);
+  const resolvedStageSize = stageSize?.width && stageSize?.height ? stageSize : DEFAULT_STAGE_SIZE;
+  const normalizedBounds = normalizeMagicPenSourceBounds(sourceBounds, resolvedStageSize);
+  const attachmentInsights = await describeAttachmentsWithNanoBanana({
+    imageSettings: settingsRow,
+    attachments: normalizedAttachments,
+    request
+  });
+  const classification = await classifyMagicPenRequest({
+    settingsRow,
+    request,
+    attachmentInsights
+  });
+
+  if (classification.route === 'image') {
+    const src = await generateImageWithNanoBanana({
+      imageSettings: settingsRow,
+      prompt: buildMagicPenImagePrompt({
+        request,
+        attachmentInsights,
+        sourceBounds: normalizedBounds,
+        stageSize: resolvedStageSize
+      }),
+      attachments: normalizedAttachments
+    });
+    return {
+      mode: 'image',
+      classification,
+      actions: [
+        {
+          type: 'add_element',
+          slideId: activeSlideId || slides?.[0]?.id || 'slide-atual',
+          reason: 'Inserir a imagem gerada pelo pincel magico exatamente na area rabiscada.',
+          element: {
+            id: createSafeId('element', 'pincel-magico-imagem', 0),
+            type: 'image',
+            src,
+            x: normalizedBounds.x,
+            y: normalizedBounds.y,
+            width: normalizedBounds.width,
+            height: normalizedBounds.height,
+            objectFit: 'cover'
+          }
+        }
+      ]
+    };
+  }
+
+  const routedRequest = buildMagicPenFunctionalRequest({
+    request,
+    route: classification.route,
+    sourceBounds: normalizedBounds,
+    stageSize: resolvedStageSize
+  });
+  const actions = await proposeSlideActionsSafely({
+    settingsRow,
+    request: routedRequest,
+    slides,
+    activeSlideId,
+    stageSize: resolvedStageSize,
+    attachments: normalizedAttachments
+  });
+  return {
+    mode: classification.route,
+    classification,
+    actions:
+      classification.route === 'functional_image'
+        ? applyMagicPenBoundsToVisualActions(actions, normalizedBounds, resolvedStageSize)
+        : actions
+  };
 }
 
 async function enrichActionsWithGeneratedImages(actions, settingsRow, attachments = [], context = {}) {
@@ -2944,7 +3398,8 @@ async function proposeSlideExecutionPlan({
   const normalizedAttachments = normalizeImageAttachments(attachments);
   const attachmentInsights = await describeAttachmentsWithNanoBanana({
     imageSettings: settingsRow,
-    attachments: normalizedAttachments
+    attachments: normalizedAttachments,
+    request
   });
   const templateReferences = await buildTemplateReferenceContext({ request });
   const baseMessages = [
@@ -3057,7 +3512,8 @@ async function proposeSlideActions({
   const disableStoryExpansion = Boolean(executionPlan?.mode === 'deck' && currentPlanItem);
   const attachmentInsights = await describeAttachmentsWithNanoBanana({
     imageSettings: settingsRow,
-    attachments: normalizedAttachments
+    attachments: normalizedAttachments,
+    request
   });
   const templateReferences = await buildTemplateReferenceContext({
     request,
@@ -3137,7 +3593,8 @@ async function proposeSlideActionsSafely(args) {
     const normalizedAttachments = normalizeImageAttachments(args?.attachments);
     const attachmentInsights = await describeAttachmentsWithNanoBanana({
       imageSettings: args?.settingsRow,
-      attachments: normalizedAttachments
+      attachments: normalizedAttachments,
+      request: args?.request || ''
     });
     const fallbackActions = await collectStepwiseActions({
       settingsRow: args?.settingsRow,
@@ -3183,7 +3640,8 @@ async function proposeNextSlideAction({
       ? attachmentInsights.trim()
       : await describeAttachmentsWithNanoBanana({
         imageSettings: settingsRow,
-        attachments: normalizedAttachments
+        attachments: normalizedAttachments,
+        request
       });
   const resolvedTemplateReferences =
     Array.isArray(templateReferences) && templateReferences.length
@@ -3312,6 +3770,7 @@ async function proposeNextSlideAction({
 module.exports = {
   buildPublicAiSettings,
   normalizeActionList,
+  proposeMagicPenActions,
   proposeNextSlideAction,
   proposeSlideExecutionPlan,
   proposeSlideActions: proposeSlideActionsSafely,

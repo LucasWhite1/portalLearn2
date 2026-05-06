@@ -1,8 +1,9 @@
-﻿const express = require('express');
+const express = require('express');
 const db = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const { compareImagesWithNanoBanana } = require('../aiProvider');
 const { readImageSource } = require('../pixian');
+const { getShare, listShares, addCameraRequest, addDrawingStroke, clearDrawingStrokes } = require('../liveStageShareStore');
 
 const { sanitizeText, sanitizeMediaUrl, isUuid } = require('../security');
 
@@ -18,6 +19,7 @@ let courseAccessRequestsTableEnsured = false;
 let ownershipColumnsEnsured = false;
 let courseColumnsEnsurePromise = null;
 let enrollmentProgressColumnsEnsurePromise = null;
+const LIVE_STAGE_SHARE_ID_REGEX = /^[0-9a-f]{32}$/i;
 
 const ensureCourseCoverColumn = async () => {
   if (courseCoverColumnEnsured) {
@@ -110,6 +112,175 @@ router.get('/public/modules/:moduleId', async (req, res) => {
     created_at: module.created_at,
     courseProgress: {}
   });
+});
+
+router.get('/live-stage/:shareId', requireAuth, async (req, res) => {
+  await ensureOwnershipColumns();
+  const shareId = sanitizeText(req.params?.shareId || '', 64);
+  if (!LIVE_STAGE_SHARE_ID_REGEX.test(shareId)) {
+    return res.status(400).json({ message: 'Compartilhamento ao vivo inválido.' });
+  }
+  const share = getShare(shareId);
+  if (!share) {
+    return res.status(404).json({ message: 'Compartilhamento ao vivo não encontrado.' });
+  }
+  const payload = share.payload || {};
+  if (req.user?.role !== 'student') {
+    return res.status(403).json({ message: 'Somente alunos autenticados podem acessar a aula ao vivo.' });
+  }
+  let hasEnrollmentAccess = false;
+  if (isUuid(payload.courseId)) {
+    const { rows } = await db.query(
+      `SELECT 1
+         FROM enrollments e
+        WHERE e.user_id = $1
+          AND e.course_id = $2
+        LIMIT 1`,
+      [req.user.id, payload.courseId]
+    );
+    hasEnrollmentAccess = Boolean(rows[0]);
+    if (!hasEnrollmentAccess) {
+      return res.status(403).json({ message: 'Você não está matriculado neste curso ao vivo.' });
+    }
+  }
+  const hasOwnerAccess = Boolean(share.ownerUserId && req.user.ownerUserId === share.ownerUserId);
+  const hasAdminBroadcastAccess = share.ownerRole === 'admin';
+  if (!hasEnrollmentAccess && !hasOwnerAccess && !hasAdminBroadcastAccess) {
+    return res.status(403).json({ message: 'Esta aula ao vivo está disponível apenas para alunos deste professor.' });
+  }
+  res.json({
+    id: payload.moduleId || `live-stage-${share.shareId}`,
+    courseId: payload.courseId || `live-course-${share.shareId}`,
+    courseTitle: 'Palco ao vivo',
+    title: payload.title || 'Palco ao vivo',
+    slug: `live-stage-${share.shareId}`,
+    description: payload.description || null,
+    builder_data: payload.builderData || {},
+    courseProgress: {},
+    liveShare: {
+      shareId: share.shareId,
+      activeSlideId: payload.activeSlideId || null,
+      revision: share.revision,
+      updatedAt: new Date(share.updatedAt).toISOString(),
+      drawingStrokes: share.drawingStrokes || []
+    }
+  });
+});
+
+router.post('/live-stage/:shareId/request-camera', requireAuth, async (req, res) => {
+  const shareId = sanitizeText(req.params?.shareId || '', 64);
+  if (!LIVE_STAGE_SHARE_ID_REGEX.test(shareId)) {
+    return res.status(400).json({ message: 'Compartilhamento ao vivo inválido.' });
+  }
+  const share = getShare(shareId);
+  if (!share) {
+    return res.status(404).json({ message: 'Compartilhamento ao vivo não encontrado.' });
+  }
+
+  const { peerId } = req.body;
+  if (!peerId) {
+    return res.status(400).json({ message: 'PeerID é necessário.' });
+  }
+
+  const request = {
+    userId: req.user.id,
+    fullName: req.user.full_name || req.user.fullName,
+    peerId: sanitizeText(peerId, 120)
+  };
+
+  const success = addCameraRequest(shareId, request);
+  if (!success) {
+    return res.status(500).json({ message: 'Não foi possível registrar a solicitação.' });
+  }
+
+  res.json({ success: true });
+});
+
+router.post('/live-stage/:shareId/drawing', requireAuth, async (req, res) => {
+  const shareId = sanitizeText(req.params?.shareId || '', 64);
+  if (!LIVE_STAGE_SHARE_ID_REGEX.test(shareId)) {
+    return res.status(400).json({ message: 'Compartilhamento ao vivo inválido.' });
+  }
+  const share = getShare(shareId);
+  if (!share) {
+    return res.status(404).json({ message: 'Compartilhamento ao vivo não encontrado.' });
+  }
+
+  const { stroke } = req.body;
+  if (!stroke || !Array.isArray(stroke.points)) {
+    return res.status(400).json({ message: 'Dados do traço inválidos.' });
+  }
+
+  const success = addDrawingStroke(shareId, {
+    userId: req.user.id,
+    fullName: req.user.full_name || req.user.fullName,
+    slideId: stroke.slideId,
+    stroke: {
+      id: stroke.id,
+      color: stroke.color,
+      width: stroke.width,
+      points: stroke.points
+    }
+  });
+
+  res.json({ success: true });
+});
+
+router.delete('/live-stage/:shareId/drawing', requireAuth, async (req, res) => {
+  const { shareId } = req.params;
+  if (!isUuid(shareId)) {
+    return res.status(400).json({ message: 'ID de compartilhamento inválido.' });
+  }
+
+  const success = clearDrawingStrokes(shareId);
+  res.json({ success });
+});
+
+router.get('/live-stage', requireAuth, async (req, res) => {
+  await ensureOwnershipColumns();
+  if (req.user?.role !== 'student') {
+    return res.json([]);
+  }
+
+  const { rows } = await db.query(
+    `SELECT e.course_id, c.title
+       FROM enrollments e
+       JOIN courses c ON c.id = e.course_id
+      WHERE e.user_id = $1`,
+    [req.user.id]
+  );
+  const enrolledCourseMap = rows.reduce((acc, course) => {
+    acc[course.course_id] = course.title || 'Curso ao vivo';
+    return acc;
+  }, {});
+
+  const shares = listShares()
+    .filter((share) => {
+      const payload = share?.payload || {};
+      if (isUuid(payload.courseId) && enrolledCourseMap[payload.courseId]) {
+        return true;
+      }
+      if (share.ownerRole === 'admin') {
+        return true;
+      }
+      return Boolean(share.ownerUserId && req.user.ownerUserId === share.ownerUserId);
+    })
+    .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
+    .map((share) => {
+      const payload = share.payload || {};
+      return {
+        shareId: share.shareId,
+        courseId: payload.courseId || null,
+        courseTitle: isUuid(payload.courseId) ? enrolledCourseMap[payload.courseId] || 'Curso ao vivo' : 'Aula ao vivo',
+        title: payload.title || 'Palco ao vivo',
+        description: payload.description || null,
+        activeSlideId: payload.activeSlideId || null,
+        moduleId: payload.moduleId || null,
+        updatedAt: new Date(share.updatedAt).toISOString()
+      };
+    });
+
+  res.json(shares);
 });
 
 router.use(requireAuth);
@@ -220,6 +391,7 @@ const sanitizeInputResponsePayload = (payload = {}, context = {}) => {
   const submittedText = sanitizeText(payload?.text || '', 4000, { trim: false });
   const imageUrl = sanitizeMediaUrl(payload?.image || '');
   const audioUrl = sanitizeMediaUrl(payload?.audio || '');
+  const videoUrl = sanitizeMediaUrl(payload?.video || '');
   return {
     key,
     moduleId: sanitizeText(payload?.moduleId || context.moduleId || '', 120) || null,
@@ -231,6 +403,7 @@ const sanitizeInputResponsePayload = (payload = {}, context = {}) => {
     text: submittedText || '',
     image: imageUrl || '',
     audio: audioUrl || '',
+    video: videoUrl || '',
     matched: typeof payload?.matched === 'boolean' ? payload.matched : null,
     submittedAt: new Date().toISOString()
   };
@@ -266,10 +439,18 @@ const sanitizeProgressEventPayload = (event = {}, context = {}) => {
       viewedSeconds: Number.isFinite(Number(rawDetails.viewedSeconds))
         ? Number(Number(rawDetails.viewedSeconds).toFixed(2))
         : null,
+      pointCount: Number.isFinite(Number(rawDetails.pointCount)) ? Math.max(0, Math.round(Number(rawDetails.pointCount))) : null,
+      strokeWidth: Number.isFinite(Number(rawDetails.strokeWidth))
+        ? Number(Number(rawDetails.strokeWidth).toFixed(2))
+        : null,
+      strokeColor: sanitizeText(rawDetails.strokeColor || '', 40) || null,
       submittedText: sanitizeText(rawDetails.submittedText || '', 500) || null,
       matched: typeof rawDetails.matched === 'boolean' ? rawDetails.matched : null,
       hasImage: typeof rawDetails.hasImage === 'boolean' ? rawDetails.hasImage : null,
-      hasAudio: typeof rawDetails.hasAudio === 'boolean' ? rawDetails.hasAudio : null
+      hasAudio: typeof rawDetails.hasAudio === 'boolean' ? rawDetails.hasAudio : null,
+      hasVideo: typeof rawDetails.hasVideo === 'boolean' ? rawDetails.hasVideo : null,
+      mediaType: sanitizeText(rawDetails.mediaType || '', 40) || null,
+      mediaUrl: sanitizeMediaUrl(rawDetails.mediaUrl || '') || null
     }
   };
 };
