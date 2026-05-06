@@ -5,10 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Portal do Aluno</title>
   <link rel="stylesheet" href="style.css" />
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
 <body>
+  <button type="button" class="mobile-sidenav-toggle" id="mobileSidenavToggle" aria-controls="mobileSidenav" aria-expanded="false">
+    <span>Menu</span>
+  </button>
+  <div class="mobile-sidenav-backdrop" id="mobileSidenavBackdrop" hidden></div>
   <div class="page-shell">
-    <aside class="sidenav">
+    <aside class="sidenav" id="mobileSidenav">
       <h1>LearnSpace</h1>
       <p>Conteúdos ao vivo, notificações e suporte.</p>
       <ul class="nav-menu">
@@ -59,6 +64,14 @@
         <h2>Seus cursos matriculados</h2>
         <div class="course-grid" id="courseGrid">
           <p class="muted" style="margin:0;">Assim que a API retornar dados, os cards aparecem aqui.</p>
+        </div>
+      </section>
+
+      <section class="list-panel course-list-panel" id="portalLiveSection" data-section="courseList">
+        <h2>Ao vivo</h2>
+        <p class="muted" style="margin:0;">Veja aqui quando seu professor ou admin estiver compartilhando o palco em tempo real.</p>
+        <div class="course-grid" id="liveStageGrid">
+          <p class="muted" style="margin:0;">Nenhuma aula ao vivo disponível no momento.</p>
         </div>
       </section>
 

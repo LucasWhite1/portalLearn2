@@ -1,4 +1,4 @@
-const resolveApiBase = () => {
+﻿const resolveApiBase = () => {
   if (window.__API_BASE__) {
     return window.__API_BASE__;
   }
@@ -23,6 +23,7 @@ let adminAccessRequestsCache = [];
 let adminClassesCache = [];
 let courseGrid;
 let courseStoreGrid;
+let liveStageGrid;
 let adminAiSettingsCache = null;
 let openProgressTimelineKey = null;
 let activeNavCleanupTimer = null;
@@ -34,6 +35,9 @@ let adminActiveChatCourseId = '';
 let adminChatPollTimer = null;
 let adminReplyTarget = null;
 let adminCurrentChatMessages = [];
+let currentStudentSignupLink = '';
+let liveStagePollTimer = null;
+let mobileSidenavCleanup = null;
 
 const getCurrentUserRole = () => localStorage.getItem(USER_ROLE_KEY) || '';
 const getCurrentUserData = () => {
@@ -387,6 +391,42 @@ const showSectionById = (targetId, button = null) => {
 
 const setupSideNavigation = () => {
   const hasSections = !!document.querySelector('[data-section]');
+  const sidenav = document.getElementById('mobileSidenav');
+  const toggleButton = document.getElementById('mobileSidenavToggle');
+  const backdrop = document.getElementById('mobileSidenavBackdrop');
+  const isMobileViewport = () => window.innerWidth <= 1024;
+  const setSidenavOpen = (open) => {
+    if (!sidenav || !toggleButton || !backdrop) return;
+    sidenav.classList.toggle('is-open', open);
+    backdrop.classList.toggle('is-visible', open);
+    backdrop.hidden = !open;
+    toggleButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+    document.body.classList.toggle('mobile-sidenav-open', open);
+  };
+  const closeSidenav = () => setSidenavOpen(false);
+  const toggleSidenav = () => setSidenavOpen(!sidenav?.classList.contains('is-open'));
+
+  mobileSidenavCleanup?.();
+  mobileSidenavCleanup = null;
+
+  if (toggleButton && sidenav && backdrop) {
+    const handleToggle = () => toggleSidenav();
+    const handleBackdropClick = () => closeSidenav();
+    const handleResize = () => {
+      if (!isMobileViewport()) {
+        closeSidenav();
+      }
+    };
+    toggleButton.addEventListener('click', handleToggle);
+    backdrop.addEventListener('click', handleBackdropClick);
+    window.addEventListener('resize', handleResize);
+    mobileSidenavCleanup = () => {
+      toggleButton.removeEventListener('click', handleToggle);
+      backdrop.removeEventListener('click', handleBackdropClick);
+      window.removeEventListener('resize', handleResize);
+    };
+    closeSidenav();
+  }
 
   document.querySelectorAll('.nav-link[data-target]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -396,6 +436,9 @@ const setupSideNavigation = () => {
         showSectionById(targetId, button);
       } else {
         scrollToSectionById(targetId, button);
+      }
+      if (isMobileViewport()) {
+        closeSidenav();
       }
     });
   });
@@ -807,6 +850,80 @@ const requestStoreCourseAccess = async (courseId) => {
   }
 };
 
+const openLiveStageShare = (shareId) => {
+  if (!shareId) return;
+  window.location.href = `module-viewer.html?liveShareId=${encodeURIComponent(shareId)}`;
+};
+
+const createLiveStageCard = (share) => {
+  const card = document.createElement('article');
+  card.className = 'course-card';
+  const updatedAtLabel = share?.updatedAt
+    ? new Date(share.updatedAt).toLocaleString('pt-BR', {
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    })
+    : 'agora';
+  card.innerHTML = `
+    <div class="course-card-top">
+      <div class="course-card-headline">
+        <span class="badge">Ao vivo agora</span>
+        <strong>${escapeHtml(share.title || 'Palco ao vivo')}</strong>
+        <span class="store-course-description">${escapeHtml(share.courseTitle || 'Aula ao vivo')}</span>
+      </div>
+    </div>
+    <div class="course-card-meta">
+      <span class="badge">${escapeHtml(share.courseTitle || 'Aula ao vivo')}</span>
+      <p class="store-course-status">${escapeHtml(share.description || `Atualizado em ${updatedAtLabel}.`)}</p>
+    </div>
+  `;
+  const actionButton = document.createElement('button');
+  actionButton.type = 'button';
+  actionButton.className = 'primary-btn course-card-btn';
+  actionButton.textContent = 'Entrar no ao vivo';
+  actionButton.addEventListener('click', () => openLiveStageShare(share.shareId));
+  card.appendChild(actionButton);
+  card.addEventListener('click', () => openLiveStageShare(share.shareId));
+  card.classList.add('clickable-card');
+  return card;
+};
+
+const renderLiveStageShares = (shares) => {
+  liveStageGrid = document.getElementById('liveStageGrid');
+  if (!liveStageGrid) return;
+  liveStageGrid.innerHTML = '';
+  setHorizontalCourseScroll(liveStageGrid, shares.length, 3);
+  if (!shares.length) {
+    liveStageGrid.innerHTML = '<p class="muted" style="margin:0;">Nenhuma aula ao vivo dispon\u00edvel no momento.</p>';
+    return;
+  }
+  shares.forEach((share) => liveStageGrid.appendChild(createLiveStageCard(share)));
+};
+
+const loadLiveStageShares = async () => {
+  liveStageGrid = document.getElementById('liveStageGrid');
+  try {
+    const response = await authorizedFetch('/api/student/live-stage');
+    const shares = await response.json();
+    renderLiveStageShares(Array.isArray(shares) ? shares : []);
+  } catch (error) {
+    if (liveStageGrid) {
+      liveStageGrid.innerHTML = '<p class="muted" style="margin:0; color:#ff6b6b;">N\u00e3o foi poss\u00edvel carregar as aulas ao vivo.</p>';
+    }
+  }
+};
+
+const startLiveStagePolling = () => {
+  if (liveStagePollTimer) {
+    window.clearInterval(liveStagePollTimer);
+  }
+  liveStagePollTimer = window.setInterval(() => {
+    loadLiveStageShares();
+  }, 5000);
+};
+
 const renderNotifications = async () => {
   const panel = document.getElementById('notificationPanel');
   if (!panel) return;
@@ -845,6 +962,7 @@ const renderDashboard = async () => {
     }
     renderCourses(courses);
     const secondaryLoads = [
+      loadLiveStageShares(),
       loadStoreCourses(),
       renderNotifications()
     ];
@@ -992,17 +1110,50 @@ const redirectAfterLogin = (role) => {
 
 const initLogin = () => {
   const form = document.getElementById('loginForm');
+  const signupForm = document.getElementById('studentSignupForm');
   const forgotForm = document.getElementById('forgotPasswordForm');
   const resetForm = document.getElementById('resetPasswordForm');
   const feedback = document.getElementById('loginFeedback');
-  
+  const signupTitle = document.getElementById('studentSignupTitle');
+  const signupSubtitle = document.getElementById('studentSignupSubtitle');
+  const signupSubmitBtn = document.getElementById('studentSignupSubmitBtn');
+  const inviteToken = new URLSearchParams(window.location.search).get('invite') || '';
   const showForgotBtn = document.getElementById('showForgotBtn');
   const showLoginFromForgotBtn = document.getElementById('showLoginFromForgotBtn');
   const showLoginFromResetBtn = document.getElementById('showLoginFromResetBtn');
+  const showLoginFromSignupBtn = document.getElementById('showLoginFromSignupBtn');
 
-  if (showForgotBtn) showForgotBtn.addEventListener('click', (e) => { e.preventDefault(); form.style.display = 'none'; resetForm.style.display = 'none'; forgotForm.style.display = 'block'; feedback.style.display = 'none'; });
-  if (showLoginFromForgotBtn) showLoginFromForgotBtn.addEventListener('click', (e) => { e.preventDefault(); forgotForm.style.display = 'none'; resetForm.style.display = 'none'; form.style.display = 'block'; feedback.style.display = 'none'; });
-  if (showLoginFromResetBtn) showLoginFromResetBtn.addEventListener('click', (e) => { e.preventDefault(); resetForm.style.display = 'none'; forgotForm.style.display = 'none'; form.style.display = 'block'; feedback.style.display = 'none'; });
+  const hideAllAuthForms = () => {
+    if (form) form.style.display = 'none';
+    if (signupForm) signupForm.style.display = 'none';
+    if (forgotForm) forgotForm.style.display = 'none';
+    if (resetForm) resetForm.style.display = 'none';
+  };
+  const showLoginMode = () => {
+    hideAllAuthForms();
+    if (form) form.style.display = 'block';
+    if (feedback) feedback.style.display = 'none';
+  };
+  const showForgotMode = () => {
+    hideAllAuthForms();
+    if (forgotForm) forgotForm.style.display = 'block';
+    if (feedback) feedback.style.display = 'none';
+  };
+  const showResetMode = () => {
+    hideAllAuthForms();
+    if (resetForm) resetForm.style.display = 'block';
+    if (feedback) feedback.style.display = 'none';
+  };
+  const showSignupMode = () => {
+    hideAllAuthForms();
+    if (signupForm) signupForm.style.display = 'block';
+    if (feedback) feedback.style.display = 'none';
+  };
+
+  if (showForgotBtn) showForgotBtn.addEventListener('click', (e) => { e.preventDefault(); showForgotMode(); });
+  if (showLoginFromForgotBtn) showLoginFromForgotBtn.addEventListener('click', (e) => { e.preventDefault(); showLoginMode(); });
+  if (showLoginFromResetBtn) showLoginFromResetBtn.addEventListener('click', (e) => { e.preventDefault(); showLoginMode(); });
+  if (showLoginFromSignupBtn) showLoginFromSignupBtn.addEventListener('click', (e) => { e.preventDefault(); showLoginMode(); });
 
   forgotForm?.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -1017,9 +1168,8 @@ const initLogin = () => {
       const data = await parseJsonSafely(response);
       feedback.textContent = data?.message || 'Se o email estiver cadastrado, um token foi enviado.';
       feedback.style.color = '#8be9fd';
+      showResetMode();
       feedback.style.display = 'block';
-      forgotForm.style.display = 'none';
-      resetForm.style.display = 'block';
     } catch (error) {
       feedback.textContent = error.message;
       feedback.style.color = '#ff6b6b';
@@ -1043,13 +1193,59 @@ const initLogin = () => {
       if (!response.ok) throw new Error(data?.message || 'Falha ao redefinir senha');
       feedback.textContent = 'Senha atualizada com sucesso! Você já pode entrar.';
       feedback.style.color = '#50fa7b';
+      showLoginMode();
       feedback.style.display = 'block';
-      resetForm.style.display = 'none';
-      form.style.display = 'block';
     } catch (error) {
       feedback.textContent = error.message;
       feedback.style.color = '#ff6b6b';
       feedback.style.display = 'block';
+    }
+  });
+
+  signupForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    feedback.style.display = 'none';
+    if (!inviteToken) {
+      feedback.textContent = 'Link de cadastro inválido.';
+      feedback.style.color = '#ff6b6b';
+      feedback.style.display = 'block';
+      return;
+    }
+    if (signupSubmitBtn) signupSubmitBtn.disabled = true;
+    try {
+      const response = await fetch(`${API_BASE}/api/auth/student-signup-link/${encodeURIComponent(inviteToken)}/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fullName: signupForm.studentSignupFullName.value,
+          email: signupForm.studentSignupEmail.value,
+          phone: signupForm.studentSignupPhone.value,
+          password: signupForm.studentSignupPassword.value
+        })
+      });
+      const data = await parseJsonSafely(response);
+      if (!response.ok) {
+        throw new Error(data?.message || 'Não foi possível concluir seu cadastro.');
+      }
+      if (!data?.token || !data?.user?.role) {
+        throw new Error('A API não retornou os dados de cadastro esperados.');
+      }
+      setToken(data.token);
+      localStorage.setItem(USER_ROLE_KEY, data.user.role);
+      localStorage.setItem('curso-platform-user', JSON.stringify({
+        fullName: data.user.fullName,
+        role: data.user.role,
+        aiCredits: data.user.aiCredits ?? null,
+        studentLimit: data.user.studentLimit ?? null,
+        storageLimitBytes: data.user.storageLimitBytes ?? null
+      }));
+      redirectAfterLogin(data.user.role);
+    } catch (error) {
+      feedback.textContent = error.message;
+      feedback.style.color = '#ff6b6b';
+      feedback.style.display = 'block';
+    } finally {
+      if (signupSubmitBtn) signupSubmitBtn.disabled = false;
     }
   });
 
@@ -1088,6 +1284,39 @@ const initLogin = () => {
       feedback.style.display = 'block';
     }
   });
+
+  if (inviteToken) {
+    showSignupMode();
+    if (signupSubmitBtn) signupSubmitBtn.disabled = true;
+    fetch(`${API_BASE}/api/auth/student-signup-link/${encodeURIComponent(inviteToken)}`)
+      .then((response) => parseJsonSafely(response).then((data) => ({ response, data })))
+      .then(({ response, data }) => {
+        if (!response.ok) {
+          throw new Error(data?.message || 'Link de cadastro inválido.');
+        }
+        if (signupTitle) signupTitle.textContent = 'Criar conta de aluno';
+        if (signupSubtitle) {
+          signupSubtitle.textContent =
+            data?.acceptingRegistrations === false
+              ? data?.message || 'Este link não está aceitando novos cadastros no momento.'
+              : `Cadastro vinculado a ${data?.professorName || 'seu professor'}.`;
+        }
+        if (data?.acceptingRegistrations === false) {
+          feedback.textContent = data?.message || 'Este link não está aceitando novos cadastros no momento.';
+          feedback.style.color = '#ffb86c';
+          feedback.style.display = 'block';
+        }
+        if (signupSubmitBtn) {
+          signupSubmitBtn.disabled = data?.acceptingRegistrations === false;
+        }
+      })
+      .catch((error) => {
+        showLoginMode();
+        feedback.textContent = error.message || 'Link de cadastro inválido.';
+        feedback.style.color = '#ff6b6b';
+        feedback.style.display = 'block';
+      });
+  }
 };
 
 const loadAdminStudents = async () => {
@@ -1148,7 +1377,7 @@ const renderProfessorCreditsStatus = (payload = null) => {
   const safeCredits = Number.isFinite(credits) ? Math.max(0, Number(credits.toFixed(2))) : 0;
   const safeCostPerCall = 0;
   node.textContent = `Seus créditos de IA disponíveis: ${safeCredits}`;
-  node.textContent = `Seus crÃ©ditos de IA disponÃ­veis: ${formatCreditNumber(safeCredits)} | custo por chamada: ${formatCreditNumber(safeCostPerCall)}`;
+  node.textContent = `Seus créditos de IA disponíveis: ${formatCreditNumber(safeCredits)} | custo por chamada: ${formatCreditNumber(safeCostPerCall)}`;
   node.textContent = `Seus creditos de IA disponiveis: ${formatCreditNumber(safeCredits)}`;
   node.style.color = safeCredits > 0 ? '#6d63ff' : '#ff6b6b';
   const storedUser = getCurrentUserData();
@@ -1159,6 +1388,7 @@ const renderProfessorCreditsStatus = (payload = null) => {
     studentLimit: payload?.studentLimit ?? storedUser.studentLimit ?? null,
     storageLimitBytes: payload?.storageLimitBytes ?? storedUser.storageLimitBytes ?? null
   }));
+  renderStudentSignupLinkPanel();
 };
 
 const loadProfessorCreditsStatus = async () => {
@@ -1173,6 +1403,90 @@ const loadProfessorCreditsStatus = async () => {
     renderProfessorCreditsStatus(payload);
   } catch (error) {
     renderProfessorCreditsStatus({ aiCredits: getCurrentUserData().aiCredits ?? 0 });
+  }
+};
+
+const renderStudentSignupLinkPanel = () => {
+  const panel = document.getElementById('studentSignupLinkPanel');
+  const input = document.getElementById('studentSignupLinkInput');
+  const copyBtn = document.getElementById('copyStudentSignupLinkBtn');
+  const status = document.getElementById('studentSignupLinkStatus');
+  if (!panel || !input || !copyBtn || !status) {
+    return;
+  }
+  const role = getCurrentUserRole();
+  if (role !== 'professor' && role !== 'admin') {
+    panel.remove();
+    return;
+  }
+  input.value = currentStudentSignupLink || '';
+  copyBtn.disabled = !currentStudentSignupLink;
+  if (!currentStudentSignupLink) {
+    const userData = getCurrentUserData();
+    const limitLabel =
+      Number.isFinite(Number(userData.studentLimit)) && Number(userData.studentLimit) > 0
+        ? `Limite atual: ${Number(userData.studentLimit)} aluno(s).`
+        : role === 'admin'
+          ? 'O admin pode gerar alunos por link sem limite configurado neste painel.'
+          : 'Sem limite de alunos configurado no momento.';
+    status.textContent = `Por segurança, o link completo aparece no momento da geração. Se precisar de outro, gere novamente e o anterior será invalidado. ${limitLabel}`;
+    status.style.color = '#8b92b1';
+  }
+};
+
+const generateStudentSignupLink = async () => {
+  const input = document.getElementById('studentSignupLinkInput');
+  const generateBtn = document.getElementById('generateStudentSignupLinkBtn');
+  const copyBtn = document.getElementById('copyStudentSignupLinkBtn');
+  const status = document.getElementById('studentSignupLinkStatus');
+  if (!input || !generateBtn || !copyBtn || !status) {
+    return;
+  }
+  generateBtn.disabled = true;
+  try {
+    const response = await authorizedFetch('/api/admin/student-signup-link', {
+      method: 'POST'
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(payload?.message || 'Não foi possível gerar o link de cadastro.');
+    }
+    currentStudentSignupLink = payload?.inviteUrl || '';
+    input.value = currentStudentSignupLink;
+    copyBtn.disabled = !currentStudentSignupLink;
+    const limitText =
+      Number.isFinite(Number(payload?.studentLimit)) && Number(payload?.studentLimit) > 0
+        ? `Uso atual: ${Number(payload?.studentCount || 0)}/${Number(payload.studentLimit)} alunos.`
+        : 'Sem limite de alunos configurado.';
+    status.textContent = `Link gerado com sucesso. Compartilhe com o aluno. Se você gerar outro, este será invalidado. ${limitText}`;
+    status.style.color = '#50fa7b';
+  } catch (error) {
+    status.textContent = error.message || 'Não foi possível gerar o link de cadastro.';
+    status.style.color = '#ff6b6b';
+  } finally {
+    generateBtn.disabled = false;
+  }
+};
+
+const copyStudentSignupLink = async () => {
+  const input = document.getElementById('studentSignupLinkInput');
+  const status = document.getElementById('studentSignupLinkStatus');
+  if (!currentStudentSignupLink || !input || !status) {
+    return;
+  }
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(currentStudentSignupLink);
+    } else {
+      input.focus();
+      input.select();
+      document.execCommand('copy');
+    }
+    status.textContent = 'Link copiado. Envie para o aluno concluir o próprio cadastro.';
+    status.style.color = '#50fa7b';
+  } catch (error) {
+    status.textContent = 'Não foi possível copiar automaticamente. Você pode copiar o link manualmente.';
+    status.style.color = '#ffb86c';
   }
 };
 
@@ -1515,14 +1829,77 @@ const fetchAdminCourseChatMessages = async (courseId, options = {}) => {
 };
 const loadReports = async () => {
   const tbody = document.getElementById('reportsTableBody');
-  if (!tbody) return;
+  const correctedTbody = document.getElementById('correctedReportsTableBody');
+  if (!tbody || !correctedTbody) return;
   try {
     const response = await authorizedFetch('/api/admin/reports');
     const data = await response.json();
     if (!data.length) {
       tbody.innerHTML = '<tr><td colspan="8" style="color:#8b92b1;">Nenhum progresso registrado.</td></tr>';
+      correctedTbody.innerHTML = '<tr><td colspan="8" style="color:#8b92b1;">Nenhum relatório corrigido ainda.</td></tr>';
       return;
     }
+    const pendingReports = data.filter((row) => !row.report_corrected_at);
+    const correctedReports = data.filter((row) => Boolean(row.report_corrected_at));
+    tbody.innerHTML = pendingReports.length
+      ? pendingReports
+          .map(
+            (row) => `
+              <tr>
+                <td>
+                  <strong>${row.full_name}</strong>
+                  <small style="display:block; color:#8b92b1;">${row.email}</small>
+                </td>
+                <td>${row.course_title}</td>
+                <td>${row.current_module || 'Módulo 1'}</td>
+                <td>${formatMinutes(row.video_position)}</td>
+                <td>${row.interactive_step || '0.0'}</td>
+                <td>${formatGrade(row.grade)}</td>
+                <td>${formatDate(row.updated_at)}</td>
+                <td>
+                  <div class="report-action-group">
+                    <button class="secondary-btn small report-action-btn" type="button" data-progress-timeline-user="${row.user_id}" data-progress-timeline-course="${row.course_id}">
+                      Ver passos${Number(row.progress_event_count) > 0 ? ` (${Number(row.progress_event_count)})` : ''}
+                    </button>
+                    <button class="primary-btn small report-action-btn" type="button" data-report-correct-user="${row.user_id}" data-report-correct-course="${row.course_id}">
+                      Corrigir
+                    </button>
+                  </div>
+                </td>
+              </tr>`
+          )
+          .join('')
+      : '<tr><td colspan="8" style="color:#8b92b1;">Nenhum relatório pendente no momento.</td></tr>';
+    correctedTbody.innerHTML = correctedReports.length
+      ? correctedReports
+          .map(
+            (row) => `
+              <tr>
+                <td>
+                  <strong>${row.full_name}</strong>
+                  <small style="display:block; color:#8b92b1;">${row.email}</small>
+                </td>
+                <td>${row.course_title}</td>
+                <td>${row.current_module || 'Módulo 1'}</td>
+                <td>${formatMinutes(row.video_position)}</td>
+                <td>${row.interactive_step || '0.0'}</td>
+                <td>${formatGrade(row.grade)}</td>
+                <td>${formatDate(row.report_corrected_at)}</td>
+                <td>
+                  <div class="report-action-group">
+                    <button class="secondary-btn small report-action-btn" type="button" data-progress-timeline-user="${row.user_id}" data-progress-timeline-course="${row.course_id}">
+                      Ver passos${Number(row.progress_event_count) > 0 ? ` (${Number(row.progress_event_count)})` : ''}
+                    </button>
+                    <button class="secondary-btn small report-action-btn" type="button" data-corrected-delete-user="${row.user_id}" data-corrected-delete-course="${row.course_id}">
+                      Excluir
+                    </button>
+                  </div>
+                </td>
+              </tr>`
+          )
+          .join('')
+      : '<tr><td colspan="8" style="color:#8b92b1;">Nenhum relatório corrigido ainda.</td></tr>';
+    return;
     tbody.innerHTML = data
       .map(
         (row) => `
@@ -1550,9 +1927,23 @@ const loadReports = async () => {
           </tr>`
       )
       .join('');
+    correctedTbody.innerHTML = correctedTbody.innerHTML || '<tr><td colspan="8" style="color:#8b92b1;">Nenhum relatório corrigido ainda.</td></tr>';
   } catch (error) {
     tbody.innerHTML = '<tr><td colspan="8" style="color:#ff6b6b;">Não foi possível carregar os relatórios.</td></tr>';
   }
+};
+
+const updateReportCorrectionState = async (userId, courseId, mode) => {
+  const route = mode === 'correct' ? 'correct' : 'corrected';
+  const method = mode === 'correct' ? 'POST' : 'DELETE';
+  const response = await authorizedFetch(`/api/admin/reports/${userId}/${courseId}/${route}`, {
+    method
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(payload?.message || 'Não foi possível atualizar este relatório.');
+  }
+  await loadReports();
 };
 
 const formatProgressEventType = (type = '') => {
@@ -1561,7 +1952,8 @@ const formatProgressEventType = (type = '') => {
     quiz_answer: 'Respondeu quiz',
     drag_end: 'Arrastou elemento',
     text_input: 'Preencheu campo',
-    drawing: 'Rabiscou no quadro'
+    drawing: 'Rabiscou no quadro',
+    camera_capture: 'Capturou na camera'
   };
   return labels[type] || type || 'Evento';
 };
@@ -1611,6 +2003,17 @@ const renderProgressTimeline = (payload) => {
       if (Number.isFinite(Number(event.details?.x)) && Number.isFinite(Number(event.details?.y))) {
         chips.push(`<span class="admin-report-event-chip">Posição: ${Number(event.details.x).toFixed(0)} x ${Number(event.details.y).toFixed(0)}</span>`);
       }
+      if (Number.isFinite(Number(event.details?.pointCount))) chips.push(`<span class="admin-report-event-chip">Pontos: ${Number(event.details.pointCount)}</span>`);
+      if (Number.isFinite(Number(event.details?.strokeWidth))) chips.push(`<span class="admin-report-event-chip">Espessura: ${Number(event.details.strokeWidth).toFixed(0)}</span>`);
+      if (event.details?.strokeColor) chips.push(`<span class="admin-report-event-chip">Cor: ${escapeHtml(event.details.strokeColor)}</span>`);
+      if (typeof event.details?.hasImage === 'boolean') chips.push(`<span class="admin-report-event-chip">${event.details.hasImage ? 'Com imagem' : 'Sem imagem'}</span>`);
+      if (typeof event.details?.hasAudio === 'boolean') chips.push(`<span class="admin-report-event-chip">${event.details.hasAudio ? 'Com audio' : 'Sem audio'}</span>`);
+      if (typeof event.details?.hasVideo === 'boolean') chips.push(`<span class="admin-report-event-chip">${event.details.hasVideo ? 'Com video' : 'Sem video'}</span>`);
+      const mediaPreview = event.details?.mediaUrl
+        ? event.details.mediaType === 'video'
+          ? `<video controls src="${escapeAttribute(event.details.mediaUrl)}" class="admin-report-event-media"></video>`
+          : `<img src="${escapeAttribute(event.details.mediaUrl)}" alt="Midia do aluno" class="admin-report-event-media" />`
+        : '';
       return `
         <article class="admin-report-event">
           <div class="admin-report-event-head">
@@ -1619,6 +2022,7 @@ const renderProgressTimeline = (payload) => {
           </div>
           <p class="admin-report-event-summary">${escapeHtml(event.summary || 'Sem resumo informado.')}</p>
           ${chips.length ? `<div class="admin-report-event-details">${chips.join('')}</div>` : ''}
+          ${mediaPreview}
         </article>
       `;
     })
@@ -1674,8 +2078,8 @@ const renderAiSettingsStatus = (settings) => {
       ? ` • ${imageProvider.providerLabel} • ${imageProvider.model} • imagem ativa`
       : ' • Nano Banana não configurada';
   statusNode.textContent = `${settings.providerLabel} • ${settings.model} • ${statusLabel} • ${confirmationLabel}${imageLabel}`;
-  statusNode.textContent += ` â€¢ custo/chamada: ${formatCreditNumber(settings.aiCreditCostPerCall || 0.5)}`;
-  statusNode.textContent = statusNode.textContent.replace(/ ?[•Ã¢â‚¬Â¢]\s*custo\/chamada:.*$/i, '');
+  statusNode.textContent += ` • custo/chamada: ${formatCreditNumber(settings.aiCreditCostPerCall || 0.5)}`;
+  statusNode.textContent = statusNode.textContent.replace(/ ?[•]\s*custo\/chamada:.*$/i, '');
   statusNode.style.color = settings.isEnabled ? '#6d63ff' : '#8b92b1';
 };
 
@@ -1779,6 +2183,7 @@ const initAdminPage = () => {
     const aiCostField = document.getElementById('aiCreditCostPerCall')?.closest('.field-group');
     if (aiCostField) aiCostField.remove();
   }
+  renderStudentSignupLinkPanel();
   loadProfessorCreditsStatus();
   loadAdminSmtpSettings();
   const notifTarget = document.getElementById('notificationTarget');
@@ -1809,6 +2214,12 @@ const initAdminPage = () => {
     } catch (error) {
       alert(error.message);
     }
+  });
+  document.getElementById('generateStudentSignupLinkBtn')?.addEventListener('click', async () => {
+    await generateStudentSignupLink();
+  });
+  document.getElementById('copyStudentSignupLinkBtn')?.addEventListener('click', async () => {
+    await copyStudentSignupLink();
   });
 
   document.getElementById('professorForm')?.addEventListener('submit', async (event) => {
@@ -1963,12 +2374,12 @@ const initAdminPage = () => {
         });
         const result = await response.json().catch(() => null);
         if (!response.ok) {
-          throw new Error(result?.message || 'NÃ£o foi possÃ­vel salvar os limites.');
+          throw new Error(result?.message || 'Não foi possível salvar os limites.');
         }
         await loadAdminProfessors();
         return;
       } catch (error) {
-        alert(error.message || 'NÃ£o foi possÃ­vel salvar os limites.');
+        alert(error.message || 'Não foi possível salvar os limites.');
         return;
       }
     }
@@ -2126,9 +2537,34 @@ const initAdminPage = () => {
   });
 
   document.getElementById('reportsTableBody')?.addEventListener('click', async (event) => {
-    const button = event.target.closest('button[data-progress-timeline-user]');
-    if (!button) return;
-    await loadProgressTimeline(button.dataset.progressTimelineUser, button.dataset.progressTimelineCourse);
+    const timelineButton = event.target.closest('button[data-progress-timeline-user]');
+    if (timelineButton) {
+      await loadProgressTimeline(timelineButton.dataset.progressTimelineUser, timelineButton.dataset.progressTimelineCourse);
+      return;
+    }
+    const correctButton = event.target.closest('button[data-report-correct-user]');
+    if (!correctButton) return;
+    try {
+      await updateReportCorrectionState(correctButton.dataset.reportCorrectUser, correctButton.dataset.reportCorrectCourse, 'correct');
+    } catch (error) {
+      alert(error.message || 'Nao foi possivel marcar o relatório como corrigido.');
+    }
+  });
+  document.getElementById('correctedReportsTableBody')?.addEventListener('click', async (event) => {
+    const timelineButton = event.target.closest('button[data-progress-timeline-user]');
+    if (timelineButton) {
+      await loadProgressTimeline(timelineButton.dataset.progressTimelineUser, timelineButton.dataset.progressTimelineCourse);
+      return;
+    }
+    const deleteButton = event.target.closest('button[data-corrected-delete-user]');
+    if (!deleteButton) return;
+    const confirmed = window.confirm('Esse relatório será apagado para sempre do banco de dados. Deseja continuar?');
+    if (!confirmed) return;
+    try {
+      await updateReportCorrectionState(deleteButton.dataset.correctedDeleteUser, deleteButton.dataset.correctedDeleteCourse, 'delete');
+    } catch (error) {
+      alert(error.message || 'Nao foi possivel remover este relatório dos corrigidos.');
+    }
   });
 
   document.getElementById('adminChatCourseList')?.addEventListener('click', async (event) => {
@@ -2499,6 +2935,7 @@ const init = () => {
       await requestStoreCourseAccess(button.dataset.storeCourseId);
     });
     renderDashboard();
+    startLiveStagePolling();
     return;
   }
   if (isAdmin) {

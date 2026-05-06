@@ -38,6 +38,7 @@ export const applyEditorSnapshot = (builder, snapshot) => {
     if (builder.ui.moduleTitleInput) builder.ui.moduleTitleInput.value = state.moduleTitle || '';
     if (builder.ui.moduleDescriptionInput) builder.ui.moduleDescriptionInput.value = state.moduleDescription || '';
     if (builder.ui.moduleLockNextToggle) builder.ui.moduleLockNextToggle.checked = Boolean(builder.state.moduleSettings.lockNextModuleUntilCompleted);
+    if (builder.ui.moduleRequireQuizToggle) builder.ui.moduleRequireQuizToggle.checked = Boolean(builder.state.moduleSettings.requireQuizCompletion);
     if (builder.ui.modulePublicToggle) builder.ui.modulePublicToggle.checked = Boolean(builder.state.moduleSettings.isPublic);
     
     if (builder.ui.moduleCourseSelect && state.selectedCourseId) {

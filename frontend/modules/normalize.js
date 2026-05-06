@@ -124,8 +124,10 @@ export const normalizeTemplateStageSize = (stageSize, DEFAULT_STAGE_SIZE) => {
 
 export const normalizeTemplateModuleSettings = (moduleSettings) => ({
   lockNextModuleUntilCompleted: Boolean(moduleSettings?.lockNextModuleUntilCompleted),
+  requireQuizCompletion: Boolean(moduleSettings?.requireQuizCompletion),
   isPublic: Boolean(moduleSettings?.isPublic),
-  coverImage: typeof moduleSettings?.coverImage === 'string' ? moduleSettings.coverImage : ''
+  coverImage: typeof moduleSettings?.coverImage === 'string' ? moduleSettings.coverImage : '',
+  allowStudentPen: moduleSettings?.allowStudentPen === true || moduleSettings?.allowStudentPen === 'true'
 });
 export const normalizeQuizElement = (element) => {
   if (!element || element.type !== 'quiz') {

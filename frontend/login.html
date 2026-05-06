@@ -27,6 +27,33 @@
         <p style="text-align:center; margin-top:1rem;"><a href="#" id="showForgotBtn" style="color:#8b92b1; text-decoration:none; font-size:0.9rem;">Esqueci minha senha</a></p>
       </form>
 
+      <form id="studentSignupForm" style="display:none;">
+        <div class="field-group">
+          <div class="badge badge-pill">Cadastro por convite</div>
+          <h1 id="studentSignupTitle">Criar conta de aluno</h1>
+          <p id="studentSignupSubtitle">Valide o link para concluir seu cadastro.</p>
+        </div>
+        <div class="field-group">
+          <label for="studentSignupFullName">Nome completo</label>
+          <input type="text" id="studentSignupFullName" name="studentSignupFullName" required placeholder="Seu nome completo" />
+        </div>
+        <div class="field-group">
+          <label for="studentSignupEmail">Email</label>
+          <input type="email" id="studentSignupEmail" name="studentSignupEmail" required placeholder="voce@exemplo.com" />
+        </div>
+        <div class="field-group">
+          <label for="studentSignupPhone">Telefone</label>
+          <input type="text" id="studentSignupPhone" name="studentSignupPhone" placeholder="+55 11 99999-0000" />
+        </div>
+        <div class="field-group">
+          <label for="studentSignupPassword">Senha</label>
+          <input type="password" id="studentSignupPassword" name="studentSignupPassword" required minlength="8" placeholder="Crie uma senha segura" />
+          <small style="color:#8b92b1;">Use pelo menos 8 caracteres.</small>
+        </div>
+        <button type="submit" class="primary-btn" id="studentSignupSubmitBtn">Criar conta</button>
+        <p style="text-align:center; margin-top:1rem;"><a href="#" id="showLoginFromSignupBtn" style="color:#8b92b1; text-decoration:none; font-size:0.9rem;">Já tenho conta</a></p>
+      </form>
+
       <form id="forgotPasswordForm" style="display:none;">
         <div class="field-group">
           <label for="forgotEmail">Email institucional</label>

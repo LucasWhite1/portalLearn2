@@ -7,6 +7,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="builder.css">
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
 
 <body>
@@ -22,6 +23,10 @@
         <button class="secondary-btn logout-btn" type="button">Sair</button>
       </div>
     </header>
+    <button id="mobileBuilderPanelToggleBtn" class="mobile-builder-panel-toggle" type="button" aria-controls="builderPanel" aria-expanded="false">
+      Editar
+    </button>
+    <div id="mobileBuilderPanelBackdrop" class="mobile-builder-panel-backdrop" hidden></div>
     <main class="builder-main">
       <aside class="builder-panel" id="builderPanel">
         <button id="builderPanelToggleBtn" class="builder-panel-toggle" type="button" aria-label="Alternar menu lateral"
@@ -33,7 +38,15 @@
             </svg>
           </span>
         </button>
-        <div class="builder-panel-section">
+        <div class="builder-panel-nav" aria-label="Seções do criador">
+          <button type="button" class="builder-panel-nav-link" data-builder-target="builderSectionModule">Módulo</button>
+          <button type="button" class="builder-panel-nav-link" data-builder-target="builderSectionCatalog">Publicados</button>
+          <button type="button" class="builder-panel-nav-link" data-builder-target="builderSectionStyle">Estilo</button>
+          <button type="button" class="builder-panel-nav-link" data-builder-target="builderSectionElement">Elemento</button>
+          <button type="button" class="builder-panel-nav-link" data-builder-target="builderSectionAi">IA</button>
+          <button type="button" class="builder-panel-nav-link" data-builder-target="builderSectionHelp">Ajuda</button>
+        </div>
+        <div class="builder-panel-section builder-module-section" data-builder-section="builderSectionModule">
           <h3>Dados do módulo</h3>
           <div class="builder-field">
             <label for="moduleCourseSelect">Curso</label>
@@ -91,6 +104,12 @@
           </div>
           <div class="builder-field">
             <label class="toggle-inline">
+              <input id="moduleRequireQuizToggle" type="checkbox" />
+              Bloquear avanço até concluir todos os quizzes do módulo
+            </label>
+          </div>
+          <div class="builder-field">
+            <label class="toggle-inline">
               <input id="modulePublicToggle" type="checkbox" />
               Liberar este módulo com link público, sem login de aluno
             </label>
@@ -111,10 +130,11 @@
             <button id="exportTemplateBtn" class="secondary-btn" type="button">Exportar template</button>
             <button id="importTemplateBtn" class="secondary-btn" type="button">Importar template</button>
           </div>
+          <button id="resetEditorBtn" type="button" class="secondary-btn">Criar novo módulo</button>
           <p class="muted template-help">Exporte um JSON do layout atual e importe templates criados por outras pessoas.
           </p>
         </div>
-        <div class="builder-panel-section">
+        <div class="builder-panel-section" data-builder-section="builderSectionCatalog">
           <h3>Módulos já publicados</h3>
           <div class="ai-reference-card module-collapse-card collapsed" id="courseModuleCard" role="button" tabindex="0"
             aria-expanded="false">
@@ -136,7 +156,7 @@
             </div>
           </div>
         </div>
-        <div class="builder-panel-section">
+        <div class="builder-panel-section" data-builder-section="builderSectionStyle">
           <h3>Estilo do slide</h3>
           <div class="builder-field">
             <label>Fundo do slide</label>
@@ -145,14 +165,8 @@
             <small id="slideBgStatus" class="muted">Escolha cor sólida, gradiente, imagem ou vídeo para o fundo do
               slide.</small>
           </div>
-          <div class="builder-field">
-            <label class="toggle-inline">
-              <input id="slideRequireQuizToggle" type="checkbox" />
-              Bloquear avanço até concluir os quizzes deste slide
-            </label>
-          </div>
         </div>
-        <div class="builder-panel-section">
+        <div class="builder-panel-section" data-builder-section="builderSectionElement">
           <h3>Elemento ativo</h3>
           <div class="builder-field">
             <label>Tipo</label>
@@ -273,7 +287,7 @@
             </div>
           </div>
         </div>
-        <div class="builder-panel-section">
+        <div class="builder-panel-section" data-builder-section="builderSectionAi">
           <h3>Assistente de IA</h3>
           <p class="muted" id="aiAssistantStatus" style="margin:0;"></p>
           <p class="muted" id="builderProfessorCreditsStatus" style="margin:0.35rem 0 0;"></p>
@@ -308,27 +322,6 @@
               <p class="muted" style="margin:0;">Nenhuma imagem anexada.</p>
             </div>
           </div>
-          <div class="ai-reference-card collapsed" id="aiReferenceCard" role="button" tabindex="0"
-            aria-expanded="false">
-            <div class="ai-reference-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" focusable="false">
-                <path
-                  d="M5 6.5A1.5 1.5 0 0 1 6.5 5h11A1.5 1.5 0 0 1 19 6.5v11a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 17.5z"
-                  fill="none" stroke="currentColor" stroke-width="1.6" />
-                <path d="m8 15 2.2-2.6a1 1 0 0 1 1.5-.1l1.7 1.9 1.5-1.7a1 1 0 0 1 1.5 0L18 14.4" fill="none"
-                  stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" />
-                <circle cx="9.2" cy="9" r="1.2" fill="currentColor" />
-              </svg>
-            </div>
-            <div class="ai-reference-copy">
-              <strong>Referência visual</strong>
-              <small>Use este exemplo para pedir ajustes de layout, alinhamento, cores, blocos e imagem.</small>
-            </div>
-            <img src="assets/ai-layout-reference.svg"
-              alt="Exemplo de layout profissional com título, blocos organizados, imagem ilustrativa e botão de ação" />
-            <button id="aiAssistantUseReferenceBtn" class="secondary-btn compact-reference-btn" type="button">Usar
-              exemplo no pedido</button>
-          </div>
           <div class="builder-field">
             <label for="aiAssistantFeedback">Feedback da IA</label>
             <div id="aiAssistantFeedback" class="ai-feedback-log" aria-live="polite">
@@ -354,7 +347,7 @@
             </div>
           </div>
         </div>
-        <div class="builder-panel-section">
+        <div class="builder-panel-section" data-builder-section="builderSectionHelp">
           <h3>Instruções</h3>
           <ul class="builder-instructions">
             <li>Use os ícones do topo para criar texto, bloco, imagem, áudio, vídeo, quiz, botão flutuante, borracha e
@@ -362,15 +355,11 @@
             <li>Duplo clique em texto, bloco, imagem, vídeo ou botão para editar rapidamente o conteúdo principal.</li>
             <li>Os menus de texto, quiz, botão flutuante e animação são flutuantes, podem ser arrastados pelo topo e
               fecham ao clicar fora.</li>
-            <li>Use os ícones do assistente para anexar ou remover imagem de referência e clique nos cards recolhíveis
-              para expandir ou esconder conteúdo.</li>
+            <li>Use os ícones do assistente para anexar ou remover imagem de referência quando quiser dar contexto
+              visual para a IA.</li>
             <li>Limpar slide apaga o slide atual; Criar novo módulo reinicia o editor; salvar continua sendo manual.
             </li>
           </ul>
-        </div>
-        <div class="builder-panel-section">
-          <h3>Gerenciar módulo</h3>
-          <button id="resetEditorBtn" type="button" class="secondary-btn">Criar novo módulo</button>
         </div>
       </aside>
       <section class="builder-stage">
@@ -405,7 +394,7 @@
             <button class="secondary-btn element-tool-btn" type="button" data-element="audio" title="Áudio"
               aria-label="Áudio">
               <span class="tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false">
-                  <path d="M6.5 14h3.3l4.2 3V7l-4.2 3H6.5z" fill="none" stroke="currentColor" stroke-linejoin="round"
+                  <path d="M6.5 14h3.3l4.2 3 V7l-4.2 3H6.5z" fill="none" stroke="currentColor" stroke-linejoin="round"
                     stroke-width="1.8" />
                   <path d="M16.6 9.2a4 4 0 0 1 0 5.6M18.6 7.2a6.8 6.8 0 0 1 0 9.6" fill="none" stroke="currentColor"
                     stroke-linecap="round" stroke-width="1.8" />
@@ -418,6 +407,15 @@
                     stroke-width="1.8" />
                   <path d="m15.5 10.2 3.7-2.2v8l-3.7-2.2z" fill="none" stroke="currentColor" stroke-linejoin="round"
                     stroke-width="1.8" />
+                </svg></span>
+            </button>
+            <button class="secondary-btn element-tool-btn" type="button" data-element="camera" title="Câmera"
+              aria-label="Câmera">
+              <span class="tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false">
+                  <path
+                    d="M7.6 7.2h1.7l1.1-1.7h3.2l1.1 1.7h1.7A2.8 2.8 0 0 1 19.2 10v6.3a2.8 2.8 0 0 1-2.8 2.8H7.6a2.8 2.8 0 0 1-2.8-2.8V10a2.8 2.8 0 0 1 2.8-2.8Z"
+                    fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
+                  <circle cx="12" cy="13.1" r="3.1" fill="none" stroke="currentColor" stroke-width="1.8" />
                 </svg></span>
             </button>
             <button class="secondary-btn element-tool-btn" type="button" data-element="quiz" title="Quiz"
@@ -441,12 +439,14 @@
             <button class="secondary-btn element-tool-btn" type="button" data-element="input" title="Input"
               aria-label="Input">
               <span class="tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false">
-                  <rect x="4.8" y="5.8" width="14.4" height="12.4" rx="2.4" fill="none" stroke="currentColor"
+                  <rect x="4.2" y="6.2" width="15.6" height="11.6" rx="2.8" fill="none" stroke="currentColor"
                     stroke-width="1.8" />
-                  <path d="M8 10.2h8M8 13.8h4.8" fill="none" stroke="currentColor" stroke-linecap="round"
+                  <path d="M7.7 12h4.8" fill="none" stroke="currentColor" stroke-linecap="round"
                     stroke-width="1.8" />
-                  <path d="m18.2 18.2 1.9 1.9" fill="none" stroke="currentColor" stroke-linecap="round"
+                  <path d="M14.4 9.4v5.2" fill="none" stroke="currentColor" stroke-linecap="round"
                     stroke-width="1.8" />
+                  <path d="M17.1 9.8h.1v4.4h-.1" fill="none" stroke="currentColor" stroke-linecap="round"
+                    stroke-linejoin="round" stroke-width="1.8" />
                 </svg></span>
             </button>
             <button class="secondary-btn element-tool-btn" type="button" data-element="floatingButton"
@@ -877,6 +877,44 @@
               </div>
             </div>
           </section>
+          <section id="cameraEditorCard" class="quiz-editor-card hidden" data-stage-editor="camera"
+            aria-label="Editor de câmera">
+            <div class="quiz-editor-head drag-handle">
+              <div>
+                <p class="badge">Câmera</p>
+                <h3>Configure a câmera no palco</h3>
+              </div>
+              <button type="button" class="secondary-btn small stage-editor-close"
+                data-close-editor="camera">Fechar</button>
+            </div>
+            <div class="quiz-editor-grid compact">
+              <div class="builder-field">
+                <label for="cameraElementWidthInput">Largura (px)</label>
+                <input id="cameraElementWidthInput" type="number" min="220" step="1" />
+              </div>
+              <div class="builder-field">
+                <label for="cameraElementHeightInput">Altura (px)</label>
+                <input id="cameraElementHeightInput" type="number" min="160" step="1" />
+              </div>
+              <div class="builder-field">
+                <label for="cameraElementRotationInput">Rotação (°)</label>
+                <input id="cameraElementRotationInput" type="number" min="0" max="360" step="1" />
+              </div>
+              <div class="builder-field builder-field-span">
+                <label for="cameraEditorStatus">Status da câmera</label>
+                <p id="cameraEditorStatus" class="muted" style="margin:0;">Ative a câmera para transmitir a webcam no palco.</p>
+              </div>
+              <div class="builder-field builder-field-span">
+                <label>Ações rápidas</label>
+                <div class="text-align-actions">
+                  <button id="cameraEditorActivateBtn" class="secondary-btn" type="button">Ativar câmera</button>
+                  <button id="cameraEditorPhotoBtn" class="secondary-btn" type="button">Foto</button>
+                  <button id="cameraEditorRecordBtn" class="secondary-btn" type="button">Gravar</button>
+                  <button id="cameraEditorStopBtn" class="secondary-btn danger" type="button">Parar</button>
+                </div>
+              </div>
+            </div>
+          </section>
           <section id="floatingButtonEditorCard" class="quiz-editor-card hidden" data-stage-editor="floating"
             aria-label="Editor do botão flutuante">
             <div class="quiz-editor-head">
@@ -884,8 +922,19 @@
                 <p id="floatingEditorBadge" class="badge">Botão flutuante</p>
                 <h3 id="floatingEditorTitle">Configure o clique</h3>
               </div>
-              <button type="button" class="secondary-btn small stage-editor-close"
-                data-close-editor="floating">Fechar</button>
+              <div class="quiz-editor-head-actions">
+                <button id="floatingKeyboardConfigBtn" type="button" class="secondary-btn small hidden"
+                  title="Configurar teclas" aria-label="Configurar teclas">
+                  <span class="tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false">
+                      <path
+                        d="M10.3 4.8h3.4l.5 1.9a5.9 5.9 0 0 1 1.3.8l1.8-.8 2.4 2.4-.8 1.8c.3.4.6.9.8 1.3l1.9.5v3.4l-1.9.5a5.9 5.9 0 0 1-.8 1.3l.8 1.8-2.4 2.4-1.8-.8a5.9 5.9 0 0 1-1.3.8l-.5 1.9h-3.4l-.5-1.9a5.9 5.9 0 0 1-1.3-.8l-1.8.8-2.4-2.4.8-1.8a5.9 5.9 0 0 1-.8-1.3l-1.9-.5v-3.4l1.9-.5a5.9 5.9 0 0 1 .8-1.3l-.8-1.8 2.4-2.4 1.8.8a5.9 5.9 0 0 1 1.3-.8z"
+                        fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.6" />
+                      <circle cx="12" cy="12" r="2.6" fill="none" stroke="currentColor" stroke-width="1.6" />
+                    </svg></span>
+                </button>
+                <button type="button" class="secondary-btn small stage-editor-close"
+                  data-close-editor="floating">Fechar</button>
+              </div>
             </div>
             <div class="quiz-editor-grid">
               <div class="builder-field builder-field-span">
@@ -907,6 +956,11 @@
                 <label for="floatingButtonLabelInput">Texto do botão</label>
                 <input id="floatingButtonLabelInput" placeholder="Ex: Explorar agora" />
               </div>
+              <div id="floatingKeyBindingsField" class="builder-field hidden">
+                <label for="floatingKeyBindingsInput">Teclas deste gatilho</label>
+                <input id="floatingKeyBindingsInput" placeholder="Ex: ArrowLeft, A ou Space" />
+                <small class="muted">Use virgula para mapear mais de uma tecla no mesmo gatilho.</small>
+              </div>
               <div id="floatingInputPlaceholderField" class="builder-field hidden">
                 <label for="floatingInputPlaceholderInput">Placeholder do campo</label>
                 <input id="floatingInputPlaceholderInput" placeholder="Ex: Digite a palavra-chave" />
@@ -925,23 +979,6 @@
                   <input id="floatingInputCompareCaseToggle" type="checkbox" />
                   Diferenciar maiúsculas e minúsculas
                 </label>
-              </div>
-              <div id="floatingInputCompareImageField" class="builder-field hidden">
-                <label class="toggle-inline">
-                  <input id="floatingInputCompareImageToggle" type="checkbox" />
-                  Comparar imagem com referência
-                </label>
-                <small class="muted">Se ativado, a imagem enviada pelo aluno será comparada com a referência usando a IA
-                  de imagem.</small>
-              </div>
-              <div id="floatingInputCompareImageSourceField" class="builder-field hidden">
-                <label for="floatingInputCompareImageUrlInput">Imagem de referência</label>
-                <input id="floatingInputCompareImageUrlInput" placeholder="Cole a URL da imagem de referência" />
-                <div class="floating-placement-actions">
-                  <input id="floatingInputCompareImageFileInput" type="file" accept="image/*" />
-                  <button id="floatingInputCompareImageClearBtn" class="secondary-btn" type="button">Limpar</button>
-                </div>
-                <div id="floatingInputCompareImagePreview" class="input-compare-reference-preview hidden"></div>
               </div>
               <div id="floatingInputSuccessField" class="builder-field hidden">
                 <label for="floatingInputSuccessInput">Mensagem de acerto</label>
@@ -1712,8 +1749,11 @@
                 <p class="badge">Borracha</p>
                 <h3>Apague partes do bloco ou imagem</h3>
               </div>
-              <button type="button" class="secondary-btn small stage-editor-close"
-                data-close-editor="eraser">Fechar</button>
+              <div class="quiz-editor-head-actions">
+                <button id="eraserEditorCollapseBtn" type="button" class="secondary-btn small">Encolher</button>
+                <button type="button" class="secondary-btn small stage-editor-close"
+                  data-close-editor="eraser">Fechar</button>
+              </div>
             </div>
             <div class="quiz-editor-grid compact">
               <div class="builder-field">
@@ -1729,6 +1769,13 @@
                   <option value="circle">Círculo</option>
                   <option value="square">Quadrado</option>
                   <option value="diamond">Losango</option>
+                </select>
+              </div>
+              <div class="builder-field">
+                <label for="eraserLassoScopeSelect">Escopo do laço</label>
+                <select id="eraserLassoScopeSelect">
+                  <option value="inside">Apagar dentro</option>
+                  <option value="outside">Apagar fora</option>
                 </select>
               </div>
               <div class="builder-field">
@@ -1758,8 +1805,11 @@
                 <p class="badge">Caneta</p>
                 <h3>Desenhe livremente no slide</h3>
               </div>
-              <button type="button" class="secondary-btn small stage-editor-close"
-                data-close-editor="pen">Fechar</button>
+              <div class="quiz-editor-head-actions">
+                <button id="penEditorCollapseBtn" type="button" class="secondary-btn small">Encolher</button>
+                <button type="button" class="secondary-btn small stage-editor-close"
+                  data-close-editor="pen">Fechar</button>
+              </div>
             </div>
             <div class="quiz-editor-grid compact">
               <div class="builder-field">
@@ -1773,6 +1823,14 @@
               <div class="builder-field">
                 <label for="penSizeNumberInput">Espessura exata</label>
                 <input id="penSizeNumberInput" type="number" min="2" max="48" step="1" value="8" />
+              </div>
+              <div class="builder-field">
+                <label class="toggle-inline">
+                  <input id="penStudentPaintToggle" type="checkbox" />
+                  Liberar rabisco do aluno no viewer
+                </label>
+                <small class="muted">O aluno pode desenhar por cima deste elemento sem salvar no slide, mas cada traço
+                  entra no relatório de progresso.</small>
               </div>
               <div class="builder-field eraser-editor-actions">
                 <label>Ações</label>
@@ -1918,6 +1976,28 @@
               <button id="clearStageBtn" class="ghost-btn" type="button">Limpar slide</button>
             </div>
           </div>
+          <section class="stage-live-share-bar" aria-label="Compartilhar aula ao vivo">
+            <div class="stage-live-share-copy">
+              <span class="stage-live-share-eyebrow">Aula ao vivo</span>
+              <strong>Compartilhe o palco com os seus alunos em tempo real</strong>
+              <small id="liveStageShareStatus" class="muted">Os alunos verão o palco sendo editado em tempo real, sem acesso ao editor.</small>
+            </div>
+            <div class="stage-live-share-actions">
+              <button id="toggleLiveStageShareBtn" class="secondary-btn" type="button">Iniciar ao vivo</button>
+              <button id="transmitCameraBtn" class="primary-btn hidden" type="button">Transmitir Câmera</button>
+              <button id="transmitScreenBtn" class="primary-btn hidden" type="button">Transmitir Tela</button>
+              <button id="copyLiveStageShareLinkBtn" class="secondary-btn" type="button" disabled>Copiar link</button>
+              <button id="openLiveStageShareLinkBtn" class="secondary-btn" type="button" disabled>Abrir link</button>
+              <label class="toggle-inline" style="margin: 0; white-space: nowrap; font-size: 0.85rem; display: flex; align-items: center; gap: 0.5rem; color: #4b568f; cursor: pointer;">
+                <input id="allowLiveStudentPenToggle" type="checkbox" style="width: 1.1rem; height: 1.1rem; cursor: pointer;" />
+                Liberar Rabisco
+              </label>
+            </div>
+            <div class="stage-live-share-field">
+              <label for="liveStageShareLinkInput">Link da aula ao vivo</label>
+              <input id="liveStageShareLinkInput" readonly placeholder="Inicie o compartilhamento ao vivo para gerar o link" />
+            </div>
+          </section>
           <div class="stage-slide-strip">
             <div class="stage-slide-strip-head">
               <strong>Slides</strong>
@@ -1929,7 +2009,6 @@
             <div class="template-store-panel-head">
               <div>
                 <strong>Loja de templates</strong>
-                <small>Modelos internos adicionados pela pasta `template-store/` do projeto.</small>
               </div>
               <div class="template-store-panel-actions">
                 <input id="templateStoreSearchInput" placeholder="Buscar template..." />

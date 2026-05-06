@@ -1,31 +1,35 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Administracao | Portal do Curso</title>
+  <title>Administração | Portal do Curso</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <button type="button" class="mobile-sidenav-toggle" id="mobileSidenavToggle" aria-controls="mobileSidenav" aria-expanded="false">
+    <span>Menu</span>
+  </button>
+  <div class="mobile-sidenav-backdrop" id="mobileSidenavBackdrop" hidden></div>
   <div class="page-shell">
-    <aside class="sidenav">
+    <aside class="sidenav" id="mobileSidenav">
       <h1>LearnSpace</h1>
-      <p>Administracao do portal em uma unica tela.</p>
+      <p>Administração do portal em uma única tela.</p>
       <ul class="nav-menu">
         <li><button type="button" class="nav-link" data-target="adminStudentsSection">Alunos</button></li>
         <li><button type="button" class="nav-link" data-target="adminProfessorsSection">Professores</button></li>
-        <li><button type="button" class="nav-link" data-target="adminReportsSection">Relatorios</button></li>
+        <li><button type="button" class="nav-link" data-target="adminReportsSection">Relatórios</button></li>
         <li><button type="button" class="nav-link" data-target="adminCoursesSection">Cursos</button></li>
         <li><button type="button" class="nav-link" data-target="adminChatsSection">Chats</button></li>
-        <li><button type="button" class="nav-link" data-target="adminNotificationsSection">Notificacoes</button></li>
-        <li><button type="button" class="nav-link" data-target="adminSettingsSection">Configuracoes</button></li>
+        <li><button type="button" class="nav-link" data-target="adminNotificationsSection">Notificações</button></li>
+        <li><button type="button" class="nav-link" data-target="adminSettingsSection">Configurações</button></li>
       </ul>
     </aside>
     <main class="main-panel">
       <div class="panel header-panel">
         <div>
-          <h2>Administracao em tempo real</h2>
-          <p>Monitore alunos, cursos e progresso antes de liberar novos modulos.</p>
+          <h2>Administração em tempo real</h2>
+          <p>Monitore alunos, cursos e progresso antes de liberar novos módulos.</p>
         </div>
         <div style="display:flex; gap:0.5rem;">
           <a class="primary-btn" href="interactive-creator.html">Criar aula interativa</a>
@@ -61,6 +65,16 @@
             </div>
             <button type="submit" class="primary-btn">Criar aluno</button>
           </form>
+          <div class="admin-subpanel" id="studentSignupLinkPanel">
+            <h3>Link de auto cadastro</h3>
+            <p style="margin-top:0; color:#8b92b1; font-size:0.9rem;">Compartilhe este link para o próprio aluno se cadastrar com segurança e já entrar vinculado a você. Ao gerar outro link, o anterior deixa de funcionar.</p>
+            <div class="admin-inline-form">
+              <input id="studentSignupLinkInput" readonly placeholder="Clique em gerar para criar um link seguro" />
+              <button id="generateStudentSignupLinkBtn" class="secondary-btn" type="button">Gerar link</button>
+              <button id="copyStudentSignupLinkBtn" class="secondary-btn" type="button" disabled>Copiar</button>
+            </div>
+            <p id="studentSignupLinkStatus" style="margin:0.65rem 0 0; color:#8b92b1; font-size:0.88rem;">Por segurança, o link completo aparece no momento da geração. Se precisar de outro, gere novamente e o anterior será invalidado.</p>
+          </div>
           <div class="admin-subpanel">
             <h3>Gerenciar turmas</h3>
             <form id="classForm" class="admin-inline-form">
@@ -149,7 +163,7 @@
               <input id="adminProfessorStudentLimit" type="number" min="1" step="1" placeholder="Ex: 100" />
             </div>
             <div class="field-group">
-              <label for="adminProfessorStorageLimitGb">Limite de espaÃ§o dos cursos (GB)</label>
+              <label for="adminProfessorStorageLimitGb">Limite de espaço dos cursos (GB)</label>
               <input id="adminProfessorStorageLimitGb" type="number" min="0" step="0.1" placeholder="Ex: 2.5" />
             </div>
             <button type="submit" class="primary-btn">Criar professor</button>
@@ -268,7 +282,7 @@
             <div class="field-group">
               <label for="aiCreditCostPerCall">Custo por chamada de IA</label>
               <input id="aiCreditCostPerCall" type="number" min="0.1" step="0.1" value="0.5" />
-              <small style="color:#8b92b1;">PadrÃ£o recomendado: 0,5 crÃ©dito por chamada.</small>
+              <small style="color:#8b92b1;">Padrão recomendado: 0,5 crédito por chamada.</small>
             </div>
             <div class="field-group">
               <label for="aiProviderKey">Identificador do provedor</label>
@@ -391,24 +405,50 @@
         </div>
 
         <div class="panel" id="adminReportsSection" data-section="adminReportsSection">
-          <h2>Relatorios de progresso</h2>
+          <h2>Relatórios de progresso</h2>
+          <p style="margin-top:0; color:#8b92b1; font-size:0.9rem;">Use <strong>Corrigir</strong> para mover um relatório finalizado para a área de corrigidos.</p>
           <div class="table-wrapper">
             <table class="table progress-table">
               <thead>
                 <tr>
                   <th>Aluno</th>
                   <th>Curso</th>
-                  <th>Modulo atual</th>
-                  <th>Video (min)</th>
+                  <th>Módulo atual</th>
+                  <th>Vídeo (min)</th>
                   <th>Interativo</th>
                   <th>Nota</th>
                   <th>Atualizado em</th>
-                  <th>Acoes</th>
+                  <th>Ações</th>
                 </tr>
               </thead>
               <tbody id="reportsTableBody">
                 <tr>
-                  <td colspan="8" style="color:#8b92b1;">Carregando relatorios...</td>
+                  <td colspan="8" style="color:#8b92b1;">Carregando relatórios...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="table-wrapper" style="margin-top:1rem;">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:1rem; margin-bottom:0.75rem;">
+              <h3 style="margin:0;">Corrigidos</h3>
+              <small style="color:#8b92b1;">Relatórios marcados como revisados.</small>
+            </div>
+            <table class="table progress-table">
+              <thead>
+                <tr>
+                  <th>Aluno</th>
+                  <th>Curso</th>
+                  <th>Módulo atual</th>
+                  <th>Vídeo (min)</th>
+                  <th>Interativo</th>
+                  <th>Nota</th>
+                  <th>Corrigido em</th>
+                  <th>Ações</th>
+                </tr>
+              </thead>
+              <tbody id="correctedReportsTableBody">
+                <tr>
+                  <td colspan="8" style="color:#8b92b1;">Nenhum relatório corrigido ainda.</td>
                 </tr>
               </tbody>
             </table>

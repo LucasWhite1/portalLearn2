@@ -17,7 +17,18 @@ const USER_ROLE_KEY = 'curso-platform-role';
 const DEFAULT_STAGE_SIZE = { width: 1280, height: 720 };
 const MIN_SLIDE_VIEW_SECONDS = 3;
 const MIN_VIDEO_COMPLETION_RATIO = 0.9;
+const VIEWER_PEN_MIN_BRUSH_SIZE = 2;
+const VIEWER_PEN_MAX_BRUSH_SIZE = 48;
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+const isViewerTypingTarget = (target) => {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+  if (target.closest('input, textarea, select, button, [contenteditable="true"]')) {
+    return true;
+  }
+  return target instanceof HTMLElement && target.isContentEditable;
+};
 const IMAGE_FALLBACK_SRC =
   "data:image/svg+xml;utf8," +
   encodeURIComponent(
@@ -61,6 +72,15 @@ const fetchPublicModule = async (moduleId) => {
   return payload;
 };
 
+const fetchLiveStageModule = async (shareId) => {
+  const response = await authorizedFetch(`/api/student/live-stage/${encodeURIComponent(shareId)}`);
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(payload?.message || 'Nao foi possivel carregar o palco ao vivo.');
+  }
+  return payload;
+};
+
 const fetchAdminReplay = async (userId, courseId) => {
   const response = await authorizedFetch(`/api/admin/reports/${encodeURIComponent(userId)}/${encodeURIComponent(courseId)}/replay`);
   const payload = await response.json().catch(() => null);
@@ -87,16 +107,27 @@ const viewerState = {
   courseId: null,
   slideIndex: 0,
   isPublic: false,
+  isLiveShare: false,
   isReplay: false,
+  liveShareId: null,
+  liveShareRevision: 0,
   replayUserId: null,
-  replayEventIndex: -1
+  replayEventIndex: -1,
+  penToolActive: false,
+  penColor: '#111827',
+  penSize: 8,
+  penSettingsTouched: false
 };
 
+let viewerResizeSyncFrame = null;
+
 const params = new URLSearchParams(window.location.search);
+viewerState.isLiveShare = Boolean(params.get('liveShareId'));
 viewerState.isPublic = Boolean(params.get('publicModuleId'));
 viewerState.isReplay = params.get('adminReplay') === '1';
 viewerState.moduleId = params.get('moduleId') || params.get('publicModuleId');
 viewerState.courseId = params.get('courseId');
+viewerState.liveShareId = params.get('liveShareId');
 viewerState.replayUserId = params.get('userId');
 
 const getVisibleCourseModules = (courses) => {
@@ -124,6 +155,13 @@ let viewerSubtitle;
 let prevBtn;
 let nextBtn;
 let viewerFullscreenBtn;
+let viewerFullscreenNavToggleBtn;
+let viewerPenToolBtn;
+let viewerPenControls;
+let viewerPenColorInput;
+let viewerPenSizeInput;
+let viewerPenSizeNumberInput;
+let viewerPenClearBtn;
 let orientationPrompt;
 let moduleList;
 let moduleSelection;
@@ -148,6 +186,31 @@ const viewerAnimationState = new Map();
 const viewerTimedSlideTriggers = new Map();
 const viewerTimedVideoTriggers = new Map();
 const viewerMediaState = new Map();
+const viewerCameraRuntime = new Map();
+const viewerStudentPenStrokes = new Map();
+const viewerPenOverlayState = {
+  overlay: null,
+  canvas: null,
+  drawing: false,
+  pointerId: null,
+  activeStroke: null,
+  slideKey: ''
+};
+const viewerStageZoomState = {
+  pointers: new Map(),
+  baseScale: 1,
+  userScale: 1,
+  translateX: 0,
+  translateY: 0,
+  pinchStartDistance: 0,
+  pinchStartScale: 1,
+  pinchStartTranslateX: 0,
+  pinchStartTranslateY: 0,
+  panStartX: 0,
+  panStartY: 0,
+  panOriginX: 0,
+  panOriginY: 0
+};
 let lastRenderedViewerSlideKey = null;
 let activeTimedViewerSlideKey = null;
 let timedViewerSlideTriggerTimers = [];
@@ -158,8 +221,10 @@ let lastTrackedVideoPosition = 0;
 let currentSlideEnteredAt = 0;
 let currentSlideProgressTimer = null;
 let activeBackgroundMediaNode = null;
+let liveStagePollTimer = null;
 
 const isReplayMode = () => viewerState.isReplay;
+const isLiveShareMode = () => viewerState.isLiveShare;
 
 const formatReplayDate = (value) => {
   if (!value) return 'Sem data';
@@ -173,11 +238,12 @@ const formatReplayDate = (value) => {
     minute: '2-digit'
   });
 };
-const ANIMATABLE_ELEMENT_TYPES = new Set(['text', 'block', 'floatingButton', 'image']);
+const ANIMATABLE_ELEMENT_TYPES = new Set(['text', 'block', 'floatingButton', 'image', 'camera', 'key']);
 const MOTION_ANIMATION_TYPE = 'motion-recording';
 const ANIMATION_PRESETS = new Set(['none', 'fade-in', 'fade-out', 'slide-left', 'slide-right', 'rotate-in', 'pulse', 'float', 'zoom-in', MOTION_ANIMATION_TYPE]);
 const STUDENT_DRAGGABLE_TYPES = new Set(['text', 'block', 'image']);
 const REPLACEABLE_TEXT_TYPES = new Set(['text', 'block', 'floatingButton']);
+const CAMERA_RECORDING_MIME_CANDIDATES = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
 const DETECTOR_ACCEPT_ANY = 'any';
 const DETECTOR_ACCEPT_TYPE_PREFIX = 'type:';
 const DETECTOR_ACCEPT_ELEMENT_PREFIX = 'element:';
@@ -210,6 +276,669 @@ const renderPlainTextHtml = (value = '') =>
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
     .replace(/\n/g, '<br>');
+
+const getViewerPenStrokeWidth = (element) =>
+  Math.max(VIEWER_PEN_MIN_BRUSH_SIZE, Number(element?.strokeWidth) || 8);
+
+const isViewerStudentPaintEnabled = (value) => value === true || value === 'true' || value === 1 || value === '1';
+
+const getViewerPenBrushSize = () =>
+  Math.min(Math.max(Number(viewerState.penSize) || 8, VIEWER_PEN_MIN_BRUSH_SIZE), VIEWER_PEN_MAX_BRUSH_SIZE);
+
+const getViewerPenBrushColor = () => {
+  const candidate = String(viewerState.penColor || '').trim();
+  return /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(candidate) ? candidate : '#111827';
+};
+
+const getViewerPenStrokeKey = (slide, element) => {
+  const moduleId = getCurrentModule()?.id || viewerState.moduleId || 'module';
+  return `${moduleId}::${getStableSlideKey(slide, viewerState.slideIndex)}::${element?.id || 'pen'}`;
+};
+
+const getViewerSlidePenStrokeKey = (slide) => {
+  const moduleId = getCurrentModule()?.id || viewerState.moduleId || 'module';
+  return `${moduleId}::${getStableSlideKey(slide, viewerState.slideIndex)}::stage-pen`;
+};
+
+const getViewerSlidePenStrokeKeyFor = (moduleId, slide, slideIndex) =>
+  `${moduleId || viewerState.moduleId || 'module'}::${getStableSlideKey(slide, slideIndex)}::stage-pen`;
+
+const createViewerLiveStrokeId = () => `live-stroke-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+const getViewerPenStrokeBucket = (slide, element) => {
+  const key = getViewerPenStrokeKey(slide, element);
+  if (!viewerStudentPenStrokes.has(key)) {
+    viewerStudentPenStrokes.set(key, []);
+  }
+  return viewerStudentPenStrokes.get(key);
+};
+
+const getViewerSlidePenStrokeBucket = (slide) => {
+  const key = getViewerSlidePenStrokeKey(slide);
+  if (!viewerStudentPenStrokes.has(key)) {
+    viewerStudentPenStrokes.set(key, []);
+  }
+  return viewerStudentPenStrokes.get(key);
+};
+
+const syncViewerDetachedLiveStrokes = (module) => {
+  const moduleId = module?.id || viewerState.moduleId || 'module';
+  const slides = Array.isArray(module?.builder_data?.slides) ? module.builder_data.slides : [];
+  slides.forEach((slide, slideIndex) => {
+    const detachedStrokeKeys = new Set(
+      (Array.isArray(slide?.elements) ? slide.elements : [])
+        .filter((element) => element?.type === 'pen' && element?.liveStrokeSource === 'student-live' && element?.liveStrokeDetached === true && typeof element?.liveStrokeKey === 'string')
+        .map((element) => element.liveStrokeKey)
+    );
+    if (!detachedStrokeKeys.size) {
+      return;
+    }
+    const bucketKey = getViewerSlidePenStrokeKeyFor(moduleId, slide, slideIndex);
+    const currentStrokes = viewerStudentPenStrokes.get(bucketKey);
+    if (!Array.isArray(currentStrokes) || !currentStrokes.length) {
+      return;
+    }
+    const nextStrokes = currentStrokes.filter((stroke) => !detachedStrokeKeys.has(String(stroke?.id || stroke?.liveStrokeKey || '').trim()));
+    if (nextStrokes.length !== currentStrokes.length) {
+      viewerStudentPenStrokes.set(bucketKey, nextStrokes);
+    }
+  });
+};
+
+const syncViewerLiveDrawingStrokes = (module) => {
+  const moduleId = module?.id || viewerState.moduleId || 'module';
+  const slides = Array.isArray(module?.builder_data?.slides) ? module.builder_data.slides : [];
+  const drawingStrokes = Array.isArray(module?.liveShare?.drawingStrokes) ? module.liveShare.drawingStrokes : [];
+  
+  drawingStrokes.forEach((strokeData) => {
+    if (!strokeData?.stroke || !Array.isArray(strokeData.stroke.points)) {
+      return;
+    }
+    
+    const slideId = strokeData.slideId;
+    const slide = slides.find((s) => getStableSlideKey(s, slides.indexOf(s)) === slideId);
+    
+    if (!slide) {
+      return;
+    }
+    
+    const slideIndex = slides.indexOf(slide);
+    const bucketKey = getViewerSlidePenStrokeKeyFor(moduleId, slide, slideIndex);
+    const currentStrokes = viewerStudentPenStrokes.get(bucketKey);
+    
+    if (!Array.isArray(currentStrokes)) {
+      viewerStudentPenStrokes.set(bucketKey, []);
+    }
+    
+    const bucket = viewerStudentPenStrokes.get(bucketKey);
+    
+    const existingStrokeIndex = bucket.findIndex((s) => s.id === strokeData.stroke.id);
+    const normalizedStroke = {
+      id: strokeData.stroke.id,
+      color: strokeData.stroke.color || '#111827',
+      width: strokeData.stroke.width || 8,
+      points: Array.isArray(strokeData.stroke.points) ? strokeData.stroke.points : []
+    };
+    
+    if (existingStrokeIndex >= 0) {
+      bucket[existingStrokeIndex] = normalizedStroke;
+    } else {
+      bucket.push(normalizedStroke);
+    }
+  });
+};
+
+const slideHasStudentPaintablePen = (slide) =>
+  Array.isArray(slide?.elements) && slide.elements.some((element) => element?.type === 'pen' && isViewerStudentPaintEnabled(element.studentCanPaint));
+
+const getFirstStudentPaintablePen = (slide) =>
+  Array.isArray(slide?.elements)
+    ? slide.elements.find((element) => element?.type === 'pen' && isViewerStudentPaintEnabled(element.studentCanPaint)) || null
+    : null;
+
+const moduleAllowsViewerPen = (module) => {
+  const explicitFlag = module?.builder_data?.moduleSettings?.allowStudentPen;
+  if (explicitFlag === true || explicitFlag === 'true') {
+    return true;
+  }
+  if (explicitFlag === false || explicitFlag === 'false') {
+    return false;
+  }
+  return Array.isArray(module?.builder_data?.slides) && module.builder_data.slides.some((slide) => slideHasStudentPaintablePen(slide));
+};
+
+const slideAllowsViewerPen = (module, slide) => {
+  // Se o módulo explicitamente liberou a caneta (via toggle do admin), habilita em qualquer slide
+  if (moduleAllowsViewerPen(module)) {
+    return true;
+  }
+  // Fallback: slide tem um elemento pen com studentCanPaint
+  return slideHasStudentPaintablePen(slide);
+};
+
+const getViewerPenAvailabilityReason = (module, slide) => {
+  if (!slideAllowsViewerPen(module, slide)) {
+    return '';
+  }
+  if (viewerState.isPublic && !isLiveShareMode()) {
+    return 'A caneta fica disponível apenas no acesso autenticado do aluno.';
+  }
+  if (isReplayMode()) {
+    return 'A caneta fica desativada no modo replay.';
+  }
+  return '';
+};
+
+const syncViewerPenInputs = (source = '') => {
+  const safeSize = getViewerPenBrushSize();
+  viewerState.penSize = safeSize;
+  viewerState.penColor = getViewerPenBrushColor();
+  if (source !== 'color' && viewerPenColorInput) {
+    viewerPenColorInput.value = viewerState.penColor;
+  }
+  if (source !== 'range' && viewerPenSizeInput) {
+    viewerPenSizeInput.value = String(safeSize);
+  }
+  if (source !== 'number' && viewerPenSizeNumberInput) {
+    viewerPenSizeNumberInput.value = String(safeSize);
+  }
+};
+
+const syncViewerPenOverlayInteractivity = () => {
+  if (!moduleStage) {
+    return;
+  }
+  const canvas = viewerPenOverlayState.canvas;
+  const overlay = viewerPenOverlayState.overlay;
+  if (!(canvas instanceof HTMLCanvasElement)) {
+    return;
+  }
+  if (overlay instanceof HTMLDivElement) {
+    overlay.classList.toggle('is-active', Boolean(viewerState.penToolActive));
+    overlay.style.pointerEvents = viewerState.penToolActive ? 'auto' : 'none';
+  }
+  canvas.style.pointerEvents = viewerState.penToolActive ? 'auto' : 'none';
+  canvas.style.cursor = viewerState.penToolActive ? 'crosshair' : 'default';
+};
+
+const updateViewerPenToolState = (slide = null) => {
+  const currentSlide = slide || getCurrentSlide();
+  const currentModule = getCurrentModule();
+  const availabilityReason = getViewerPenAvailabilityReason(currentModule, currentSlide);
+  // Em live share, se o módulo liberar caneta, permite independente de ser público
+  const canShowTool = !isReplayMode() && (isLiveShareMode() ? true : !viewerState.isPublic) && slideAllowsViewerPen(currentModule, currentSlide);
+  const referencePen = getFirstStudentPaintablePen(currentSlide);
+  if (referencePen && !viewerState.penSettingsTouched) {
+    viewerState.penColor = referencePen.strokeColor || viewerState.penColor;
+    viewerState.penSize = getViewerPenStrokeWidth(referencePen);
+  }
+  if (!canShowTool) {
+    viewerState.penToolActive = false;
+  }
+  if (viewerPenToolBtn) {
+    viewerPenToolBtn.hidden = !canShowTool && !availabilityReason;
+    viewerPenToolBtn.disabled = !canShowTool;
+    viewerPenToolBtn.classList.toggle('is-active', Boolean(canShowTool && viewerState.penToolActive));
+    viewerPenToolBtn.setAttribute('aria-pressed', canShowTool && viewerState.penToolActive ? 'true' : 'false');
+    if (availabilityReason) {
+      viewerPenToolBtn.title = availabilityReason;
+      viewerPenToolBtn.setAttribute('aria-label', availabilityReason);
+    } else {
+      viewerPenToolBtn.removeAttribute('title');
+      viewerPenToolBtn.removeAttribute('aria-label');
+    }
+    const labelNode = viewerPenToolBtn.querySelector('span');
+    if (labelNode) {
+      labelNode.textContent = availabilityReason
+        ? 'Caneta indisponível'
+        : canShowTool && viewerState.penToolActive
+          ? 'Caneta ativa'
+          : 'Ativar caneta';
+    }
+  }
+  if (viewerPenControls) {
+    viewerPenControls.hidden = !canShowTool;
+  }
+  if (viewerPenClearBtn) {
+    viewerPenClearBtn.disabled = !canShowTool;
+  }
+  syncViewerPenInputs();
+  // Garante que o canvas de desenho exista quando a caneta for ativada
+  ensureViewerPenOverlay(currentSlide);
+  syncViewerPenOverlayInteractivity();
+};
+
+const toggleViewerPenTool = () => {
+  const slide = getCurrentSlide();
+  const allowed = slideAllowsViewerPen(getCurrentModule(), slide);
+  // Em live share, a caneta é permitida independente de isPublic
+  if (!allowed || isReplayMode() || (viewerState.isPublic && !isLiveShareMode())) {
+    return;
+  }
+  viewerState.penToolActive = !viewerState.penToolActive;
+  updateViewerPenToolState(slide);
+};
+
+const redrawAllViewerPenOverlays = (slide = null) => {
+  const currentSlide = slide || getCurrentSlide();
+  if (!moduleStage || !currentSlide || !(viewerPenOverlayState.canvas instanceof HTMLCanvasElement)) {
+    return;
+  }
+  const stageSize = moduleStageDimensions || DEFAULT_STAGE_SIZE;
+  redrawViewerStudentPenCanvas(
+    viewerPenOverlayState.canvas,
+    { width: stageSize.width, height: stageSize.height, strokeColor: getViewerPenBrushColor(), strokeWidth: getViewerPenBrushSize() },
+    getViewerSlidePenStrokeBucket(currentSlide)
+  );
+};
+
+const getViewerStageBaseOffset = () => {
+  const size = getStageSize();
+  const viewportWidth = moduleStage?.clientWidth || size.width;
+  const viewportHeight = moduleStage?.clientHeight || size.height;
+  const renderedWidth = size.width * viewerStageZoomState.baseScale;
+  const renderedHeight = size.height * viewerStageZoomState.baseScale;
+  return {
+    left: Math.max(0, (viewportWidth - renderedWidth) / 2),
+    top: Math.max(0, (viewportHeight - renderedHeight) / 2)
+  };
+};
+
+const clampViewerStageZoomTranslation = () => {
+  const wrapper = ensureStageContentWrapper();
+  if (!wrapper || !moduleStage) {
+    return;
+  }
+  const size = getStageSize();
+  const viewportWidth = moduleStage.clientWidth || size.width;
+  const viewportHeight = moduleStage.clientHeight || size.height;
+  const baseOffset = getViewerStageBaseOffset();
+  const renderedWidth = size.width * viewerStageZoomState.baseScale * viewerStageZoomState.userScale;
+  const renderedHeight = size.height * viewerStageZoomState.baseScale * viewerStageZoomState.userScale;
+  const minTranslateX = Math.min(baseOffset.left, viewportWidth - baseOffset.left - renderedWidth);
+  const minTranslateY = Math.min(baseOffset.top, viewportHeight - baseOffset.top - renderedHeight);
+  const maxTranslateX = baseOffset.left;
+  const maxTranslateY = baseOffset.top;
+  viewerStageZoomState.translateX = Math.min(maxTranslateX, Math.max(minTranslateX, viewerStageZoomState.translateX));
+  viewerStageZoomState.translateY = Math.min(maxTranslateY, Math.max(minTranslateY, viewerStageZoomState.translateY));
+};
+
+const applyViewerStageZoomTransform = () => {
+  const wrapper = ensureStageContentWrapper();
+  if (!wrapper) {
+    return;
+  }
+  clampViewerStageZoomTranslation();
+  const totalScale = viewerStageZoomState.baseScale * viewerStageZoomState.userScale;
+  wrapper.style.transform = `translate3d(${viewerStageZoomState.translateX}px, ${viewerStageZoomState.translateY}px, 0) scale(${totalScale})`;
+};
+
+const resetViewerStageZoom = () => {
+  viewerStageZoomState.userScale = 1;
+  viewerStageZoomState.translateX = 0;
+  viewerStageZoomState.translateY = 0;
+  viewerStageZoomState.pinchStartDistance = 0;
+  viewerStageZoomState.pointers.clear();
+  applyViewerStageZoomTransform();
+};
+
+const getViewerStagePointerDistance = (points) => {
+  if (!Array.isArray(points) || points.length < 2) {
+    return 0;
+  }
+  const [first, second] = points;
+  return Math.hypot(second.x - first.x, second.y - first.y);
+};
+
+const getViewerStagePointerCenter = (points) => {
+  if (!Array.isArray(points) || points.length < 2) {
+    return { x: 0, y: 0 };
+  }
+  const [first, second] = points;
+  return {
+    x: (first.x + second.x) / 2,
+    y: (first.y + second.y) / 2
+  };
+};
+
+const attachViewerStageZoomHandlers = () => {
+  if (!moduleStage) {
+    return;
+  }
+  const MIN_PINCH_DISTANCE = 8;
+  const MAX_STAGE_ZOOM = 4;
+  const updatePointer = (event) => {
+    viewerStageZoomState.pointers.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY
+    });
+  };
+  const removePointer = (event) => {
+    viewerStageZoomState.pointers.delete(event.pointerId);
+    if (viewerStageZoomState.pointers.size < 2) {
+      viewerStageZoomState.pinchStartDistance = 0;
+    }
+  };
+  moduleStage.addEventListener('pointerdown', (event) => {
+    if (event.pointerType !== 'touch' || viewerState.penToolActive) {
+      return;
+    }
+    updatePointer(event);
+    if (viewerStageZoomState.pointers.size === 1 && viewerStageZoomState.userScale > 1) {
+      viewerStageZoomState.panStartX = event.clientX;
+      viewerStageZoomState.panStartY = event.clientY;
+      viewerStageZoomState.panOriginX = viewerStageZoomState.translateX;
+      viewerStageZoomState.panOriginY = viewerStageZoomState.translateY;
+    }
+    if (viewerStageZoomState.pointers.size === 2) {
+      const points = Array.from(viewerStageZoomState.pointers.values());
+      viewerStageZoomState.pinchStartDistance = getViewerStagePointerDistance(points);
+      viewerStageZoomState.pinchStartScale = viewerStageZoomState.userScale;
+      viewerStageZoomState.pinchStartTranslateX = viewerStageZoomState.translateX;
+      viewerStageZoomState.pinchStartTranslateY = viewerStageZoomState.translateY;
+    }
+  });
+  moduleStage.addEventListener('pointermove', (event) => {
+    if (event.pointerType !== 'touch' || viewerState.penToolActive || !viewerStageZoomState.pointers.has(event.pointerId)) {
+      return;
+    }
+    updatePointer(event);
+    const points = Array.from(viewerStageZoomState.pointers.values());
+    if (points.length >= 2) {
+      const distance = getViewerStagePointerDistance(points);
+      if (distance < MIN_PINCH_DISTANCE || viewerStageZoomState.pinchStartDistance < MIN_PINCH_DISTANCE) {
+        return;
+      }
+      event.preventDefault();
+      const nextScale = Math.min(
+        MAX_STAGE_ZOOM,
+        Math.max(1, viewerStageZoomState.pinchStartScale * (distance / viewerStageZoomState.pinchStartDistance))
+      );
+      const ratio = nextScale / (viewerStageZoomState.pinchStartScale || 1);
+      const center = getViewerStagePointerCenter(points);
+      const stageRect = moduleStage.getBoundingClientRect();
+      const anchorX = center.x - stageRect.left;
+      const anchorY = center.y - stageRect.top;
+      viewerStageZoomState.userScale = nextScale;
+      viewerStageZoomState.translateX = anchorX - ((anchorX - viewerStageZoomState.pinchStartTranslateX) * ratio);
+      viewerStageZoomState.translateY = anchorY - ((anchorY - viewerStageZoomState.pinchStartTranslateY) * ratio);
+      applyViewerStageZoomTransform();
+      return;
+    }
+    if (points.length === 1 && viewerStageZoomState.userScale > 1) {
+      event.preventDefault();
+      viewerStageZoomState.translateX = viewerStageZoomState.panOriginX + (event.clientX - viewerStageZoomState.panStartX);
+      viewerStageZoomState.translateY = viewerStageZoomState.panOriginY + (event.clientY - viewerStageZoomState.panStartY);
+      applyViewerStageZoomTransform();
+    }
+  }, { passive: false });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach((eventName) => {
+    moduleStage.addEventListener(eventName, (event) => {
+      if (event.pointerType !== 'touch') {
+        return;
+      }
+      removePointer(event);
+    });
+  });
+};
+
+const clearViewerPenDraft = () => {
+  const slide = getCurrentSlide();
+  if (!slide) {
+    return;
+  }
+  viewerStudentPenStrokes.set(getViewerSlidePenStrokeKey(slide), []);
+  redrawAllViewerPenOverlays(slide);
+};
+
+const renderViewerPenSvgMarkup = (element) => {
+  const width = Math.max(1, Number(element?.width) || 1);
+  const height = Math.max(1, Number(element?.height) || 1);
+  const points = Array.isArray(element?.points) ? element.points : [];
+  const pathCommands = [];
+  let currentStrokeLength = 0;
+  points.forEach((point) => {
+    if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+      currentStrokeLength = 0;
+      return;
+    }
+    const x = clamp(Number(point.x) || 0, 0, 1) * width;
+    const y = clamp(Number(point.y) || 0, 0, 1) * height;
+    if (!currentStrokeLength) {
+      pathCommands.push(`M ${x} ${y}`);
+    } else {
+      pathCommands.push(`L ${x} ${y}`);
+    }
+    currentStrokeLength += 1;
+    if (currentStrokeLength === 1) {
+      pathCommands.push(`L ${x + 0.01} ${y + 0.01}`);
+    }
+  });
+  const strokeWidth = getViewerPenStrokeWidth(element);
+  const strokeColor = element?.strokeColor || '#111827';
+  return `
+    <svg class="builder-pen-svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" aria-hidden="true">
+      <path
+        d="${escapeAttribute(pathCommands.join(' '))}"
+        fill="none"
+        stroke="${escapeAttribute(strokeColor)}"
+        stroke-width="${strokeWidth}"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        vector-effect="non-scaling-stroke"
+      />
+    </svg>
+  `;
+};
+
+const createViewerPenElementNode = (element) => {
+  const node = document.createElement('div');
+  node.className = 'builder-pen-element';
+  node.innerHTML = renderViewerPenSvgMarkup(element);
+  return node;
+};
+
+const redrawViewerStudentPenCanvas = (canvas, element, strokes = []) => {
+  if (!(canvas instanceof HTMLCanvasElement)) {
+    return;
+  }
+  const width = Math.max(1, Number(element?.width) || canvas.clientWidth || 1);
+  const height = Math.max(1, Number(element?.height) || canvas.clientHeight || 1);
+  const scale = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+  const targetWidth = Math.max(1, Math.round(width * scale));
+  const targetHeight = Math.max(1, Math.round(height * scale));
+  if (canvas.width !== targetWidth) {
+    canvas.width = targetWidth;
+  }
+  if (canvas.height !== targetHeight) {
+    canvas.height = targetHeight;
+  }
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    return;
+  }
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.scale(scale, scale);
+  strokes.forEach((stroke) => {
+    const points = Array.isArray(stroke?.points) ? stroke.points : [];
+    if (!points.length) {
+      return;
+    }
+    context.save();
+    context.strokeStyle = stroke.color || element?.strokeColor || '#111827';
+    context.lineWidth = Math.max(VIEWER_PEN_MIN_BRUSH_SIZE, Number(stroke.width) || getViewerPenStrokeWidth(element));
+    context.lineCap = 'round';
+    context.lineJoin = 'round';
+    context.beginPath();
+    const firstPoint = points[0];
+    const startX = clamp(Number(firstPoint?.x) || 0, 0, 1) * width;
+    const startY = clamp(Number(firstPoint?.y) || 0, 0, 1) * height;
+    context.moveTo(startX, startY);
+    points.slice(1).forEach((point) => {
+      context.lineTo(clamp(Number(point?.x) || 0, 0, 1) * width, clamp(Number(point?.y) || 0, 0, 1) * height);
+    });
+    if (points.length === 1) {
+      context.lineTo(startX + 0.01, startY + 0.01);
+    }
+    context.stroke();
+    context.restore();
+  });
+};
+
+const destroyViewerPenOverlay = () => {
+  if (viewerPenOverlayState.overlay) {
+    viewerPenOverlayState.overlay.remove();
+  }
+  viewerPenOverlayState.overlay = null;
+  viewerPenOverlayState.canvas = null;
+  viewerPenOverlayState.drawing = false;
+  viewerPenOverlayState.pointerId = null;
+  viewerPenOverlayState.activeStroke = null;
+  viewerPenOverlayState.slideKey = '';
+};
+
+const ensureViewerPenOverlay = (slide) => {
+  const wrapper = ensureStageContentWrapper();
+  const stageSize = moduleStageDimensions || DEFAULT_STAGE_SIZE;
+  const currentModule = getCurrentModule();
+  const canDrawOnSlide =
+    wrapper &&
+    slide &&
+    !isReplayMode() &&
+    (isLiveShareMode() || !viewerState.isPublic) &&
+    slideAllowsViewerPen(currentModule, slide);
+  if (!canDrawOnSlide) {
+    destroyViewerPenOverlay();
+    return;
+  }
+  const slideKey = getStableSlideKey(slide, viewerState.slideIndex);
+  if (!viewerPenOverlayState.overlay || viewerPenOverlayState.slideKey !== slideKey) {
+    destroyViewerPenOverlay();
+  } else if (viewerPenOverlayState.canvas) {
+    // Re-apenda para garantir que volte ao DOM (após innerHTML='') e fique no topo
+    wrapper.appendChild(viewerPenOverlayState.overlay);
+    // Atualiza dimensões caso o palco tenha mudado de tamanho
+    if (viewerPenOverlayState.canvas.width !== Math.max(1, stageSize.width) || viewerPenOverlayState.canvas.height !== Math.max(1, stageSize.height)) {
+      viewerPenOverlayState.canvas.width = Math.max(1, stageSize.width);
+      viewerPenOverlayState.canvas.height = Math.max(1, stageSize.height);
+      redrawAllViewerPenOverlays(slide);
+    }
+  }
+  if (!viewerPenOverlayState.overlay) {
+    const overlay = document.createElement('div');
+    overlay.className = 'pen-stage-overlay viewer-pen-stage-overlay';
+    const canvas = document.createElement('canvas');
+    canvas.className = 'pen-overlay-canvas viewer-pen-paint-layer';
+    canvas.width = Math.max(1, stageSize.width);
+    canvas.height = Math.max(1, stageSize.height);
+    overlay.appendChild(canvas);
+    wrapper.appendChild(overlay);
+    viewerPenOverlayState.overlay = overlay;
+    viewerPenOverlayState.canvas = canvas;
+    viewerPenOverlayState.slideKey = slideKey;
+    const buildNormalizedPoint = (event) => {
+      const rect = canvas.getBoundingClientRect();
+      const relativeX = clamp(event.clientX - rect.left, 0, rect.width || 1);
+      const relativeY = clamp(event.clientY - rect.top, 0, rect.height || 1);
+      return {
+        x: rect.width > 0 ? relativeX / rect.width : 0,
+        y: rect.height > 0 ? relativeY / rect.height : 0
+      };
+    };
+    const finishStroke = () => {
+      if (viewerPenOverlayState.pointerId !== null) {
+        canvas.releasePointerCapture?.(viewerPenOverlayState.pointerId);
+      }
+      const stroke = viewerPenOverlayState.activeStroke;
+      viewerPenOverlayState.drawing = false;
+      viewerPenOverlayState.pointerId = null;
+      viewerPenOverlayState.activeStroke = null;
+      if (!stroke || !Array.isArray(stroke.points) || !stroke.points.length) {
+        return;
+      }
+      const referencePen = getFirstStudentPaintablePen(slide);
+      const startPoint = stroke.points[0];
+      persistProgressEventToBackend({
+        type: 'drawing',
+        slideId: slideKey,
+        slideTitle: slide?.title || '',
+        elementId: referencePen?.id || null,
+        elementType: 'pen',
+        summary: 'Rabiscou no slide com a caneta.',
+        details: {
+          x: clamp(Number(startPoint?.x) || 0, 0, 1) * stageSize.width,
+          y: clamp(Number(startPoint?.y) || 0, 0, 1) * stageSize.height,
+          pointCount: stroke.points.length,
+          strokeWidth: stroke.width,
+          strokeColor: stroke.color
+        }
+      });
+
+      if (isLiveShareMode()) {
+        authorizedFetch(`/api/student/live-stage/${encodeURIComponent(viewerState.liveShareId)}/drawing`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            stroke: {
+              id: stroke.id,
+              slideId: slideKey,
+              color: stroke.color,
+              width: stroke.width,
+              points: stroke.points
+            }
+          })
+        }).catch((err) => console.warn('Erro ao sincronizar desenho ao vivo:', err));
+      }
+    };
+    const handlePointerDown = (event) => {
+      if (!viewerState.penToolActive) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      viewerPenOverlayState.pointerId = event.pointerId;
+      viewerPenOverlayState.drawing = true;
+      viewerPenOverlayState.activeStroke = {
+        id: createViewerLiveStrokeId(),
+        color: getViewerPenBrushColor(),
+        width: getViewerPenBrushSize(),
+        points: []
+      };
+      getViewerSlidePenStrokeBucket(slide).push(viewerPenOverlayState.activeStroke);
+      canvas.setPointerCapture?.(event.pointerId);
+      viewerPenOverlayState.activeStroke.points.push(buildNormalizedPoint(event));
+      redrawAllViewerPenOverlays(slide);
+    };
+    const handlePointerMove = (event) => {
+      if (!viewerPenOverlayState.drawing || viewerPenOverlayState.pointerId !== event.pointerId || !viewerPenOverlayState.activeStroke) {
+        return;
+      }
+      viewerPenOverlayState.activeStroke.points.push(buildNormalizedPoint(event));
+      redrawAllViewerPenOverlays(slide);
+    };
+    overlay.addEventListener('pointerdown', handlePointerDown);
+    canvas.addEventListener('pointerdown', handlePointerDown);
+    overlay.addEventListener('pointermove', handlePointerMove);
+    canvas.addEventListener('pointermove', handlePointerMove);
+    canvas.addEventListener('pointerup', finishStroke);
+    overlay.addEventListener('pointerup', finishStroke);
+    canvas.addEventListener('pointercancel', finishStroke);
+    overlay.addEventListener('pointercancel', finishStroke);
+  }
+  viewerPenOverlayState.canvas.width = Math.max(1, stageSize.width);
+  viewerPenOverlayState.canvas.height = Math.max(1, stageSize.height);
+  viewerPenOverlayState.canvas.style.width = `${stageSize.width}px`;
+  viewerPenOverlayState.canvas.style.height = `${stageSize.height}px`;
+  redrawAllViewerPenOverlays(slide);
+  syncViewerPenOverlayInteractivity();
+};
+
+const attachViewerStudentPenOverlay = (node, element, slide) => {
+  return;
+};
 
 const normalizeStringList = (value = []) => {
   if (!Array.isArray(value)) {
@@ -506,6 +1235,764 @@ const wrapMediaNodeWithCaptions = (mediaNode, element) => {
   return shell;
 };
 
+const normalizeCameraElement = (element) => {
+  if (!element || element.type !== 'camera') {
+    return;
+  }
+  element.width = Math.max(220, Number(element.width) || 320);
+  element.height = Math.max(160, Number(element.height) || 240);
+  element.backgroundColor = 'transparent';
+};
+
+const getViewerCameraContext = (element, slide) => ({
+  elementId: element?.id || '',
+  slideId: slide?.id || ''
+});
+
+const getViewerCameraSessionKey = (context) => `${context.slideId || 'slide'}::${context.elementId || 'element'}`;
+
+const createViewerCameraSession = () => ({
+  stream: null,
+  captureVideo: null,
+  recorder: null,
+  recordedChunks: [],
+  pendingStart: null,
+  phase: 'idle',
+  lastError: '',
+  recordingCleanup: null,
+  startToken: 0,
+  hasAudio: false
+});
+
+const getViewerCameraSession = (context) => {
+  const key = getViewerCameraSessionKey(context);
+  if (!viewerCameraRuntime.has(key)) {
+    viewerCameraRuntime.set(key, createViewerCameraSession());
+  }
+  return viewerCameraRuntime.get(key);
+};
+
+const isViewerCameraSupported = () =>
+  typeof navigator !== 'undefined' &&
+  navigator.mediaDevices &&
+  typeof navigator.mediaDevices.getUserMedia === 'function';
+
+const formatCameraAccessError = (error) => {
+  const errorName = String(error?.name || '').trim();
+  if (errorName === 'NotAllowedError' || errorName === 'SecurityError') {
+    return 'O navegador ou o sistema ainda estao bloqueando a camera para este site. Verifique a permissao do endereco e a privacidade da camera no Windows.';
+  }
+  if (errorName === 'NotReadableError' || errorName === 'TrackStartError') {
+    return 'A camera parece estar ocupada por outro programa ou bloqueada pelo sistema. Feche outros apps que usam webcam e tente novamente.';
+  }
+  if (errorName === 'NotFoundError' || errorName === 'DevicesNotFoundError') {
+    return 'Nenhuma camera foi encontrada neste dispositivo.';
+  }
+  if (errorName === 'OverconstrainedError' || errorName === 'ConstraintNotSatisfiedError') {
+    return 'A camera deste dispositivo nao aceitou a configuracao solicitada. Tente novamente.';
+  }
+  if (errorName === 'AbortError') {
+    return 'O navegador interrompeu a inicializacao da camera. Tente novamente.';
+  }
+  const fallback = String(error?.message || '').trim();
+  return fallback || 'Nao foi possivel acessar a webcam.';
+};
+
+const chooseCameraRecordingMimeType = () => {
+  if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') {
+    return '';
+  }
+  return CAMERA_RECORDING_MIME_CANDIDATES.find((candidate) => MediaRecorder.isTypeSupported(candidate)) || '';
+};
+
+const normalizeRecordedVideoMimeType = (mimeType = '') => {
+  const baseType = String(mimeType || '').split(';')[0].trim().toLowerCase();
+  return baseType.startsWith('video/') ? baseType : 'video/webm';
+};
+
+const streamHasAudioTrack = (stream) =>
+  stream instanceof MediaStream &&
+  typeof stream.getAudioTracks === 'function' &&
+  stream.getAudioTracks().some((track) => track.readyState === 'live');
+
+const buildCameraRecorderStream = (captureStream, sourceStream) => {
+  const videoStream = captureStream || sourceStream || null;
+  if (!videoStream) {
+    return null;
+  }
+  const videoTracks = typeof videoStream.getVideoTracks === 'function'
+    ? videoStream.getVideoTracks().filter((track) => track.readyState === 'live')
+    : [];
+  const audioTracks = sourceStream && typeof sourceStream.getAudioTracks === 'function'
+    ? sourceStream.getAudioTracks().filter((track) => track.readyState === 'live')
+    : [];
+  if (!videoTracks.length) {
+    return sourceStream || captureStream || null;
+  }
+  if (!audioTracks.length) {
+    return captureStream || sourceStream || null;
+  }
+  try {
+    return new MediaStream([...videoTracks, ...audioTracks]);
+  } catch (error) {
+    console.warn('Nao foi possivel combinar audio e video da camera. A gravacao seguira sem audio.', error);
+    return captureStream || sourceStream || null;
+  }
+};
+
+const createCameraMediaRecorder = (primaryStream, fallbackStream) => {
+  const attempts = [];
+  if (primaryStream) attempts.push(primaryStream);
+  if (fallbackStream && fallbackStream !== primaryStream) attempts.push(fallbackStream);
+  let lastError = null;
+  for (const stream of attempts) {
+    try {
+      const mimeType = chooseCameraRecordingMimeType();
+      return mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error('A gravacao da camera nao esta disponivel agora.');
+};
+
+const readBlobAsDataUrl = (blob) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+    reader.onerror = () => reject(new Error('Nao foi possivel preparar a captura da camera.'));
+    reader.readAsDataURL(blob);
+  });
+
+const createCameraCaptureVideo = (stream) => {
+  const video = document.createElement('video');
+  video.muted = true;
+  video.autoplay = true;
+  video.playsInline = true;
+  video.srcObject = stream;
+  video.play().catch(() => {});
+  return video;
+};
+
+const waitForCameraVideoReady = (video) =>
+  new Promise((resolve) => {
+    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0 && video.videoHeight > 0) {
+      resolve();
+      return;
+    }
+    const finish = () => {
+      video.removeEventListener('loadedmetadata', finish);
+      video.removeEventListener('canplay', finish);
+      resolve();
+    };
+    video.addEventListener('loadedmetadata', finish, { once: true });
+    video.addEventListener('canplay', finish, { once: true });
+  });
+
+const attachCameraStreamToVideo = (video, stream) => {
+  if (!(video instanceof HTMLVideoElement)) {
+    return;
+  }
+  video.muted = true;
+  video.autoplay = true;
+  video.playsInline = true;
+  if (video.srcObject !== stream) {
+    video.srcObject = stream;
+  }
+  video.play().catch(() => {});
+};
+
+const requestViewerCameraRender = (context) => {
+  const currentSlide = getCurrentSlide();
+  if (!currentSlide || currentSlide.id !== context?.slideId) {
+    return;
+  }
+  renderSlide(currentSlide);
+};
+
+const clearViewerCameraSessionResources = (session) => {
+  if (!session) {
+    return;
+  }
+  session.startToken += 1;
+  if (typeof session.recordingCleanup === 'function') {
+    session.recordingCleanup();
+    session.recordingCleanup = null;
+  }
+  if (session.recorder && session.recorder.state !== 'inactive') {
+    try {
+      session.recorder.ondataavailable = null;
+      session.recorder.stop();
+    } catch (error) {
+      console.warn('Nao foi possivel interromper a gravacao da camera.', error);
+    }
+  }
+  session.recorder = null;
+  session.recordedChunks = [];
+  if (session.captureVideo instanceof HTMLVideoElement) {
+    session.captureVideo.pause();
+    session.captureVideo.srcObject = null;
+  }
+  session.captureVideo = null;
+  if (session.stream) {
+    session.stream.getTracks().forEach((track) => track.stop());
+  }
+  session.stream = null;
+  session.pendingStart = null;
+  session.phase = 'idle';
+  session.lastError = '';
+  session.hasAudio = false;
+};
+
+const disposeViewerCameraSession = (context) => {
+  const key = getViewerCameraSessionKey(context);
+  const session = viewerCameraRuntime.get(key);
+  if (!session) {
+    return;
+  }
+  clearViewerCameraSessionResources(session);
+  viewerCameraRuntime.delete(key);
+};
+
+const syncVisibleViewerCameraSessions = (visibleKeys = new Set()) => {
+  viewerCameraRuntime.forEach((session, key) => {
+    if (!visibleKeys.has(key)) {
+      clearViewerCameraSessionResources(session);
+      viewerCameraRuntime.delete(key);
+    }
+  });
+};
+
+const requestViewerCameraStream = async (context, { restart = false } = {}) => {
+  const session = getViewerCameraSession(context);
+  if (!isViewerCameraSupported()) {
+    session.phase = 'error';
+    session.lastError = 'A webcam nao esta disponivel neste navegador.';
+    requestViewerCameraRender(context);
+    throw new Error(session.lastError);
+  }
+  if (restart) {
+    clearViewerCameraSessionResources(session);
+  }
+  if (session.stream && session.phase !== 'error') {
+    return session.stream;
+  }
+  if (session.pendingStart) {
+    return session.pendingStart;
+  }
+  session.phase = 'requesting';
+  session.lastError = '';
+  const startToken = session.startToken + 1;
+  session.startToken = startToken;
+  session.pendingStart = (async () => {
+    const preferredAudioConstraints = {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true
+    };
+    const constraintsList = [
+      { video: { facingMode: 'user' }, audio: preferredAudioConstraints },
+      { video: true, audio: preferredAudioConstraints },
+      { video: { facingMode: 'user' }, audio: true },
+      { video: true, audio: true },
+      { video: { facingMode: 'user' }, audio: false },
+      { video: true, audio: false }
+    ];
+    let stream = null;
+    let lastError = null;
+    for (const constraints of constraintsList) {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (!stream) {
+      throw lastError || new Error('Nao foi possivel acessar a webcam.');
+    }
+    if (session.startToken !== startToken) {
+      stream.getTracks().forEach((track) => track.stop());
+      throw new Error('Sessao de camera encerrada.');
+    }
+    session.stream = stream;
+    session.hasAudio = streamHasAudioTrack(stream);
+    session.captureVideo = createCameraCaptureVideo(stream);
+    await waitForCameraVideoReady(session.captureVideo);
+    if (session.startToken !== startToken) {
+      stream.getTracks().forEach((track) => track.stop());
+      throw new Error('Sessao de camera encerrada.');
+    }
+    session.phase = 'ready';
+    requestViewerCameraRender(context);
+    return stream;
+  })()
+    .catch((error) => {
+      clearViewerCameraSessionResources(session);
+      session.phase = 'error';
+      session.lastError = formatCameraAccessError(error);
+      requestViewerCameraRender(context);
+      throw error;
+    })
+    .finally(() => {
+      session.pendingStart = null;
+    });
+  return session.pendingStart;
+};
+
+const getCameraOutputSize = (element, scale = Math.max(1, Math.min(2, window.devicePixelRatio || 1))) => {
+  const width = Math.max(1, Math.round(Number(element?.width) || 320));
+  const height = Math.max(1, Math.round(Number(element?.height) || 240));
+  return {
+    cssWidth: width,
+    cssHeight: height,
+    pixelWidth: Math.max(1, Math.round(width * scale)),
+    pixelHeight: Math.max(1, Math.round(height * scale))
+  };
+};
+
+const drawMirroredVideoCover = (context, video, width, height) => {
+  const sourceWidth = Math.max(1, Number(video?.videoWidth) || width);
+  const sourceHeight = Math.max(1, Number(video?.videoHeight) || height);
+  const sourceRatio = sourceWidth / sourceHeight;
+  const targetRatio = width / height;
+  let sx = 0;
+  let sy = 0;
+  let sw = sourceWidth;
+  let sh = sourceHeight;
+  if (sourceRatio > targetRatio) {
+    sw = Math.round(sourceHeight * targetRatio);
+    sx = Math.max(0, Math.round((sourceWidth - sw) / 2));
+  } else if (sourceRatio < targetRatio) {
+    sh = Math.round(sourceWidth / targetRatio);
+    sy = Math.max(0, Math.round((sourceHeight - sh) / 2));
+  }
+  context.save();
+  context.translate(width, 0);
+  context.scale(-1, 1);
+  context.drawImage(video, sx, sy, sw, sh, 0, 0, width, height);
+  context.restore();
+};
+
+const finalizeViewerCameraAsImage = async (element, slide, dataUrl) => {
+  const module = getCurrentModule();
+  await persistCameraCaptureToBackend({
+    module,
+    slide,
+    element,
+    image: dataUrl
+  });
+  element.type = 'image';
+  element.src = dataUrl;
+  element.objectFit = 'cover';
+  element.backgroundColor = 'transparent';
+  delete element.provider;
+  delete element.embedSrc;
+  delete element.videoTriggers;
+  disposeViewerCameraSession(getViewerCameraContext(element, slide));
+  renderSlide(getCurrentSlide());
+};
+
+const finalizeViewerCameraAsVideo = async (element, slide, dataUrl) => {
+  const module = getCurrentModule();
+  await persistCameraCaptureToBackend({
+    module,
+    slide,
+    element,
+    video: dataUrl
+  });
+  element.type = 'video';
+  element.src = dataUrl;
+  element.backgroundColor = 'transparent';
+  element.videoTriggers = Array.isArray(element.videoTriggers) ? element.videoTriggers : [];
+  delete element.provider;
+  delete element.embedSrc;
+  normalizeVideoTriggerConfig(element);
+  disposeViewerCameraSession(getViewerCameraContext(element, slide));
+  renderSlide(getCurrentSlide());
+};
+
+const captureViewerCameraPhoto = async (element, slide) => {
+  normalizeCameraElement(element);
+  const context = getViewerCameraContext(element, slide);
+  await requestViewerCameraStream(context);
+  const session = getViewerCameraSession(context);
+  const video = session.captureVideo;
+  if (!(video instanceof HTMLVideoElement)) {
+    throw new Error('A camera ainda nao esta pronta para fotografar.');
+  }
+  await waitForCameraVideoReady(video);
+  const size = getCameraOutputSize(element);
+  const canvas = document.createElement('canvas');
+  canvas.width = size.pixelWidth;
+  canvas.height = size.pixelHeight;
+  const context2d = canvas.getContext('2d');
+  if (!context2d) {
+    throw new Error('Nao foi possivel preparar a captura da camera.');
+  }
+  context2d.scale(size.pixelWidth / size.cssWidth, size.pixelHeight / size.cssHeight);
+  drawMirroredVideoCover(context2d, video, size.cssWidth, size.cssHeight);
+  await finalizeViewerCameraAsImage(element, slide, canvas.toDataURL('image/png'));
+};
+
+const startViewerCameraRecording = async (element, slide) => {
+  normalizeCameraElement(element);
+  const context = getViewerCameraContext(element, slide);
+  await requestViewerCameraStream(context);
+  const session = getViewerCameraSession(context);
+  if (session.recorder && session.recorder.state !== 'inactive') {
+    return;
+  }
+  if (typeof MediaRecorder === 'undefined') {
+    session.phase = 'error';
+    session.lastError = 'Este navegador nao suporta gravacao de video.';
+    requestViewerCameraRender(context);
+    throw new Error(session.lastError);
+  }
+  const sourceVideo = session.captureVideo;
+  if (!(sourceVideo instanceof HTMLVideoElement)) {
+    throw new Error('A camera ainda nao esta pronta para gravar.');
+  }
+  await waitForCameraVideoReady(sourceVideo);
+  const size = getCameraOutputSize(element);
+  const canvas = document.createElement('canvas');
+  canvas.width = size.pixelWidth;
+  canvas.height = size.pixelHeight;
+  const context2d = canvas.getContext('2d');
+  if (!context2d) {
+    throw new Error('Nao foi possivel preparar a gravacao da camera.');
+  }
+  const captureStream = typeof canvas.captureStream === 'function' ? canvas.captureStream(30) : null;
+  const recorderStream = buildCameraRecorderStream(captureStream, session.stream);
+  if (!recorderStream) {
+    throw new Error('A gravacao da camera nao esta disponivel agora.');
+  }
+  let frameId = null;
+  const renderFrame = () => {
+    context2d.setTransform(1, 0, 0, 1, 0, 0);
+    context2d.clearRect(0, 0, canvas.width, canvas.height);
+    context2d.scale(size.pixelWidth / size.cssWidth, size.pixelHeight / size.cssHeight);
+    drawMirroredVideoCover(context2d, sourceVideo, size.cssWidth, size.cssHeight);
+    frameId = requestAnimationFrame(renderFrame);
+  };
+  renderFrame();
+  const recorder = createCameraMediaRecorder(recorderStream, captureStream || session.stream);
+  session.recordedChunks = [];
+  recorder.ondataavailable = (event) => {
+    if (event.data && event.data.size > 0) {
+      session.recordedChunks.push(event.data);
+    }
+  };
+  recorder.start(200);
+  session.recordingCleanup = () => {
+    if (typeof frameId === 'number') {
+      cancelAnimationFrame(frameId);
+      frameId = null;
+    }
+    captureStream?.getTracks().forEach((track) => track.stop());
+  };
+  session.recorder = recorder;
+  session.phase = 'recording';
+  requestViewerCameraRender(context);
+};
+
+const stopViewerCameraRecording = async (element, slide) => {
+  const context = getViewerCameraContext(element, slide);
+  const session = getViewerCameraSession(context);
+  if (!session.recorder || session.recorder.state === 'inactive') {
+    return;
+  }
+  session.phase = 'processing';
+  requestViewerCameraRender(context);
+  const recorder = session.recorder;
+  const stopPromise = new Promise((resolve, reject) => {
+    recorder.addEventListener('stop', resolve, { once: true });
+    recorder.addEventListener('error', () => reject(new Error('Nao foi possivel finalizar a gravacao da camera.')), { once: true });
+  });
+  recorder.stop();
+  await stopPromise;
+  const blob = new Blob(session.recordedChunks, { type: normalizeRecordedVideoMimeType(recorder.mimeType) });
+  session.recorder = null;
+  session.recordedChunks = [];
+  if (typeof session.recordingCleanup === 'function') {
+    session.recordingCleanup();
+    session.recordingCleanup = null;
+  }
+  if (!blob.size) {
+    session.phase = 'error';
+    session.lastError = 'A gravacao nao gerou um video valido.';
+    requestViewerCameraRender(context);
+    throw new Error(session.lastError);
+  }
+  await finalizeViewerCameraAsVideo(element, slide, await readBlobAsDataUrl(blob));
+};
+
+const getViewerCameraStatusMessage = (session) => {
+  if (!isViewerCameraSupported()) {
+    return 'Webcam indisponivel neste navegador.';
+  }
+  if (!session) {
+    return 'Preparando camera...';
+  }
+  if (session.phase === 'recording') {
+    return session.hasAudio
+      ? 'Gravando em espelho. Clique em parar para gerar o video.'
+      : 'Gravando em espelho sem audio. Clique em parar para gerar o video.';
+  }
+  if (session.phase === 'processing') {
+    return 'Finalizando o video capturado...';
+  }
+  if (session.phase === 'requesting') {
+    return 'Solicitando permissao para acessar a webcam e o microfone...';
+  }
+  if (session.phase === 'ready') {
+    return session.hasAudio
+      ? 'Espelho ativo. Tire uma foto ou grave um video.'
+      : 'Espelho ativo. Microfone indisponivel; a gravacao saira sem audio.';
+  }
+  if (session.lastError) {
+    return session.lastError;
+  }
+  return 'Ative a camera para transmitir a webcam neste slide.';
+};
+
+const createViewerCameraNode = (element, slide) => {
+  normalizeCameraElement(element);
+  if (isReplayMode()) {
+    const module = getCurrentModule();
+    const slideKey = getStableSlideKey(slide, viewerState.slideIndex);
+    const savedCapture = module?.id ? getInputResponseState(module.id, slideKey, element.id, module) : null;
+    if (savedCapture?.video || savedCapture?.image) {
+      const mediaNode = document.createElement(savedCapture.video ? 'video' : 'img');
+      mediaNode.className = 'builder-media-element';
+      if (savedCapture.video) {
+        mediaNode.controls = true;
+        mediaNode.src = savedCapture.video;
+      } else {
+        mediaNode.src = savedCapture.image;
+        mediaNode.alt = 'Captura da camera do aluno';
+      }
+      return mediaNode;
+    }
+    const node = document.createElement('div');
+    node.className = 'builder-camera-element';
+    node.innerHTML = `
+      <div class="builder-camera-overlay">
+        <div class="builder-camera-empty">
+          <strong>Sem captura salva</strong>
+          <span>O aluno nao registrou foto ou video nesta camera.</span>
+        </div>
+      </div>
+    `;
+    return node;
+  }
+  const context = getViewerCameraContext(element, slide);
+  const session = getViewerCameraSession(context);
+  
+  const isLiveShareMode = Boolean(viewerState.liveShareId);
+  const studentPeerId = element.studentPeerId;
+  const isStudentCamera = Boolean(studentPeerId);
+  
+  const node = document.createElement('div');
+  node.className = 'builder-camera-element';
+
+  const previewVideo = document.createElement('video');
+  previewVideo.className = 'builder-camera-preview';
+  previewVideo.setAttribute('aria-label', 'Visualizacao da camera no modulo');
+  previewVideo.autoplay = true;
+  previewVideo.playsInline = true;
+  
+  if (isLiveShareMode) {
+    previewVideo.muted = false;
+    if (isStudentCamera) {
+      if (studentPeerId === studentCameraPeerId) {
+        // Sou eu!
+        previewVideo.srcObject = studentCameraLocalStream;
+        previewVideo.muted = true; // Não ouvir o próprio áudio
+      } else {
+        const remoteStream = viewerStudentStreams.get(studentPeerId);
+        if (remoteStream) {
+          previewVideo.srcObject = remoteStream;
+        } else {
+          connectToStudentPeer(studentPeerId);
+        }
+      }
+    } else {
+      if (viewerCameraStream) {
+        previewVideo.srcObject = viewerCameraStream;
+      }
+    }
+  } else {
+    previewVideo.muted = true; // Câmera local do aluno (muda)
+    if (session.stream) {
+      attachCameraStreamToVideo(previewVideo, session.stream);
+    }
+  }
+  node.appendChild(previewVideo);
+
+  const overlay = document.createElement('div');
+  overlay.className = 'builder-camera-overlay';
+  
+  if (isLiveShareMode) {
+    const hasStream = isStudentCamera ? 
+      (studentPeerId === studentCameraPeerId ? !!studentCameraLocalStream : !!viewerStudentStreams.get(studentPeerId)) :
+      !!viewerCameraStream;
+
+    if (hasStream) {
+      overlay.style.display = 'none';
+    } else {
+      const emptyState = document.createElement('div');
+      emptyState.className = 'builder-camera-empty';
+      const title = document.createElement('strong');
+      title.textContent = isStudentCamera ? `Câmera de ${element.studentName || 'Aluno'}` : 'Aguardando professor';
+      const text = document.createElement('span');
+      text.textContent = isStudentCamera ? 'Tentando conectar à transmissão...' : 'A transmissão de câmera será iniciada em breve.';
+      emptyState.append(title, text);
+      overlay.appendChild(emptyState);
+    }
+  } else if (!session.stream || session.phase === 'error' || session.phase === 'requesting') {
+    const emptyState = document.createElement('div');
+    emptyState.className = 'builder-camera-empty';
+    const title = document.createElement('strong');
+    title.textContent = session.phase === 'error' ? 'Camera indisponivel' : 'Camera pronta para espelhar';
+    const text = document.createElement('span');
+    text.textContent = getViewerCameraStatusMessage(session);
+    emptyState.append(title, text);
+    if (session.phase !== 'requesting') {
+      const overlayStartButton = document.createElement('button');
+      overlayStartButton.type = 'button';
+      overlayStartButton.className = 'builder-camera-btn is-secondary builder-camera-empty-action';
+      overlayStartButton.textContent = session.phase === 'error' ? 'Tentar novamente' : 'Ativar camera';
+      overlayStartButton.disabled = session.phase === 'processing';
+      ['pointerdown', 'click'].forEach((eventName) => {
+        overlayStartButton.addEventListener(eventName, (event) => {
+          event.stopPropagation();
+        });
+      });
+      overlayStartButton.addEventListener('click', () => {
+        void requestViewerCameraStream(context, { restart: true }).catch(() => {});
+      });
+      emptyState.appendChild(overlayStartButton);
+    }
+    overlay.appendChild(emptyState);
+  }
+  node.appendChild(overlay);
+
+  const controls = document.createElement('div');
+  controls.className = 'builder-camera-controls';
+  ['pointerdown', 'click'].forEach((eventName) => {
+    controls.addEventListener(eventName, (event) => {
+      event.stopPropagation();
+    });
+  });
+
+  const status = document.createElement('div');
+  status.className = 'builder-camera-status';
+  if (session.phase === 'error') {
+    status.classList.add('is-error');
+  } else if (session.phase === 'recording') {
+    status.classList.add('is-recording');
+  }
+  status.textContent = getViewerCameraStatusMessage(session);
+  controls.appendChild(status);
+
+  const actions = document.createElement('div');
+  actions.className = 'builder-camera-actions';
+  controls.appendChild(actions);
+
+  const startButton = document.createElement('button');
+  startButton.type = 'button';
+  startButton.className = 'builder-camera-btn is-secondary';
+  startButton.textContent = session.stream ? 'Reconectar' : 'Ativar';
+  startButton.disabled = session.phase === 'requesting' || session.phase === 'processing';
+  startButton.addEventListener('click', () => {
+    void requestViewerCameraStream(context, { restart: true }).catch(() => {});
+  });
+  actions.appendChild(startButton);
+
+  const photoButton = document.createElement('button');
+  photoButton.type = 'button';
+  photoButton.className = 'builder-camera-btn';
+  photoButton.textContent = 'Foto';
+  photoButton.disabled = !session.stream || session.phase === 'requesting' || session.phase === 'processing' || session.phase === 'recording';
+  photoButton.addEventListener('click', () => {
+    void captureViewerCameraPhoto(element, slide).catch((error) => {
+      session.phase = 'error';
+      session.lastError = error?.message || 'Nao foi possivel capturar a foto.';
+      requestViewerCameraRender(context);
+    });
+  });
+  actions.appendChild(photoButton);
+
+  const recordButton = document.createElement('button');
+  recordButton.type = 'button';
+  recordButton.className = 'builder-camera-btn';
+  recordButton.textContent = 'Gravar';
+  recordButton.disabled = !session.stream || session.phase === 'requesting' || session.phase === 'processing' || session.phase === 'recording';
+  recordButton.addEventListener('click', () => {
+    void startViewerCameraRecording(element, slide).catch((error) => {
+      session.phase = 'error';
+      session.lastError = error?.message || 'Nao foi possivel iniciar a gravacao.';
+      requestViewerCameraRender(context);
+    });
+  });
+  actions.appendChild(recordButton);
+
+  const stopButton = document.createElement('button');
+  stopButton.type = 'button';
+  stopButton.className = 'builder-camera-btn is-danger';
+  stopButton.textContent = 'Parar';
+  stopButton.disabled = session.phase !== 'recording';
+  stopButton.addEventListener('click', () => {
+    void stopViewerCameraRecording(element, slide).catch((error) => {
+      session.phase = 'error';
+      session.lastError = error?.message || 'Nao foi possivel finalizar a gravacao.';
+      requestViewerCameraRender(context);
+    });
+  });
+  actions.appendChild(stopButton);
+
+  node.appendChild(controls);
+  return node;
+};
+
+const createViewerScreenShareNode = () => {
+  const node = document.createElement('div');
+  node.className = 'builder-camera-element';
+  node.style.background = '#000';
+
+  const video = document.createElement('video');
+  video.className = 'builder-camera-preview is-screen-share';
+  video.autoplay = true;
+  video.playsInline = true;
+  video.muted = false;
+  video.style.width = '100%';
+  video.style.height = '100%';
+  video.style.objectFit = 'contain';
+
+  if (viewerScreenStream) {
+    video.srcObject = viewerScreenStream;
+  }
+  node.appendChild(video);
+
+  const overlay = document.createElement('div');
+  overlay.className = 'builder-camera-overlay';
+  if (!viewerScreenStream) {
+    const emptyState = document.createElement('div');
+    emptyState.className = 'builder-camera-empty';
+    const title = document.createElement('strong');
+    title.textContent = 'Aguardando tela do professor';
+    const text = document.createElement('span');
+    text.textContent = 'A transmissão de tela será iniciada em breve.';
+    emptyState.append(title, text);
+    overlay.appendChild(emptyState);
+  } else {
+    overlay.style.display = 'none';
+  }
+  node.appendChild(overlay);
+  return node;
+};
+
 const normalizeAudioElement = (element) => {
   if (!element || element.type !== 'audio') {
     return;
@@ -530,17 +2017,17 @@ const normalizeInputElement = (element) => {
   element.submitLabel = typeof element.submitLabel === 'string' && element.submitLabel ? element.submitLabel : 'Enviar resposta';
   element.compareText = typeof element.compareText === 'string' ? element.compareText : '';
   element.compareCaseSensitive = Boolean(element.compareCaseSensitive);
-  element.compareImageEnabled = Boolean(element.compareImageEnabled);
-  element.compareImageReference = typeof element.compareImageReference === 'string' ? element.compareImageReference : '';
   element.successMessage = typeof element.successMessage === 'string' && element.successMessage ? element.successMessage : 'Resposta enviada com sucesso.';
   element.errorMessage = typeof element.errorMessage === 'string' && element.errorMessage ? element.errorMessage : 'A palavra não confere. Tente novamente.';
   element.allowImage = typeof element.allowImage === 'boolean' ? element.allowImage : true;
-  if (element.compareImageEnabled) {
-    element.allowImage = true;
-  }
-  element.allowAudio = Boolean(element.allowAudio);
-  const defaultHeight = element.compareImageEnabled && element.compareImageReference ? 190 : 88;
-  const minHeight = element.compareImageEnabled && element.compareImageReference ? 150 : 76;
+  element.allowAudio = typeof element.allowAudio === 'boolean' ? element.allowAudio : true;
+  element.backgroundColor = typeof element.backgroundColor === 'string' ? element.backgroundColor : '#ffffff';
+  element.labelColor = typeof element.labelColor === 'string' ? element.labelColor : '#9ca3af';
+  element.inputTextColor = typeof element.inputTextColor === 'string' ? element.inputTextColor : '#0f142c';
+  element.submitButtonColor = typeof element.submitButtonColor === 'string' ? element.submitButtonColor : '#6d63ff';
+  element.submitButtonTextColor = typeof element.submitButtonTextColor === 'string' ? element.submitButtonTextColor : '#ffffff';
+  const defaultHeight = 88;
+  const minHeight = 76;
   element.width = Math.max(260, Number(element.width) || 360);
   element.height = Math.max(minHeight, Number(element.height) || defaultHeight);
 };
@@ -754,8 +2241,103 @@ const createDefaultActionConfig = () => ({
   audioLoop: false
 });
 
+const KEY_TRIGGER_ALIAS_MAP = {
+  ' ': 'space',
+  spacebar: 'space',
+  space: 'space',
+  arrowleft: 'arrowleft',
+  left: 'arrowleft',
+  a: 'a',
+  arrowright: 'arrowright',
+  right: 'arrowright',
+  d: 'd',
+  arrowup: 'arrowup',
+  up: 'arrowup',
+  w: 'w',
+  arrowdown: 'arrowdown',
+  down: 'arrowdown',
+  s: 's',
+  enter: 'enter',
+  return: 'enter',
+  escape: 'escape',
+  esc: 'escape'
+};
+
+const KEY_TRIGGER_DIRECTION_MAP = {
+  arrowleft: 'left',
+  a: 'left',
+  arrowright: 'right',
+  d: 'right',
+  arrowup: 'up',
+  w: 'up',
+  arrowdown: 'down',
+  s: 'down'
+};
+
+const normalizeKeyBindingToken = (value = '') => {
+  const compact = String(value || '').trim().toLowerCase();
+  if (!compact) {
+    return '';
+  }
+  return KEY_TRIGGER_ALIAS_MAP[compact] || compact.replace(/\s+/g, '');
+};
+
+const normalizeKeyBindingList = (value) => {
+  const source = Array.isArray(value)
+    ? value
+    : String(value || '')
+      .split(/[,\n]+/)
+      .map((item) => item.trim());
+  return Array.from(
+    new Set(
+      source
+        .map((item) => normalizeKeyBindingToken(item))
+        .filter(Boolean)
+    )
+  );
+};
+
+const formatKeyBindingLabel = (binding = '') => {
+  const normalized = normalizeKeyBindingToken(binding);
+  if (!normalized) {
+    return '';
+  }
+  if (normalized === 'space') return 'SPACE';
+  if (normalized === 'arrowleft') return 'ARROW LEFT';
+  if (normalized === 'arrowright') return 'ARROW RIGHT';
+  if (normalized === 'arrowup') return 'ARROW UP';
+  if (normalized === 'arrowdown') return 'ARROW DOWN';
+  return normalized.toUpperCase();
+};
+
+const formatKeyBindingSummary = (bindings = []) => normalizeKeyBindingList(bindings).map((item) => formatKeyBindingLabel(item)).join(' / ');
+
+const getTriggerKeyBindings = (trigger) => normalizeKeyBindingList(trigger?.keys ?? trigger?.keyBindings ?? trigger?.keyBinding ?? trigger?.key ?? []);
+
+const isKeyTriggerVisible = (trigger) => Boolean(trigger?.visibleKey ?? trigger?.showKey ?? trigger?.keyVisible);
+
+const normalizeKeyboardEventBinding = (event) => normalizeKeyBindingToken(event?.key || event?.code || '');
+
+const getKeyTriggerDirection = (trigger) => {
+  const config = trigger?.actionConfig || {};
+  if ((config.type || 'none') !== 'moveElement') {
+    return '';
+  }
+  const moveX = Number(config.moveByX) || 0;
+  const moveY = Number(config.moveByY) || 0;
+  if (moveX < 0 && moveY === 0) return 'left';
+  if (moveX > 0 && moveY === 0) return 'right';
+  if (moveX === 0 && moveY < 0) return 'up';
+  if (moveX === 0 && moveY > 0) return 'down';
+  const firstBinding = getTriggerKeyBindings(trigger)[0] || '';
+  return KEY_TRIGGER_DIRECTION_MAP[firstBinding] || '';
+};
+
+const triggerMatchesKeyboardBinding = (trigger, binding) =>
+  Boolean(binding) && getTriggerKeyBindings(trigger).includes(binding);
+
 const normalizeInteractionTriggers = (element) => {
-  if (!element || !['floatingButton', 'detector', 'timedTrigger'].includes(element.type)) {
+  if (!element || !['floatingButton', 'detector', 'timedTrigger', 'input', 'key'].includes(element.type)) {
     return [];
   }
   const sourceTriggers = Array.isArray(element.interactionTriggers) ? element.interactionTriggers : [];
@@ -765,9 +2347,11 @@ const normalizeInteractionTriggers = (element) => {
     name:
       typeof trigger?.name === 'string' && trigger.name.trim()
         ? trigger.name.trim()
-        : `${element.type === 'detector' ? 'Gatilho' : element.type === 'timedTrigger' ? 'Tempo' : 'Acao'} ${index + 1}`,
+        : `${element.type === 'detector' ? 'Gatilho' : element.type === 'timedTrigger' ? 'Tempo' : element.type === 'input' ? 'Envio' : element.type === 'key' ? 'Tecla' : 'Acao'} ${index + 1}`,
     enabled: typeof trigger?.enabled === 'boolean' ? trigger.enabled : true,
     time: Math.max(0, Number(trigger?.time ?? trigger?.triggerTime) || 0),
+    keys: getTriggerKeyBindings(trigger),
+    visibleKey: element.type === 'key' ? isKeyTriggerVisible(trigger) : false,
     actionConfig: normalizeRuntimeActionConfig((() => {
       const rawConfig = trigger?.actionConfig && typeof trigger.actionConfig === 'object' ? trigger.actionConfig : trigger || {};
       const preferredQuizOptions = getMeaningfulQuizOptionsSource(rawConfig, index === 0 ? legacyConfig : {});
@@ -779,6 +2363,41 @@ const normalizeInteractionTriggers = (element) => {
   }));
   element.actionConfig = element.interactionTriggers[0]?.actionConfig || normalizeRuntimeActionConfig(createDefaultActionConfig());
   return element.interactionTriggers;
+};
+
+const normalizeKeyElement = (element) => {
+  if (!element || element.type !== 'key') {
+    return;
+  }
+  element.width = Math.max(140, Number(element.width) || 220);
+  element.height = Math.max(72, Number(element.height) || 86);
+  element.shape = element.shape || 'rectangle';
+  element.fontSize = Math.max(12, Number(element.fontSize) || 18);
+  element.fontFamily = element.fontFamily || 'Inter, sans-serif';
+  element.fontWeight = element.fontWeight || '700';
+  element.useGradient = Boolean(element.useGradient);
+  element.backgroundColor = element.backgroundColor || '#2563eb';
+  element.solidColor = element.solidColor || element.backgroundColor || '#2563eb';
+  element.textColor = element.textColor || '#ffffff';
+  normalizeInteractionTriggers(element);
+  if (!(element.interactionTriggers || []).some((trigger) => getTriggerKeyBindings(trigger).length)) {
+    if (!Array.isArray(element.interactionTriggers) || !element.interactionTriggers.length) {
+      element.interactionTriggers = [
+        {
+          id: `${element.id || 'key'}-trigger-1`,
+          name: 'Tecla 1',
+          enabled: true,
+          time: 0,
+          keys: ['space'],
+          visibleKey: false,
+          actionConfig: normalizeRuntimeActionConfig(createDefaultActionConfig())
+        }
+      ];
+    } else {
+      element.interactionTriggers[0].keys = ['space'];
+    }
+    element.actionConfig = element.interactionTriggers[0]?.actionConfig || normalizeRuntimeActionConfig(createDefaultActionConfig());
+  }
 };
 
 const normalizeVideoTriggers = (element) => {
@@ -1330,11 +2949,75 @@ const getInputResponseState = (moduleId, slideKey, elementId, module = getCurren
   return entry && typeof entry === 'object' ? entry : null;
 };
 
+const persistCameraCaptureToBackend = async ({ module, slide, element, image = '', video = '' }) => {
+  if (viewerState.isPublic || isReplayMode() || !module?.courseId || !slide || !element?.id) {
+    return { ok: false };
+  }
+  const slideKey = getStableSlideKey(slide, viewerState.slideIndex);
+  const payload = {
+    key: getInputResponseKey(module.id, slideKey, element.id),
+    moduleId: module.id,
+    moduleTitle: module.title,
+    slideId: slideKey,
+    slideTitle: slide?.title || '',
+    elementId: element.id,
+    elementType: 'camera',
+    text: '',
+    image,
+    audio: '',
+    video,
+    matched: true
+  };
+  try {
+    const progressResponse = await authorizedFetch('/api/student/progress', {
+      method: 'POST',
+      body: JSON.stringify({
+        courseId: module.courseId,
+        type: 'interactive',
+        currentModule: module.title,
+        grade: getModuleQuizMetrics(module).gradePercent,
+        interactiveProgress: getModuleInteractiveProgress(module),
+        inputResponse: payload,
+        progressEvent: {
+          type: 'camera_capture',
+          slideId: payload.slideId,
+          slideTitle: payload.slideTitle,
+          elementId: element.id,
+          elementType: 'camera',
+          summary: video
+            ? `Gravou um video na camera em "${slide?.title || payload.slideId}".`
+            : `Tirou uma foto na camera em "${slide?.title || payload.slideId}".`,
+          details: {
+            matched: true,
+            hasImage: Boolean(image),
+            hasAudio: false,
+            hasVideo: Boolean(video),
+            mediaType: video ? 'video' : 'image',
+            mediaUrl: video || image || ''
+          }
+        }
+      })
+    });
+    const result = await progressResponse.json().catch(() => null);
+    if (progressResponse.ok) {
+      syncCourseProgressState(module.courseId, {
+        interactive_progress: result?.interactiveProgress || getCourseProgressState(module).interactive_progress,
+        interactive_step: result?.interactiveStep || getCourseProgressState(module).interactive_step,
+        input_responses: result?.inputResponses || getCourseProgressState(module).input_responses
+      });
+      return { ok: true, result };
+    }
+  } catch (error) {
+    console.error('Nao foi possivel salvar a captura da camera.', error);
+  }
+  return { ok: false };
+};
+
 const syncViewerFloatingRuleButtonState = (module, slide, elementId) => {
   if (!slide || !elementId) {
     return;
   }
-  const element = slide.elements?.find((item) => item?.id === elementId && item.type === 'floatingButton');
+  const element = slide.elements?.find((item) => item?.id === elementId && ['floatingButton', 'key'].includes(item.type));
   const node = findStageNodeByElementId(elementId);
   if (!element || !node) {
     return;
@@ -1350,7 +3033,9 @@ const syncViewerFloatingRuleButtonState = (module, slide, elementId) => {
     const clickedIds = new Set(Array.isArray(ruleState?.clickedButtonIds) ? ruleState.clickedButtonIds : []);
     return clickedIds.has(elementId);
   });
-  node.classList.toggle('floating-button-completed', isCompleted);
+  if (element.type === 'floatingButton') {
+    node.classList.toggle('floating-button-completed', isCompleted);
+  }
 };
 
 const getSlideProgressSnapshot = (module, slide, slideIndex = viewerState.slideIndex) => {
@@ -1370,10 +3055,10 @@ const getSlideProgressSnapshot = (module, slide, slideIndex = viewerState.slideI
 };
 
 const hasAnsweredRequiredQuizzes = (module, slide, slideIndex = viewerState.slideIndex) => {
-  if (!slide?.requireQuizCompletion) {
+  if (!module?.builder_data?.moduleSettings?.requireQuizCompletion) {
     return true;
   }
-  const quizzes = (slide.elements || []).filter((element) => element.type === 'quiz');
+  const quizzes = (slide?.elements || []).filter((element) => element.type === 'quiz');
   if (!quizzes.length) {
     return true;
   }
@@ -1615,7 +3300,7 @@ const registerFloatingRuleClick = (module, slide, element, trigger) => {
   }
   const slideKey = getStableSlideKey(slide, viewerState.slideIndex);
   const requiredButtons = (slide.elements || []).filter((item) => {
-    if (item?.type !== 'floatingButton' || !item?.id) {
+    if (!['floatingButton', 'key'].includes(item?.type) || !item?.id) {
       return false;
     }
     normalizeInteractionTriggers(item);
@@ -2021,56 +3706,34 @@ const readLocalFileAsDataUrl = (file) =>
     reader.readAsDataURL(file);
   });
 
-const compareInputImageWithReference = async ({ referenceImage, submittedImage }) => {
-  const response = await authorizedFetch('/api/student/input/compare-image', {
-    method: 'POST',
-    body: JSON.stringify({
-      referenceImage,
-      submittedImage
-    })
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    throw new Error(payload?.message || 'Nao foi possivel comparar as imagens.');
-  }
-  return {
-    matched: Boolean(payload?.matched),
-    confidence: Math.max(0, Math.min(1, Number(payload?.confidence) || 0)),
-    reason: String(payload?.reason || '').trim()
-  };
-};
-
 const createInputElementNode = (element, slide, { runActions = null } = {}) => {
   normalizeInputElement(element);
   normalizeInteractionTriggers(element);
-  const hasCompareText = Boolean(String(element.compareText || '').trim());
-  const showTextField = !element.compareImageEnabled || hasCompareText;
-  const referencePreview = element.compareImageEnabled && element.compareImageReference
-    ? `<div class="builder-input-reference">
-        <span class="builder-input-reference-label">Referencia visual</span>
-        <img src="${escapeAttribute(element.compareImageReference)}" alt="Imagem de referencia" class="builder-input-reference-image" />
-      </div>`
-    : '';
-  const textFieldMarkup = showTextField
-    ? `<textarea class="builder-input-text" placeholder="${escapeHtml(element.placeholder || 'Digite sua resposta')}"></textarea>`
-    : `<div class="builder-input-text builder-input-text-passive">Envie uma imagem para validar</div>`;
+  const module = getCurrentModule();
+  const slideKey = getStableSlideKey(slide, viewerState.slideIndex);
+  const savedResponse = module?.id ? getInputResponseState(module.id, slideKey, element.id, module) : null;
+  const isStaticMode = isReplayMode();
+  const inputBgColor = element.backgroundColor || '#ffffff';
+  const inputTextColor = element.inputTextColor || '#0f142c';
+  const placeholderColor = element.labelColor || '#9ca3af';
+  const buttonBgColor = element.submitButtonColor || '#6d63ff';
+  const buttonTextColor = element.submitButtonTextColor || '#ffffff';
   const node = document.createElement('div');
   node.className = 'builder-input-element';
   node.innerHTML = `
-    ${referencePreview}
     <div class="builder-input-composer">
       <div class="builder-input-composer-main">
-        ${textFieldMarkup}
+        <textarea class="builder-input-text" style="background-color: ${inputBgColor}; color: ${inputTextColor}; --placeholder-color: ${placeholderColor};" placeholder="${escapeHtml(element.placeholder || 'Digite sua resposta')}"></textarea>
       </div>
-      <div class="builder-input-composer-actions">
+      <div class="builder-input-composer-actions ${isStaticMode ? 'hidden' : ''}">
         <button type="button" class="secondary-btn builder-input-upload builder-input-upload-icon builder-input-image-btn ${element.allowImage ? '' : 'hidden'}" aria-label="Anexar imagem" title="Anexar imagem">+</button>
         <button type="button" class="secondary-btn builder-input-upload builder-input-upload-icon builder-input-audio-btn ${element.allowAudio ? '' : 'hidden'}" aria-label="Anexar audio" title="Anexar audio">Mic</button>
-        <button type="button" class="primary-btn builder-input-submit" aria-label="${escapeAttribute(element.submitLabel || 'Enviar resposta')}" title="${escapeAttribute(element.submitLabel || 'Enviar resposta')}">
+        <button type="button" class="primary-btn builder-input-submit" style="background-color: ${buttonBgColor}; color: ${buttonTextColor};" aria-label="${escapeAttribute(element.submitLabel || 'Enviar resposta')}" title="${escapeAttribute(element.submitLabel || 'Enviar resposta')}">
           <span class="builder-input-submit-icon" aria-hidden="true">➤</span>
         </button>
       </div>
     </div>
-    <input class="builder-input-image-file hidden" type="file" accept="image/*" />
+    <input class="builder-input-image-file hidden" type="file" accept="image/*" capture="environment" />
     <input class="builder-input-audio-file hidden" type="file" accept="audio/*" />
     <div class="builder-input-preview hidden"></div>
     <div class="builder-input-feedback" aria-live="polite"></div>
@@ -2084,13 +3747,26 @@ const createInputElementNode = (element, slide, { runActions = null } = {}) => {
   const feedbackNode = node.querySelector('.builder-input-feedback');
   const submitBtn = node.querySelector('.builder-input-submit');
   const state = {
-    image: '',
-    audio: ''
+    image: savedResponse?.image || '',
+    audio: savedResponse?.audio || ''
+  };
+  const audioCaptureState = {
+    recorder: null,
+    stream: null,
+    chunks: [],
+    stopPromise: null
   };
   const setFileInputValue = (control, value = '') => {
     if (control instanceof HTMLInputElement) {
       control.value = value;
     }
+  };
+  const setFeedback = (message = '', tone = '') => {
+    if (!feedbackNode) {
+      return;
+    }
+    feedbackNode.textContent = message;
+    feedbackNode.className = tone ? `builder-input-feedback ${tone}` : 'builder-input-feedback';
   };
   const refreshPreview = () => {
     if (!previewNode) {
@@ -2106,105 +3782,178 @@ const createInputElementNode = (element, slide, { runActions = null } = {}) => {
     previewNode.innerHTML = parts.join('');
     previewNode.classList.toggle('hidden', parts.length === 0);
   };
+  const stopAudioStream = () => {
+    if (audioCaptureState.stream instanceof MediaStream) {
+      audioCaptureState.stream.getTracks().forEach((track) => track.stop());
+    }
+    audioCaptureState.stream = null;
+  };
+  const resetAudioCaptureState = () => {
+    audioCaptureState.recorder = null;
+    audioCaptureState.chunks = [];
+    audioCaptureState.stopPromise = null;
+    stopAudioStream();
+  };
+  const updateAudioButtonState = () => {
+    if (!(audioBtn instanceof HTMLButtonElement)) {
+      return;
+    }
+    const isRecording = Boolean(audioCaptureState.recorder && audioCaptureState.recorder.state === 'recording');
+    audioBtn.textContent = isRecording ? 'Parar' : 'Mic';
+    audioBtn.classList.toggle('is-recording', isRecording);
+    audioBtn.disabled = !element.allowAudio || isStaticMode;
+  };
+  const getAudioRecorderMimeType = () => {
+    if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') {
+      return '';
+    }
+    return (
+      ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'].find((candidate) =>
+        MediaRecorder.isTypeSupported(candidate)
+      ) || ''
+    );
+  };
+  const stopAudioRecording = async () => {
+    const recorder = audioCaptureState.recorder;
+    const stopPromise = audioCaptureState.stopPromise;
+    if (!recorder || !stopPromise) {
+      return;
+    }
+    if (recorder.state !== 'inactive') {
+      recorder.stop();
+    }
+    await stopPromise;
+    const audioBlob = new Blob(audioCaptureState.chunks, { type: recorder.mimeType || 'audio/webm' });
+    resetAudioCaptureState();
+    updateAudioButtonState();
+    if (!audioBlob.size) {
+      setFeedback('Nao foi possivel preparar o audio gravado.', 'error');
+      return;
+    }
+    state.audio = await readBlobAsDataUrl(audioBlob).catch(() => '');
+    refreshPreview();
+    setFeedback(state.audio ? 'Audio gravado e pronto para enviar.' : 'Nao foi possivel preparar o audio gravado.', state.audio ? '' : 'error');
+  };
+  const startAudioRecording = async () => {
+    if (
+      isStaticMode ||
+      !element.allowAudio ||
+      typeof MediaRecorder === 'undefined' ||
+      !navigator.mediaDevices ||
+      typeof navigator.mediaDevices.getUserMedia !== 'function'
+    ) {
+      setFileInputValue(audioInput);
+      audioInput?.click();
+      return;
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = getAudioRecorderMimeType();
+    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    audioCaptureState.stream = stream;
+    audioCaptureState.recorder = recorder;
+    audioCaptureState.chunks = [];
+    audioCaptureState.stopPromise = new Promise((resolve, reject) => {
+      recorder.addEventListener('stop', resolve, { once: true });
+      recorder.addEventListener('error', () => reject(new Error('Nao foi possivel gravar o audio.')), { once: true });
+    });
+    recorder.ondataavailable = (event) => {
+      if (event.data && event.data.size > 0) {
+        audioCaptureState.chunks.push(event.data);
+      }
+    };
+    recorder.start(200);
+    updateAudioButtonState();
+    setFeedback('Gravando audio. Clique novamente para parar.');
+  };
+  if (textArea instanceof HTMLTextAreaElement) {
+    textArea.value = savedResponse?.text || '';
+  }
+  refreshPreview();
+  if (savedResponse) {
+    if (savedResponse.matched === true) {
+      setFeedback(element.successMessage, 'success');
+    } else if (savedResponse.matched === false) {
+      setFeedback(element.errorMessage, 'error');
+    }
+  } else if (isStaticMode) {
+    setFeedback('Nenhuma resposta registrada neste input.');
+  }
+  updateAudioButtonState();
   imageBtn?.addEventListener('click', () => {
+    if (isStaticMode) {
+      return;
+    }
     setFileInputValue(imageInput);
     imageInput?.click();
   });
-  audioBtn?.addEventListener('click', () => {
-    setFileInputValue(audioInput);
-    audioInput?.click();
+  audioBtn?.addEventListener('click', async () => {
+    if (isStaticMode) {
+      return;
+    }
+    try {
+      if (audioCaptureState.recorder && audioCaptureState.recorder.state === 'recording') {
+        await stopAudioRecording();
+        return;
+      }
+      await startAudioRecording();
+    } catch (error) {
+      resetAudioCaptureState();
+      updateAudioButtonState();
+      setFeedback(error?.message || 'Nao foi possivel acessar o microfone.', 'error');
+    }
   });
   imageInput?.addEventListener('change', async () => {
+    if (isStaticMode) return;
     const file = imageInput.files?.[0];
     if (!file) return;
     state.image = await readLocalFileAsDataUrl(file).catch(() => '');
     setFileInputValue(imageInput);
     refreshPreview();
+    setFeedback(state.image ? 'Imagem pronta para enviar.' : 'Nao foi possivel preparar a imagem.', state.image ? '' : 'error');
   });
   audioInput?.addEventListener('change', async () => {
+    if (isStaticMode) return;
     const file = audioInput.files?.[0];
     if (!file) return;
     state.audio = await readLocalFileAsDataUrl(file).catch(() => '');
     setFileInputValue(audioInput);
     refreshPreview();
+    setFeedback(state.audio ? 'Audio pronto para enviar.' : 'Nao foi possivel preparar o audio.', state.audio ? '' : 'error');
   });
+  if (isStaticMode) {
+    node.classList.add('is-static');
+    if (textArea instanceof HTMLTextAreaElement) {
+      textArea.readOnly = true;
+      textArea.tabIndex = -1;
+    }
+    if (submitBtn instanceof HTMLButtonElement) {
+      submitBtn.disabled = true;
+      submitBtn.tabIndex = -1;
+    }
+    return node;
+  }
   submitBtn?.addEventListener('click', async () => {
-    if (showTextField && (!(textArea instanceof HTMLTextAreaElement) || !(submitBtn instanceof HTMLButtonElement))) {
+    if (!(textArea instanceof HTMLTextAreaElement) || !(submitBtn instanceof HTMLButtonElement)) {
+      return;
+    }
+    if (audioCaptureState.recorder && audioCaptureState.recorder.state === 'recording') {
+      setFeedback('Finalize a gravacao do audio antes de enviar.', 'error');
       return;
     }
     const submittedText = textArea instanceof HTMLTextAreaElement ? textArea.value : '';
     const expected = normalizeInputCompareValue(element.compareText || '', Boolean(element.compareCaseSensitive));
     const received = normalizeInputCompareValue(submittedText, Boolean(element.compareCaseSensitive));
     const textMatched = !expected || received === expected;
-    let imageMatched = true;
-    let imageCompareReason = '';
-    let imageCompareConfidence = 0;
-
-    if (element.compareImageEnabled) {
-      if (!state.image) {
-        feedbackNode.textContent = 'Anexe uma imagem para validar sua resposta.';
-        feedbackNode.className = 'builder-input-feedback error';
-        playWrongAnswerSound();
-        await persistInputResponseToBackend({
-          module: getCurrentModule(),
-          slide,
-          element,
-          response: {
-            text: submittedText,
-            image: '',
-            audio: state.audio,
-            textMatched,
-            imageMatched: false
-          },
-          matched: false
-        });
-        return;
-      }
-      if (!element.compareImageReference || viewerState.isPublic || isReplayMode()) {
-        imageMatched = false;
-        imageCompareReason = 'A comparacao visual nao esta disponivel neste modo.';
-      } else if (textMatched) {
-        submitBtn.disabled = true;
-        submitBtn.textContent = 'Comparando...';
-        try {
-          const compareResult = await compareInputImageWithReference({
-            referenceImage: element.compareImageReference,
-            submittedImage: state.image
-          });
-          imageMatched = Boolean(compareResult.matched);
-          imageCompareReason = compareResult.reason || '';
-          imageCompareConfidence = compareResult.confidence || 0;
-        } catch (error) {
-          feedbackNode.textContent = error.message || 'Nao foi possivel validar a imagem.';
-          feedbackNode.className = 'builder-input-feedback error';
-          submitBtn.disabled = false;
-          submitBtn.textContent = element.submitLabel || 'Enviar resposta';
-          return;
-        }
-        submitBtn.disabled = false;
-        submitBtn.textContent = element.submitLabel || 'Enviar resposta';
-      }
-    }
-
-    const matched = textMatched && imageMatched;
-    if (feedbackNode) {
-      feedbackNode.textContent = matched
-        ? element.successMessage
-        : imageCompareReason || element.errorMessage;
-      feedbackNode.className = `builder-input-feedback ${matched ? 'success' : 'error'}`;
-    }
+    const matched = textMatched;
+    setFeedback(matched ? element.successMessage : element.errorMessage, matched ? 'success' : 'error');
     await persistInputResponseToBackend({
-      module: getCurrentModule(),
+      module,
       slide,
       element,
       response: {
         text: submittedText,
         image: state.image,
-        audio: state.audio,
-        textMatched,
-        imageMatched,
-        imageCompareReason,
-        imageCompareConfidence
+        audio: state.audio
       },
       matched
     });
@@ -2214,10 +3963,7 @@ const createInputElementNode = (element, slide, { runActions = null } = {}) => {
         image: state.image,
         audio: state.audio,
         matched,
-        textMatched,
-        imageMatched,
-        imageCompareReason,
-        imageCompareConfidence
+        textMatched
       });
       playCorrectAnswerSound();
     } else {
@@ -2281,27 +4027,6 @@ const legacyCanAdvanceFromCurrentSlide = (targetIndex) => {
     return false;
   }
   return true;
-  if (!currentSlide.requireQuizCompletion) {
-    return true;
-  }
-  const quizzes = (currentSlide.elements || []).filter((element) => element.type === 'quiz');
-  if (!quizzes.length) {
-    return true;
-  }
-  const pendingQuiz = quizzes.find((quiz) => {
-    const quizIndex = quizzes.indexOf(quiz);
-    const attempt = getQuizAttemptState(
-      module.id,
-      getStableSlideKey(currentSlide, viewerState.slideIndex),
-      getStableQuizKey(quiz, quizIndex)
-    );
-    return !attempt?.answered;
-  });
-  if (!pendingQuiz) {
-    return true;
-  }
-  alert('Conclua o quiz deste slide antes de avançar.');
-  return false;
 };
 
 const canAdvanceFromCurrentSlide = (targetIndex) => {
@@ -2342,18 +4067,21 @@ const fitStageToViewport = (size) => {
   const safeSize = size?.width && size?.height ? size : DEFAULT_STAGE_SIZE;
   const stageShell = moduleStage.closest('.stage-shell');
   const stageHeader = stageShell?.querySelector('.stage-header');
+  const stageOrientationPrompt = stageShell?.querySelector('.orientation-prompt:not(.hidden)');
   const shellWidth = stageShell?.clientWidth || moduleStage.parentElement?.clientWidth || safeSize.width;
   const shellHeight = stageShell?.clientHeight || window.innerHeight;
   const isFullscreen = document.fullscreenElement === stageShell;
-  const headerHeight = stageHeader?.offsetHeight || 0;
-  const horizontalPadding = isFullscreen ? 16 : 0;
-  const verticalGap = isFullscreen ? 16 : 36;
+  const isMobilePortraitLayout = Boolean(stageShell?.classList.contains('mobile-portrait-layout'));
+  const headerHeight = (isFullscreen && !isMobilePortraitLayout) ? 0 : (stageHeader?.offsetHeight || 0);
+  const promptHeight = isMobilePortraitLayout ? (stageOrientationPrompt?.offsetHeight || 0) : 0;
+  const horizontalPadding = isFullscreen ? 8 : 0;
+  const verticalGap = isFullscreen ? (isMobilePortraitLayout ? 16 : 8) : 36;
   const availableWidth = Math.max(320, shellWidth - horizontalPadding);
   const viewportLimit = Math.max(
     320,
     isFullscreen
-      ? shellHeight - headerHeight - verticalGap
-      : Math.min(shellHeight - headerHeight - 24, window.innerHeight - 260)
+      ? shellHeight - headerHeight - promptHeight - verticalGap
+      : Math.min(shellHeight - headerHeight - promptHeight - 24, window.innerHeight - 260)
   );
   const aspectRatio = safeSize.width / safeSize.height;
 
@@ -2408,6 +4136,18 @@ const ensureStageContentWrapper = () => {
 };
 
 const updateStageScale = () => {
+  if (viewerResizeSyncFrame != null) {
+    cancelAnimationFrame(viewerResizeSyncFrame);
+  }
+  viewerResizeSyncFrame = requestAnimationFrame(() => {
+    viewerResizeSyncFrame = requestAnimationFrame(() => {
+      viewerResizeSyncFrame = null;
+      performStageScaleUpdate();
+    });
+  });
+};
+
+const performStageScaleUpdate = () => {
   const wrapper = ensureStageContentWrapper();
   if (!wrapper || !moduleStage) return;
   const size = getStageSize();
@@ -2419,10 +4159,18 @@ const updateStageScale = () => {
   const widthScale = size.width ? availableWidth / size.width : 1;
   const heightScale = size.height ? availableHeight / size.height : 1;
   const scale = Math.min(widthScale, heightScale);
-  wrapper.style.transform = `scale(${scale})`;
-  wrapper.style.left = '0';
-  wrapper.style.top = '0';
+  
+  // Evita loops infinitos se a mudanca for insignificante (menos de 0.1%)
+  if (viewerStageZoomState.baseScale && Math.abs(viewerStageZoomState.baseScale - scale) < 0.001) {
+    return;
+  }
+
+  viewerStageZoomState.baseScale = scale;
+  const baseOffset = getViewerStageBaseOffset();
+  wrapper.style.left = `${baseOffset.left}px`;
+  wrapper.style.top = `${baseOffset.top}px`;
   moduleStage.style.setProperty('--module-stage-aspect', `${size.width} / ${size.height}`);
+  applyViewerStageZoomTransform();
 };
 
 const buildBackgroundStyle = (element) => {
@@ -2686,7 +4434,16 @@ const playWrongAnswerSound = () => {
   });
 };
 
-const getCurrentModule = () => viewerModules.find((mod) => mod.id === viewerState.moduleId);
+const getCurrentModule = () => {
+  if (isLiveShareMode()) {
+    return viewerModules[0] || null;
+  }
+  if (viewerState.moduleId) {
+    const found = viewerModules.find((mod) => mod.id === viewerState.moduleId);
+    if (found) return found;
+  }
+  return viewerModules[viewerState.moduleIndex || 0] || null;
+};
 
 const getYouTubeEmbedUrl = (value) => {
   if (!value) return null;
@@ -3502,6 +5259,10 @@ const applyModuleStageDimensions = (size) => {
 
 const clearStage = (message) => {
   if (!moduleStage) return;
+  viewerState.penToolActive = false;
+  viewerState.penSettingsTouched = false;
+  resetViewerStageZoom();
+  destroyViewerPenOverlay();
   viewerTimedVideoTriggers.clear();
   viewerMediaState.clear();
   clearTimedViewerSlideTriggerTimers();
@@ -3527,6 +5288,281 @@ const clearStage = (message) => {
   if (wrapper) {
     wrapper.innerHTML = '';
     wrapper.style.transform = '';
+  }
+  updateViewerPenToolState(null);
+};
+
+const syncViewerToLiveShareSlide = (module) => {
+  const activeSlideId = module?.liveShare?.activeSlideId;
+  const slides = Array.isArray(module?.builder_data?.slides) ? module.builder_data.slides : [];
+  if (!activeSlideId || !slides.length) {
+    return;
+  }
+  const activeIndex = slides.findIndex((slide) => slide?.id === activeSlideId);
+  if (activeIndex >= 0) {
+    viewerState.slideIndex = activeIndex;
+  }
+};
+
+let viewerCameraPeer = null;
+let viewerCameraMediaConn = null;
+let viewerCameraStream = null;
+
+let viewerScreenPeer = null;
+let viewerScreenMediaConn = null;
+let viewerScreenStream = null;
+
+let studentCameraPeer = null;
+let studentCameraPeerId = null;
+let studentCameraLocalStream = null;
+const viewerStudentStreams = new Map();
+const studentPeerRefs = new Map();
+
+const connectViewerPeer = (peerId, onStream, peerRef, mediaConnRef) => {
+  if (peerRef.current && !peerRef.current.disconnected && mediaConnRef.current?.peer === peerId) return;
+  if (peerRef.current) peerRef.current.destroy();
+  const peer = new Peer();
+  peerRef.current = peer;
+  peer.on('open', () => {
+    mediaConnRef.current = peer.connect(peerId);
+  });
+  peer.on('call', (call) => {
+    call.answer();
+    call.on('stream', onStream);
+  });
+  peer.on('error', (err) => console.warn('PeerJS viewer error:', err));
+};
+
+// Wrapper refs for mutable peer references
+const cameraPeerRef = { current: null };
+const cameraConnRef = { current: null };
+const screenPeerRef = { current: null };
+const screenConnRef = { current: null };
+
+const syncLiveScreenShare = (cameraPeerId, screenPeerId) => {
+  // --- Camera ---
+  if (!cameraPeerId) {
+    viewerCameraStream = null;
+    if (cameraPeerRef.current) { cameraPeerRef.current.destroy(); cameraPeerRef.current = null; }
+    cameraConnRef.current = null;
+  } else {
+    connectViewerPeer(cameraPeerId,
+      (stream) => { viewerCameraStream = stream; if (viewerModules?.length > 0) renderSlide(getCurrentSlide()); },
+      cameraPeerRef, cameraConnRef
+    );
+  }
+  // --- Screen ---
+  if (!screenPeerId) {
+    viewerScreenStream = null;
+    if (screenPeerRef.current) { screenPeerRef.current.destroy(); screenPeerRef.current = null; }
+    screenConnRef.current = null;
+  } else {
+    connectViewerPeer(screenPeerId,
+      (stream) => { viewerScreenStream = stream; if (viewerModules?.length > 0) renderSlide(getCurrentSlide()); },
+      screenPeerRef, screenConnRef
+    );
+  }
+  // Re-render after clearing streams
+  if (!cameraPeerId && !screenPeerId && viewerModules?.length > 0) renderSlide(getCurrentSlide());
+};
+
+const applyLiveStageModule = (module) => {
+  if (!module) {
+    return;
+  }
+  
+  const oldDataStr = JSON.stringify(viewerModules?.[0]?.builder_data || {});
+  const newDataStr = JSON.stringify(module?.builder_data || {});
+  const dataChanged = oldDataStr !== newDataStr;
+  
+  const oldSlideId = getCurrentSlide()?.id;
+  const newSlideId = module?.liveShare?.activeSlideId;
+  const slideChanged = oldSlideId !== newSlideId;
+
+  viewerModules = [module];
+  viewerState.moduleId = module.id;
+  viewerState.courseId = module.courseId;
+  viewerState.liveShareRevision = Number(module.liveShare?.revision) || viewerState.liveShareRevision || 0;
+  
+  syncViewerToLiveShareSlide(module);
+  syncLiveScreenShare(
+    module?.builder_data?.liveCameraPeerId,
+    module?.builder_data?.liveScreenPeerId
+  );
+  syncViewerDetachedLiveStrokes(module);
+  syncViewerLiveDrawingStrokes(module);
+  
+  if (dataChanged || slideChanged) {
+    renderModuleList();
+    loadModule(viewerModules);
+  } else if (module?.liveShare?.drawingStrokes?.length > 0) {
+    const currentSlide = getCurrentSlide();
+    if (currentSlide) {
+      redrawAllViewerPenOverlays(currentSlide);
+    }
+  }
+};
+
+const stopLiveStagePolling = () => {
+  if (liveStagePollTimer) {
+    clearInterval(liveStagePollTimer);
+    liveStagePollTimer = null;
+  }
+};
+
+const startLiveStagePolling = () => {
+  stopLiveStagePolling();
+  if (!viewerState.liveShareId) {
+    return;
+  }
+  liveStagePollTimer = setInterval(async () => {
+    try {
+      const liveModule = await fetchLiveStageModule(viewerState.liveShareId);
+      const nextRevision = Number(liveModule?.liveShare?.revision) || 0;
+      if (nextRevision > viewerState.liveShareRevision) {
+        applyLiveStageModule(liveModule);
+      }
+    } catch (error) {
+      if (error.message.includes('não encontrado') || error.message.includes('404')) {
+        handleLiveSessionEnded();
+        return;
+      }
+      console.warn('Falha ao atualizar palco ao vivo', error);
+    }
+  }, 1000);
+
+  const liveControls = document.getElementById('liveStudentControls');
+  if (liveControls) {
+    liveControls.classList.remove('hidden');
+  }
+};
+
+const connectToStudentPeer = (peerId) => {
+  if (studentPeerRefs.has(peerId)) return;
+  
+  const peer = new Peer();
+  studentPeerRefs.set(peerId, peer);
+  
+  peer.on('open', () => {
+    peer.connect(peerId);
+  });
+  
+  peer.on('call', (call) => {
+    call.answer();
+    call.on('stream', (stream) => {
+      viewerStudentStreams.set(peerId, stream);
+      if (viewerModules?.length > 0) renderSlide(getCurrentSlide());
+    });
+  });
+  
+  peer.on('error', (err) => {
+    console.warn(`Erro ao conectar com aluno ${peerId}:`, err);
+    studentPeerRefs.delete(peerId);
+  });
+};
+
+const handleLiveSessionEnded = () => {
+  stopLiveStagePolling();
+  
+  if (studentCameraLocalStream) {
+    studentCameraLocalStream.getTracks().forEach(track => track.stop());
+    studentCameraLocalStream = null;
+  }
+  
+  if (studentCameraPeer) {
+    studentCameraPeer.destroy();
+    studentCameraPeer = null;
+  }
+  
+  viewerStudentStreams.forEach(stream => {
+    if (stream && stream.getTracks) stream.getTracks().forEach(t => t.stop());
+  });
+  viewerStudentStreams.clear();
+  
+  studentPeerRefs.forEach(peer => {
+    if (peer && !peer.destroyed) peer.destroy();
+  });
+  studentPeerRefs.clear();
+
+  alert('A sessão ao vivo foi encerrada pelo professor.');
+  
+  // Se estiver num link direto de live, volta pro portal. Caso contrário, recarrega.
+  if (viewerState.liveShareId && window.location.search.includes('liveShareId')) {
+    window.location.href = 'portal.html';
+  } else {
+    window.location.reload();
+  }
+};
+
+const initStudentCameraRequest = async () => {
+  const btn = document.getElementById('requestCameraBtn');
+  const status = document.getElementById('requestCameraStatus');
+  if (!btn || !viewerState.liveShareId) return;
+
+  btn.disabled = true;
+  status.textContent = 'Iniciando câmera...';
+
+  try {
+    if (!studentCameraLocalStream) {
+      studentCameraLocalStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    }
+
+    if (!studentCameraPeer) {
+      studentCameraPeer = new Peer();
+      studentCameraPeer.on('open', async (id) => {
+        studentCameraPeerId = id;
+        status.textContent = 'Enviando solicitação...';
+        
+        try {
+          const response = await authorizedFetch(`/api/student/live-stage/${encodeURIComponent(viewerState.liveShareId)}/request-camera`, {
+            method: 'POST',
+            body: JSON.stringify({ peerId: id })
+          });
+          
+          if (response.ok) {
+            status.textContent = 'Solicitação enviada! Aguarde o professor.';
+            btn.style.display = 'none';
+          } else {
+            status.textContent = 'Falha ao solicitar.';
+            btn.disabled = false;
+          }
+        } catch (e) {
+          status.textContent = 'Erro na conexão.';
+          btn.disabled = false;
+        }
+      });
+
+      studentCameraPeer.on('connection', (conn) => {
+        conn.on('open', () => {
+          if (studentCameraLocalStream) {
+            studentCameraPeer.call(conn.peer, studentCameraLocalStream);
+          }
+        });
+      });
+
+      studentCameraPeer.on('error', (err) => {
+        console.warn('Student Peer error:', err);
+        status.textContent = 'Erro no PeerJS.';
+        btn.disabled = false;
+      });
+    } else if (studentCameraPeerId) {
+      // Já tem ID, só reenviar se necessário
+      const response = await authorizedFetch(`/api/student/live-stage/${encodeURIComponent(viewerState.liveShareId)}/request-camera`, {
+        method: 'POST',
+        body: JSON.stringify({ peerId: studentCameraPeerId })
+      });
+      if (response.ok) {
+        status.textContent = 'Solicitação reenviada!';
+        btn.style.display = 'none';
+      } else {
+        status.textContent = 'Falha ao reenviar.';
+        btn.disabled = false;
+      }
+    }
+  } catch (err) {
+    console.error('Erro ao acessar câmera:', err);
+    status.textContent = 'Erro ao acessar câmera.';
+    btn.disabled = false;
   }
 };
 
@@ -3558,17 +5594,20 @@ const loadModule = (modules) => {
   lastTrackedVideoPosition = lastSavedVideoPosition;
   if (viewerTitle) viewerTitle.textContent = module.title;
   if (viewerSubtitle) {
-    viewerSubtitle.textContent = viewerState.isPublic
-      ? `${module.courseTitle || 'Conteudo publico'} • acesso publico`
-      : isReplayMode()
-        ? `${module.courseTitle} • replay visual do aluno`
-        : module.courseTitle;
+    viewerSubtitle.textContent = isLiveShareMode()
+      ? `${module.courseTitle || 'Palco ao vivo'} • acompanhando edicao em tempo real`
+      : viewerState.isPublic
+        ? `${module.courseTitle || 'Conteudo publico'} • acesso publico`
+        : isReplayMode()
+          ? `${module.courseTitle} • replay visual do aluno`
+          : module.courseTitle;
   }
   const slides = module.builder_data?.slides || [];
   const stageSize = module.builder_data?.stageSize || null;
   moduleStageDimensions = stageSize ? { ...stageSize } : null;
   applyModuleStageDimensions(moduleStageDimensions);
   if (!slides.length) {
+    syncVisibleViewerCameraSessions(new Set());
     viewerHiddenElements.clear();
     viewerTimedVideoTriggers.clear();
     viewerMediaState.clear();
@@ -3590,6 +5629,10 @@ const loadModule = (modules) => {
 
 const renderSlide = (slide) => {
   if (!moduleStage) return;
+  if (!slide) {
+    syncVisibleViewerCameraSessions(new Set());
+    return;
+  }
   clearCurrentSlideProgressTimer();
   const slideKey = getStableSlideKey(slide, viewerState.slideIndex);
   if (activeTimedViewerSlideKey !== slideKey) {
@@ -3604,6 +5647,13 @@ const renderSlide = (slide) => {
     lastRenderedViewerSlideKey = slideKey;
   }
   snapshotViewerMediaState(slide);
+  syncVisibleViewerCameraSessions(
+    new Set(
+      (slide.elements || [])
+        .filter((element) => element?.type === 'camera' && element?.id)
+        .map((element) => getViewerCameraSessionKey(getViewerCameraContext(element, slide)))
+    )
+  );
   wrapper.innerHTML = '';
   const backgroundStyles = getSlideBackgroundStyles(slide);
   renderViewerBackgroundMedia(moduleStage, slide);
@@ -3642,7 +5692,9 @@ const renderSlide = (slide) => {
       deferredCaptionOverlays.forEach(({ element, overlayNode }) => positionCaptionOverlayNode(overlayNode, element, wrapper));
     });
   }
-  updateStageScale();
+  performStageScaleUpdate();
+  ensureViewerPenOverlay(slide);
+  updateViewerPenToolState(slide);
   if (isReplayMode()) {
     renderReplayEventOverlay();
   }
@@ -3712,6 +5764,9 @@ const createRendererNode = (element, slide) => {
         node.src = IMAGE_FALLBACK_SRC;
       });
       break;
+    case 'pen':
+      node = createViewerPenElementNode(element);
+      break;
     case 'audio':
       {
         const mediaNode = document.createElement('audio');
@@ -3745,6 +5800,12 @@ const createRendererNode = (element, slide) => {
         node = wrapMediaNodeWithCaptions(mediaNode, element);
         restoreViewerMediaState(slide, element, node);
       }
+      break;
+    case 'camera':
+      node = createViewerCameraNode(element, slide);
+      break;
+    case 'screenShare':
+      node = createViewerScreenShareNode();
       break;
     case 'quiz':
       node = createQuizNode(element, slide);
@@ -3795,7 +5856,12 @@ const createRendererNode = (element, slide) => {
           node.classList.add('floating-button-completed');
         }
       }
-      node.addEventListener('click', () => executeFloatingButtonTriggers(element));
+      if (!isReplayMode()) {
+        node.addEventListener('click', () => executeFloatingButtonTriggers(element));
+      }
+      break;
+    case 'key':
+      node = createKeyElementNode(element, slide);
       break;
     case 'detector':
       node = document.createElement('div');
@@ -3817,6 +5883,9 @@ const createRendererNode = (element, slide) => {
     default:
       node = document.createElement('div');
       node.textContent = element.content || 'Elemento';
+  }
+  if (!(node instanceof Element)) {
+    return node;
   }
   node.dataset.elementId = element.id;
   node.style.position = 'absolute';
@@ -3841,7 +5910,7 @@ const createRendererNode = (element, slide) => {
   if (element.fontWeight) {
     node.style.fontWeight = element.fontWeight;
   }
-  if (!['block', 'floatingButton', 'image'].includes(element.type) && element.backgroundColor) {
+  if (!['block', 'floatingButton', 'image', 'key'].includes(element.type) && element.backgroundColor) {
     if (element.type === 'text') {
       if (getTextDecorationFlags(element, { hasTextBackground: false, hasTextBorder: false, hasTextBlock: false }).hasTextBackground) {
         node.style.background = element.backgroundColor;
@@ -3852,8 +5921,192 @@ const createRendererNode = (element, slide) => {
     }
   }
   applyElementAnimationStyles(node, element, { preservedElapsedSeconds });
+  attachViewerStudentPenOverlay(node, element, slide);
   enableViewerStudentDrag(node, element, slide);
   return node;
+};
+
+const getKeyTriggerButtonLabel = (trigger) => {
+  const direction = getKeyTriggerDirection(trigger);
+  if (direction === 'left') return 'ESQ';
+  if (direction === 'right') return 'DIR';
+  if (direction === 'up') return 'CIMA';
+  if (direction === 'down') return 'BAIXO';
+  return formatKeyBindingSummary(getTriggerKeyBindings(trigger)) || trigger?.name || 'Tecla';
+};
+
+const getVisibleKeyTriggers = (element) => {
+  normalizeKeyElement(element);
+  return (element.interactionTriggers || []).filter((trigger) => trigger?.enabled !== false && isKeyTriggerVisible(trigger));
+};
+
+const createKeyTriggerButtonNode = (element, trigger, { onTrigger = null } = {}) => {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'key-trigger-btn';
+  const direction = getKeyTriggerDirection(trigger);
+  button.textContent = getKeyTriggerButtonLabel(trigger);
+  button.setAttribute('aria-label', `Tecla ${formatKeyBindingSummary(getTriggerKeyBindings(trigger)) || trigger?.name || 'interativa'}`);
+  if (direction) {
+    button.dataset.direction = direction;
+  }
+  applyElementBackground(button, element);
+  applyShapeStyles(button, element.shape || 'rectangle');
+  button.style.color = element.textColor || '#ffffff';
+  button.style.fontFamily = element.fontFamily || 'Inter, sans-serif';
+  button.style.fontWeight = element.fontWeight || '700';
+  button.style.fontSize = `${Math.max(12, Number(element.fontSize) || 16)}px`;
+  const setPressed = (pressed) => button.classList.toggle('is-pressed', pressed);
+  button.addEventListener('pointerdown', (event) => {
+    event.stopPropagation();
+    setPressed(true);
+  });
+  ['pointerup', 'pointerleave', 'pointercancel', 'blur'].forEach((eventName) => {
+    button.addEventListener(eventName, () => setPressed(false));
+  });
+  button.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onTrigger?.(trigger);
+  });
+  return button;
+};
+
+const createKeyTriggerPanelNode = (element, triggers, { onTrigger = null } = {}) => {
+  const visibleTriggers = Array.isArray(triggers) ? triggers.filter(Boolean) : [];
+  const panel = document.createElement('div');
+  const directionTriggers = new Map();
+  visibleTriggers.forEach((trigger) => {
+    const direction = getKeyTriggerDirection(trigger);
+    if (direction && !directionTriggers.has(direction)) {
+      directionTriggers.set(direction, trigger);
+    }
+  });
+  const canUseJoystick =
+    visibleTriggers.length >= 2 &&
+    visibleTriggers.every((trigger) => Boolean(getKeyTriggerDirection(trigger))) &&
+    directionTriggers.size >= 2;
+  if (canUseJoystick) {
+    panel.className = 'key-trigger-panel is-joystick';
+    ['up', 'left', 'right', 'down'].forEach((direction) => {
+      const trigger = directionTriggers.get(direction);
+      if (trigger) {
+        panel.appendChild(createKeyTriggerButtonNode(element, trigger, { onTrigger }));
+      }
+    });
+    const spacer = document.createElement('div');
+    spacer.className = 'key-trigger-joystick-spacer';
+    panel.appendChild(spacer);
+    return panel;
+  }
+  panel.className = 'key-trigger-panel';
+  visibleTriggers.forEach((trigger) => {
+    panel.appendChild(createKeyTriggerButtonNode(element, trigger, { onTrigger }));
+  });
+  return panel;
+};
+
+const executeKeyTrigger = (element, trigger, slide, { showAlert = true } = {}) => {
+  if (isReplayMode()) {
+    return { executed: false, rerender: false, blockedRuleState: null };
+  }
+  if (element?.type === 'key') {
+    normalizeKeyElement(element);
+  } else {
+    normalizeInteractionTriggers(element);
+  }
+  const module = getCurrentModule();
+  const slides = module?.builder_data?.slides || [];
+  if (!slide || trigger?.enabled === false) {
+    return { executed: false, rerender: false, blockedRuleState: null };
+  }
+  const ruleState = registerFloatingRuleClick(module, slide, element, trigger);
+  syncViewerFloatingRuleButtonState(module, slide, element.id);
+  if (!ruleState.ready) {
+    if (showAlert) {
+      if (ruleState.invalid) {
+        alert('Essa regra precisa de um nome de grupo e de pelo menos 2 gatilhos no mesmo slide para funcionar.');
+      } else {
+        alert(`Faltam ${ruleState.remaining} gatilho(s) desta regra para liberar a ação.`);
+      }
+    }
+    return { executed: false, rerender: false, blockedRuleState: ruleState };
+  }
+  const didExecute = executeActionConfig(element, trigger.actionConfig || {}, slide, module, slides);
+  return {
+    executed: didExecute,
+    rerender: didExecute && !['playAudio', 'playVideo', 'pauseVideo', 'seekVideo', 'moveElement', 'playAnimation'].includes(trigger.actionConfig?.type || 'none'),
+    blockedRuleState: null
+  };
+};
+
+const createKeyElementNode = (element, slide) => {
+  normalizeKeyElement(element);
+  const visibleTriggers = getVisibleKeyTriggers(element);
+  if (!visibleTriggers.length) {
+    return document.createComment(`hidden-key-${element.id || 'element'}`);
+  }
+  const node = document.createElement('div');
+  node.className = 'key-trigger-element';
+  node.appendChild(
+    createKeyTriggerPanelNode(element, visibleTriggers, {
+      onTrigger: (trigger) => {
+        const result = executeKeyTrigger(element, trigger, slide);
+        if (result.rerender && getCurrentSlide()?.id === slide?.id) {
+          renderSlide(getCurrentSlide());
+        }
+      }
+    })
+  );
+  return node;
+};
+
+const handleViewerKeyTriggerEvent = (event) => {
+  if (isReplayMode() || event.defaultPrevented || isViewerTypingTarget(event.target)) {
+    return false;
+  }
+  const slide = getCurrentSlide();
+  const binding = normalizeKeyboardEventBinding(event);
+  if (!slide || !binding) {
+    return false;
+  }
+  let executed = false;
+  let shouldRerender = false;
+  let blockedRuleState = null;
+  (slide.elements || [])
+    .filter((element) => ['key', 'floatingButton'].includes(element?.type))
+    .forEach((element) => {
+      if (isViewerElementHidden(slide, element.id)) {
+        return;
+      }
+      if (element.type === 'key') {
+        normalizeKeyElement(element);
+      } else {
+        normalizeInteractionTriggers(element);
+      }
+      (element.interactionTriggers || []).forEach((trigger) => {
+        if (trigger?.enabled === false || !triggerMatchesKeyboardBinding(trigger, binding)) {
+          return;
+        }
+        if (event.repeat && (trigger.actionConfig?.type || 'none') !== 'moveElement') {
+          return;
+        }
+        const result = executeKeyTrigger(element, trigger, slide, { showAlert: !executed });
+        executed = executed || result.executed;
+        shouldRerender = shouldRerender || result.rerender;
+        blockedRuleState = blockedRuleState || result.blockedRuleState;
+      });
+    });
+  if (!executed && blockedRuleState) {
+    return true;
+  }
+  if (executed) {
+    event.preventDefault();
+    if (shouldRerender && getCurrentSlide()?.id === slide.id) {
+      renderSlide(getCurrentSlide());
+    }
+  }
+  return executed;
 };
 
 const changeSlide = (direction, options = {}) => {
@@ -3881,7 +6134,31 @@ const changeSlide = (direction, options = {}) => {
 
 const syncFullscreenButtonState = () => {
   if (!viewerFullscreenBtn) return;
-  viewerFullscreenBtn.textContent = document.fullscreenElement === moduleStageShell ? 'Sair da tela cheia' : 'Tela cheia';
+  const isFullscreen = document.fullscreenElement === moduleStageShell;
+  viewerFullscreenBtn.textContent = isFullscreen ? 'Sair da tela cheia' : 'Tela cheia';
+  if (viewerFullscreenNavToggleBtn) {
+    viewerFullscreenNavToggleBtn.textContent = isFullscreen ? 'Controles' : 'Controles';
+  }
+};
+
+const setFullscreenNavExpanded = (expanded) => {
+  const stageNav = moduleStageShell?.querySelector('.stage-nav');
+  if (!stageNav || !viewerFullscreenNavToggleBtn) {
+    return;
+  }
+  const isFullscreen = document.fullscreenElement === moduleStageShell;
+  const shouldExpand = Boolean(isFullscreen && expanded);
+  stageNav.classList.toggle('is-expanded', shouldExpand);
+  viewerFullscreenNavToggleBtn.setAttribute('aria-expanded', shouldExpand ? 'true' : 'false');
+  viewerFullscreenNavToggleBtn.setAttribute('aria-label', shouldExpand ? 'Fechar controles' : 'Abrir controles');
+};
+
+const toggleFullscreenNavExpanded = () => {
+  const stageNav = moduleStageShell?.querySelector('.stage-nav');
+  if (!stageNav || document.fullscreenElement !== moduleStageShell) {
+    return;
+  }
+  setFullscreenNavExpanded(!stageNav.classList.contains('is-expanded'));
 };
 
 const toggleStageFullscreen = async () => {
@@ -3914,7 +6191,7 @@ const updateOrientationPrompt = () => {
 
 const renderModuleList = () => {
   if (!moduleList) return;
-  if (viewerState.isPublic) {
+  if (viewerState.isPublic || isLiveShareMode()) {
     moduleList.innerHTML = '';
     return;
   }
@@ -3962,12 +6239,25 @@ const initModuleViewerPage = async () => {
   loadPersistedButtonRules();
   moduleStage = document.getElementById('moduleStage');
   moduleStageShell = document.getElementById('moduleStageShell');
+  if (typeof ResizeObserver === 'function' && moduleStageShell) {
+    const stageObserver = new ResizeObserver(() => {
+      updateStageScale();
+    });
+    stageObserver.observe(moduleStageShell);
+  }
   moduleStageHint = document.getElementById('moduleStageHint');
   viewerTitle = document.getElementById('viewerTitle');
   viewerSubtitle = document.getElementById('viewerSubtitle');
   prevBtn = document.getElementById('viewerPrevBtn');
   nextBtn = document.getElementById('viewerNextBtn');
   viewerFullscreenBtn = document.getElementById('viewerFullscreenBtn');
+  viewerFullscreenNavToggleBtn = document.getElementById('viewerFullscreenNavToggleBtn');
+  viewerPenToolBtn = document.getElementById('viewerPenToolBtn');
+  viewerPenControls = document.getElementById('viewerPenControls');
+  viewerPenColorInput = document.getElementById('viewerPenColorInput');
+  viewerPenSizeInput = document.getElementById('viewerPenSizeInput');
+  viewerPenSizeNumberInput = document.getElementById('viewerPenSizeNumberInput');
+  viewerPenClearBtn = document.getElementById('viewerPenClearBtn');
   orientationPrompt = document.getElementById('orientationPrompt');
   moduleList = document.getElementById('moduleList');
   moduleSelection = document.getElementById('moduleSelection');
@@ -3981,8 +6271,39 @@ const initModuleViewerPage = async () => {
   prevBtn?.addEventListener('click', () => changeSlide(-1));
   nextBtn?.addEventListener('click', () => changeSlide(1));
   viewerFullscreenBtn?.addEventListener('click', toggleStageFullscreen);
-  document.addEventListener('fullscreenchange', syncFullscreenButtonState);
+  viewerFullscreenNavToggleBtn?.addEventListener('click', toggleFullscreenNavExpanded);
+  viewerPenToolBtn?.addEventListener('click', toggleViewerPenTool);
+  viewerPenColorInput?.addEventListener('input', () => {
+    viewerState.penColor = viewerPenColorInput.value || '#111827';
+    viewerState.penSettingsTouched = true;
+    syncViewerPenInputs('color');
+  });
+  viewerPenSizeInput?.addEventListener('input', () => {
+    viewerState.penSize = Number(viewerPenSizeInput.value) || 8;
+    viewerState.penSettingsTouched = true;
+    syncViewerPenInputs('range');
+  });
+  viewerPenSizeNumberInput?.addEventListener('input', () => {
+    viewerState.penSize = Number(viewerPenSizeNumberInput.value) || 8;
+    viewerState.penSettingsTouched = true;
+    syncViewerPenInputs('number');
+  });
+  viewerPenClearBtn?.addEventListener('click', clearViewerPenDraft);
+  attachViewerStageZoomHandlers();
+  document.addEventListener('fullscreenchange', () => {
+    syncFullscreenButtonState();
+    setFullscreenNavExpanded(false);
+    resetViewerStageZoom();
+    // Garante que o palco se ajuste ao tamanho total da tela ao entrar/sair do full screen
+    requestAnimationFrame(() => {
+      updateStageScale();
+    });
+  });
+  document.addEventListener('keydown', (event) => {
+    handleViewerKeyTriggerEvent(event);
+  });
   syncFullscreenButtonState();
+  updateViewerPenToolState(null);
   updateOrientationPrompt();
   window.addEventListener('resize', () => {
     updateOrientationPrompt();
@@ -3995,9 +6316,24 @@ const initModuleViewerPage = async () => {
     persistCurrentSlideProgress({ force: true });
     clearCurrentSlideProgressTimer();
     clearTimedViewerSlideTriggerTimers();
+    stopLiveStagePolling();
   });
 
-  if (viewerState.isPublic) {
+  if (isLiveShareMode()) {
+    if (moduleSelection) {
+      moduleSelection.style.display = 'none';
+    }
+    const token = getToken();
+    const role = localStorage.getItem(USER_ROLE_KEY);
+    if (!token || role !== 'student') {
+      window.location.href = 'login.html';
+      return;
+    }
+    if (viewerBackLink) {
+      viewerBackLink.textContent = 'Voltar ao portal';
+      viewerBackLink.href = 'portal.html';
+    }
+  } else if (viewerState.isPublic) {
     if (moduleSelection) {
       moduleSelection.style.display = 'none';
     }
@@ -4029,12 +6365,19 @@ const initModuleViewerPage = async () => {
       return;
     }
   }
-  if (!viewerState.moduleId && !viewerState.courseId) {
+  if (!viewerState.moduleId && !viewerState.courseId && !viewerState.liveShareId) {
     clearStage('Informe o módulo que deseja visualizar (use o portal).');
     disableNavigation();
     return;
   }
   try {
+    if (isLiveShareMode()) {
+      viewerState.moduleIndex = 0;
+      const liveModule = await fetchLiveStageModule(viewerState.liveShareId);
+      applyLiveStageModule(liveModule);
+      startLiveStagePolling();
+      return;
+    }
     if (viewerState.isPublic) {
       const publicModule = await fetchPublicModule(viewerState.moduleId);
       viewerModules = [publicModule];
@@ -4179,6 +6522,7 @@ const openViewerChat = async () => {
 };
 
 document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('requestCameraBtn')?.addEventListener('click', initStudentCameraRequest);
   document.getElementById('viewerChatBtn')?.addEventListener('click', openViewerChat);
   document.getElementById('chatModalClose')?.addEventListener('click', closeCourseChat);
   document.getElementById('chatModalBackdrop')?.addEventListener('click', closeCourseChat);

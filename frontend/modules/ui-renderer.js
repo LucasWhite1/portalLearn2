@@ -428,10 +428,11 @@ export const createInputElementNode = (element, { runActions = null, preview = f
     : '';
   const inputBgColor = element.backgroundColor || '#ffffff';
   const inputTextColor = element.inputTextColor || '#0f142c';
+  const placeholderColor = element.labelColor || '#9ca3af';
   const buttonBgColor = element.submitButtonColor || '#6d63ff';
   const buttonTextColor = element.submitButtonTextColor || '#ffffff';
   const textFieldMarkup = showTextField
-    ? `<textarea class="builder-input-text" style="background-color: ${inputBgColor}; color: ${inputTextColor};" placeholder="${escapeHtml(element.placeholder || 'Digite sua resposta')}"></textarea>`
+    ? `<textarea class="builder-input-text" style="background-color: ${inputBgColor}; color: ${inputTextColor}; --placeholder-color: ${placeholderColor};" placeholder="${escapeHtml(element.placeholder || 'Digite sua resposta')}"></textarea>`
     : `<div class="builder-input-text builder-input-text-passive" style="background-color: ${inputBgColor}; color: ${inputTextColor};">Envie uma imagem para validar</div>`;
   const node = document.createElement('div');
   node.className = 'builder-input-element';

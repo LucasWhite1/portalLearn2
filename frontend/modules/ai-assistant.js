@@ -65,7 +65,6 @@ export const doesSlideHaveRenderableContent = (slide) =>
   Boolean(slide?.elements?.length) ||
   Boolean(slide?.backgroundImage) ||
   Boolean(slide?.backgroundVideo) ||
-  Boolean(slide?.requireQuizCompletion) ||
   slide?.backgroundFillType === 'gradient' ||
   (slide?.backgroundColor && String(slide.backgroundColor).trim().toLowerCase() !== '#fdfbff');
 
