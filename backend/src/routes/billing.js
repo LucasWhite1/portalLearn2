@@ -141,10 +141,17 @@ const normalizePlanCodeFromExternalReference = (externalReference = '') => {
 };
 
 const buildRandomPassword = () => crypto.randomBytes(9).toString('base64url') + 'Aa1!';
+const isProductionEnvironment = () => ASAAS_ENV === 'production';
 
 const buildWebhookTokenIsValid = (req) => {
   if (!ASAAS_WEBHOOK_AUTH_TOKEN) {
-    return true;
+    return !isProductionEnvironment();
+  }
+  if (ASAAS_WEBHOOK_AUTH_TOKEN === 'coloque-um-token-forte-do-webhook-aqui') {
+    return false;
+  }
+  if (ASAAS_WEBHOOK_AUTH_TOKEN.length < 24) {
+    return false;
   }
   const headerToken = sanitizeText(req.headers['asaas-access-token'] || '', 255, { trim: false });
   return Boolean(headerToken) && headerToken === ASAAS_WEBHOOK_AUTH_TOKEN;
@@ -571,17 +578,6 @@ const processAsaasWebhookEvent = async (eventPayload) => {
     client.release();
   }
 };
-
-router.get('/config', (req, res) => {
-  res.json({
-    configured: Boolean(ASAAS_API_KEY),
-    provider: 'asaas',
-    environment: ASAAS_ENV,
-    trialDays: TRIAL_DAYS,
-    proMonthlyPrice: Number.isFinite(PRO_MONTHLY_PRICE) ? PRO_MONTHLY_PRICE : 97.90,
-    webhookEndpoint: '/api/billing/webhook/asaas'
-  });
-});
 
 const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
   if (!ASAAS_API_KEY) {

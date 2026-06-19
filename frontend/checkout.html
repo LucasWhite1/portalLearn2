@@ -415,20 +415,6 @@
       });
     }
 
-    async function loadGatewayConfig() {
-      try {
-        const response = await fetch(`${API_ORIGIN}/api/billing/config`);
-        const data = await response.json();
-        if (!response.ok || !data.configured) {
-          configFlag.hidden = false;
-          configFlag.textContent = 'O checkout esta pronto, mas falta configurar a chave do Asaas no backend/.env antes de publicar.';
-        }
-      } catch (error) {
-        configFlag.hidden = false;
-        configFlag.textContent = 'Nao foi possivel validar a configuracao do gateway agora. Voce ainda pode ajustar a chave do Asaas no backend.';
-      }
-    }
-
     document.getElementById('checkoutForm').addEventListener('submit', async (event) => {
       event.preventDefault();
       setFlash('');
@@ -464,7 +450,6 @@
     });
 
     applyPlanData();
-    loadGatewayConfig();
   </script>
 </body>
 </html>

@@ -17,6 +17,11 @@ let professorSmtpSettingsEnsured = false;
 let classesTableEnsured = false;
 let studentSignupLinksTableEnsured = false;
 const SIGNUP_LINK_TOKEN_REGEX = /^[a-f0-9]{64}$/i;
+const resetPasswordRateLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  keyFn: (req) => `${req.ip}:${sanitizeEmail(req.body?.email || '')}:reset-password`
+});
 
 const ensureRoleAndOwnershipSetup = async () => {
   if (roleAndOwnershipEnsured) return;
@@ -41,15 +46,14 @@ const ensureRoleAndOwnershipSetup = async () => {
     ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL
   `);
 
-  const { rows } = await db.query("SELECT id FROM users WHERE email = $1", ['professor@curso.com']);
-  if (!rows.length) {
-    const passwordHash = await bcrypt.hash('ProfessorPass2026!', 10);
-    await db.query(
-      `INSERT INTO users (id, full_name, email, phone, password_hash, role, class_name, is_active)
-       VALUES (gen_random_uuid(), $1, $2, $3, $4, 'professor', $5, TRUE)`,
-      ['Professor Exemplo', 'professor@curso.com', '+55 11 11111-1111', passwordHash, 'Professor']
-    );
-  }
+  await db.query(
+    `UPDATE users
+        SET is_active = FALSE
+      WHERE email = $1
+        AND full_name = $2
+        AND role = 'professor'`,
+    ['professor@curso.com', 'Professor Exemplo']
+  );
   roleAndOwnershipEnsured = true;
 };
 
@@ -157,6 +161,7 @@ const normalizeSignupLinkToken = (value = '') => {
 };
 
 const hashSignupLinkToken = (token) => crypto.createHash('sha256').update(String(token || '')).digest('hex');
+const hashResetPasswordToken = (token) => crypto.createHash('sha256').update(String(token || '')).digest('hex');
 
 const buildSessionPayload = (user) => {
   const sessionToken = createSession({
@@ -323,6 +328,11 @@ router.post('/signup', selfSignupRateLimiter, async (req, res) => {
   if (!fullName || !email || !password || !role) {
     return res.status(400).json({ message: 'Nome, email, senha e tipo de conta são obrigatórios.' });
   }
+  if (role === 'professor') {
+    return res.status(403).json({
+      message: 'O cadastro de professor nao pode ser feito por esta rota. Use o checkout da assinatura ou o painel administrativo.'
+    });
+  }
   if (password.length < 8) {
     return res.status(400).json({ message: 'A senha precisa ter pelo menos 8 caracteres.' });
   }
@@ -400,12 +410,13 @@ router.post('/forgot-password', loginRateLimiter, async (req, res) => {
   const user = rows[0];
   if (!user) return;
 
-  const token = Math.floor(100000 + Math.random() * 900000).toString();
+  const token = crypto.randomBytes(24).toString('hex');
   const expires = new Date(Date.now() + 3600000);
+  const tokenHash = hashResetPasswordToken(token);
 
   await db.query(
     'UPDATE users SET reset_password_token = $1, reset_password_expires = $2 WHERE id = $3',
-    [token, expires, user.id]
+    [tokenHash, expires, user.id]
   );
 
   try {
@@ -442,20 +453,25 @@ router.post('/forgot-password', loginRateLimiter, async (req, res) => {
   }
 });
 
-router.post('/reset-password', async (req, res) => {
+router.post('/reset-password', resetPasswordRateLimiter, async (req, res) => {
   await ensureRoleAndOwnershipSetup();
   await ensureResetTokenColumns();
   const email = sanitizeEmail(req.body?.email || '');
-  const token = sanitizeText(req.body?.token || '', 10);
+  const token = sanitizeText(req.body?.token || '', 128);
   const newPassword = sanitizeText(req.body?.newPassword || '', 256, { trim: false });
 
   if (!email || !token || !newPassword) {
     return res.status(400).json({ message: 'Email, token e nova senha são obrigatórios' });
   }
+  if (newPassword.length < 8) {
+    return res.status(400).json({ message: 'A senha precisa ter pelo menos 8 caracteres.' });
+  }
+
+  const tokenHash = hashResetPasswordToken(token);
 
   const { rows } = await db.query(
     'SELECT id, reset_password_expires FROM users WHERE email = $1 AND reset_password_token = $2',
-    [email, token]
+    [email, tokenHash]
   );
   
   const user = rows[0];

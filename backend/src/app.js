@@ -9,6 +9,12 @@ const billingRoutes = require('./routes/billing');
 const app = express();
 const JSON_BODY_LIMIT = process.env.JSON_BODY_LIMIT || '50mb';
 const frontendDir = path.resolve(__dirname, '../../frontend');
+const isProductionEnvironment = ['production', 'prod'].includes(String(process.env.NODE_ENV || process.env.APP_ENV || '').toLowerCase());
+const allowedOrigins = String(process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const allowAnyOrigin = !isProductionEnvironment && allowedOrigins.length === 0;
 
 app.disable('x-powered-by');
 app.use((req, res, next) => {
@@ -20,7 +26,15 @@ app.use((req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
   next();
 });
-app.use(cors({ origin: true, credentials: true }));
+app.use(cors({
+  origin(origin, callback) {
+    if (allowAnyOrigin || !origin || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('Origem não permitida pelo CORS'));
+  },
+  credentials: true
+}));
 app.use(express.json({ limit: JSON_BODY_LIMIT }));
 app.use(express.static(frontendDir));
 
