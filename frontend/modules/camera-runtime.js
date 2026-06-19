@@ -16,11 +16,62 @@ export const createBuilderCameraModule = (deps) => {
     updateCameraEditorVisibility,
     applyStageConstraints,
     normalizeVideoTriggerConfig,
+    onDisconnectStudentCamera = null,
+    onStudentCameraAudioMuteChange = null,
     getUiRefs,
     alertUser = (message) => window.alert(message)
   } = deps;
 
   const builderCameraRuntime = new Map();
+  const builderStudentCameraCallState = new Map();
+
+  const isStudentCameraElement = (element) =>
+    Boolean(element?.type === 'camera' && element?.studentPeerId);
+
+  const getStudentCameraCallState = (elementId) => {
+    const key = String(elementId || '');
+    if (!builderStudentCameraCallState.has(key)) {
+      builderStudentCameraCallState.set(key, {
+        audioMuted: false,
+        videoHidden: false
+      });
+    }
+    return builderStudentCameraCallState.get(key);
+  };
+
+  const createCameraCallIcon = (name) => {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('focusable', 'false');
+    const paths = {
+      mic: ['M12 3a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z', 'M19 10v1a7 7 0 0 1-14 0v-1', 'M12 18v3', 'M8 21h8'],
+      micOff: ['M3 3l18 18', 'M9 9v2a3 3 0 0 0 5.12 2.12', 'M15 9.34V6a3 3 0 0 0-5.94-.6', 'M19 10v1a7 7 0 0 1-1.4 4.2', 'M5 10v1a7 7 0 0 0 10.8 5.88', 'M12 18v3', 'M8 21h8'],
+      video: ['M15 10l5-3v10l-5-3Z', 'M3 6h12v12H3z'],
+      videoOff: ['M3 3l18 18', 'M15 10l5-3v8', 'M3 6h8', 'M15 14.5V18H6.5', 'M3 9.5V18h8.5'],
+      phoneOff: ['M10.68 13.31a16 16 0 0 0 3.41 2.56l2.27-2.27a1 1 0 0 1 1.01-.24 11.36 11.36 0 0 0 3.56.57 1 1 0 0 1 1 1V18a2 2 0 0 1-2 2A17 17 0 0 1 3 3a2 2 0 0 1 2-2h3.09a1 1 0 0 1 1 1 11.36 11.36 0 0 0 .57 3.56 1 1 0 0 1-.24 1.01L7.15 8.85', 'M3 3l18 18']
+    };
+    (paths[name] || paths.video).forEach((d) => {
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', d);
+      svg.appendChild(path);
+    });
+    return svg;
+  };
+
+  const createCameraCallButton = ({ icon, title, danger = false, active = false, onClick }) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `builder-camera-call-btn${danger ? ' is-danger' : ''}${active ? ' is-active' : ''}`;
+    button.title = title;
+    button.setAttribute('aria-label', title);
+    button.appendChild(createCameraCallIcon(icon));
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      onClick?.(event);
+    });
+    return button;
+  };
 
   const normalizeCameraElement = (element) => {
     if (!element || element.type !== 'camera') {
@@ -550,6 +601,7 @@ export const createBuilderCameraModule = (deps) => {
     const session = getBuilderCameraSession(context);
     const studentPeerId = element.studentPeerId;
     const isStudentCamera = Boolean(studentPeerId);
+    const callState = isStudentCamera ? getStudentCameraCallState(element.id) : null;
 
     const node = document.createElement('div');
     node.className = 'builder-camera-element';
@@ -565,7 +617,8 @@ export const createBuilderCameraModule = (deps) => {
       const remoteStream = creatorStudentStreams.get(studentPeerId);
       if (remoteStream) {
         previewVideo.srcObject = remoteStream;
-        previewVideo.muted = false;
+        previewVideo.muted = true;
+        previewVideo.classList.toggle('is-video-hidden', Boolean(callState?.videoHidden));
       } else {
         connectToStudentPeerInCreator(studentPeerId);
       }
@@ -617,6 +670,54 @@ export const createBuilderCameraModule = (deps) => {
     }
     node.appendChild(overlay);
 
+    if (isStudentCamera) {
+      const callControls = document.createElement('div');
+      callControls.className = 'builder-camera-call-controls';
+      ['pointerdown', 'click'].forEach((eventName) => {
+        callControls.addEventListener(eventName, (event) => {
+          event.stopPropagation();
+        });
+      });
+
+      callControls.appendChild(createCameraCallButton({
+        icon: callState.audioMuted ? 'micOff' : 'mic',
+        title: callState.audioMuted ? 'Ativar audio no creator' : 'Mutar audio no creator',
+        active: callState.audioMuted,
+        onClick: () => {
+          callState.audioMuted = !callState.audioMuted;
+          onStudentCameraAudioMuteChange?.(studentPeerId, callState.audioMuted);
+          renderSlide();
+        }
+      }));
+
+      callControls.appendChild(createCameraCallButton({
+        icon: callState.videoHidden ? 'videoOff' : 'video',
+        title: callState.videoHidden ? 'Mostrar video no creator' : 'Ocultar video no creator',
+        active: callState.videoHidden,
+        onClick: () => {
+          callState.videoHidden = !callState.videoHidden;
+          renderSlide();
+        }
+      }));
+
+      callControls.appendChild(createCameraCallButton({
+        icon: 'phoneOff',
+        title: 'Encerrar chamada',
+        danger: true,
+        onClick: () => {
+          const currentSlide = getActiveSlide();
+          if (currentSlide) {
+            onDisconnectStudentCamera?.(element);
+            currentSlide.elements = currentSlide.elements.filter((item) => item.id !== element.id);
+            builderStudentCameraCallState.delete(String(element.id || ''));
+            renderSlide();
+            scheduleBuilderAutosave();
+          }
+        }
+      }));
+      node.appendChild(callControls);
+    }
+
     const controls = document.createElement('div');
     controls.className = 'builder-camera-controls';
     ['pointerdown', 'click'].forEach((eventName) => {
@@ -640,20 +741,7 @@ export const createBuilderCameraModule = (deps) => {
     controls.appendChild(actions);
 
     if (isStudentCamera) {
-      const removeBtn = document.createElement('button');
-      removeBtn.type = 'button';
-      removeBtn.className = 'builder-camera-btn is-danger';
-      removeBtn.textContent = 'Encerrar transmissão';
-      removeBtn.style.flex = '1';
-      removeBtn.addEventListener('click', () => {
-        const currentSlide = getActiveSlide();
-        if (currentSlide) {
-          currentSlide.elements = currentSlide.elements.filter((item) => item.id !== element.id);
-          renderSlide();
-          scheduleBuilderAutosave();
-        }
-      });
-      actions.appendChild(removeBtn);
+      controls.style.display = 'none';
     } else {
       const startButton = document.createElement('button');
       startButton.type = 'button';
@@ -718,6 +806,7 @@ export const createBuilderCameraModule = (deps) => {
     const activeSlide = getActiveSlide();
     const context = isCamera ? getBuilderCameraContext(element, activeSlide, { preview: false }) : null;
     const session = context ? getBuilderCameraSession(context) : null;
+    const isStudentCamera = isStudentCameraElement(element);
     if (isCamera) {
       normalizeCameraElement(element);
     }
@@ -725,23 +814,30 @@ export const createBuilderCameraModule = (deps) => {
     if (refs.cameraElementHeightInput) refs.cameraElementHeightInput.value = isCamera ? String(element.height || '') : '';
     if (refs.cameraElementRotationInput) refs.cameraElementRotationInput.value = isCamera ? String(element.rotation || 0) : '0';
     if (refs.cameraEditorStatus) {
-      refs.cameraEditorStatus.textContent = isCamera ? getBuilderCameraStatusMessage(session) : 'Selecione um elemento de câmera.';
+      refs.cameraEditorStatus.textContent = isStudentCamera
+        ? `Chamada de video de ${element.studentName || 'Aluno'}.`
+        : isCamera ? getBuilderCameraStatusMessage(session) : 'Selecione um elemento de camera.';
     }
     if (refs.cameraEditorActivateBtn) {
-      refs.cameraEditorActivateBtn.disabled = !isCamera || session?.phase === 'requesting' || session?.phase === 'processing';
-      refs.cameraEditorActivateBtn.textContent = session?.stream ? 'Reconectar câmera' : 'Ativar câmera';
+      refs.cameraEditorActivateBtn.hidden = isStudentCamera;
+      refs.cameraEditorActivateBtn.disabled = !isCamera || isStudentCamera || session?.phase === 'requesting' || session?.phase === 'processing';
+      refs.cameraEditorActivateBtn.textContent = session?.stream ? 'Reconectar camera' : 'Ativar camera';
     }
     if (refs.cameraEditorPhotoBtn) {
-      refs.cameraEditorPhotoBtn.disabled = !isCamera || !session?.stream || session?.phase === 'requesting' || session?.phase === 'processing' || session?.phase === 'recording';
+      refs.cameraEditorPhotoBtn.hidden = isStudentCamera;
+      refs.cameraEditorPhotoBtn.disabled = !isCamera || isStudentCamera || !session?.stream || session?.phase === 'requesting' || session?.phase === 'processing' || session?.phase === 'recording';
     }
     if (refs.cameraEditorRecordBtn) {
-      refs.cameraEditorRecordBtn.disabled = !isCamera || !session?.stream || session?.phase === 'requesting' || session?.phase === 'processing' || session?.phase === 'recording';
+      refs.cameraEditorRecordBtn.hidden = isStudentCamera;
+      refs.cameraEditorRecordBtn.disabled = !isCamera || isStudentCamera || !session?.stream || session?.phase === 'requesting' || session?.phase === 'processing' || session?.phase === 'recording';
     }
     if (refs.cameraEditorStopBtn) {
-      refs.cameraEditorStopBtn.disabled = !isCamera || session?.phase !== 'recording';
+      refs.cameraEditorStopBtn.hidden = isStudentCamera;
+      refs.cameraEditorStopBtn.disabled = !isCamera || isStudentCamera || session?.phase !== 'recording';
     }
     if (refs.cameraEditorTransmitBtn) {
-      refs.cameraEditorTransmitBtn.disabled = !isCamera;
+      refs.cameraEditorTransmitBtn.hidden = isStudentCamera;
+      refs.cameraEditorTransmitBtn.disabled = !isCamera || isStudentCamera;
     }
   };
 

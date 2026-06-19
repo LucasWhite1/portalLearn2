@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Checkout | Criatyve</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0914;
+      --panel: rgba(255,255,255,.06);
+      --panel-border: rgba(255,255,255,.11);
+      --text: #f4f1ff;
+      --muted: rgba(236, 232, 248, .76);
+      --accent: #8b5cf6;
+      --accent-strong: #7c3aed;
+      --ok: #34d399;
+      --danger: #fda4af;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: 'Inter', system-ui, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(124, 58, 237, .26), transparent 28rem),
+        radial-gradient(circle at bottom right, rgba(45, 212, 191, .12), transparent 24rem),
+        linear-gradient(180deg, #0b0914 0%, #131024 100%);
+    }
+    a { color: inherit; }
+    .shell {
+      width: min(1120px, calc(100vw - 2rem));
+      margin: 0 auto;
+      padding: 1.25rem 0 2.5rem;
+    }
+    .back-link {
+      display: inline-flex;
+      align-items: center;
+      gap: .55rem;
+      text-decoration: none;
+      color: rgba(255,255,255,.76);
+      font-weight: 700;
+      margin-bottom: 1rem;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(340px, 420px);
+      gap: 1.35rem;
+      align-items: start;
+    }
+    .card {
+      border: 1px solid var(--panel-border);
+      background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.04));
+      border-radius: 28px;
+      padding: 1.45rem;
+      box-shadow: 0 28px 70px rgba(0,0,0,.28);
+      backdrop-filter: blur(18px);
+    }
+    .kicker {
+      display: inline-flex;
+      align-items: center;
+      padding: .44rem .8rem;
+      border-radius: 999px;
+      background: rgba(139, 92, 246, .15);
+      color: #efe8ff;
+      font-size: .8rem;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 1rem 0 .85rem;
+      font-size: clamp(2rem, 4vw, 3.3rem);
+      line-height: 1.02;
+      letter-spacing: -.05em;
+    }
+    p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+    .highlights {
+      display: grid;
+      gap: .85rem;
+      margin-top: 1.35rem;
+    }
+    .highlight {
+      border-radius: 20px;
+      border: 1px solid rgba(255,255,255,.09);
+      background: rgba(255,255,255,.04);
+      padding: 1rem;
+    }
+    .highlight strong {
+      display: block;
+      color: #fff;
+      margin-bottom: .35rem;
+    }
+    .summary-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      align-items: flex-start;
+      margin-bottom: 1.2rem;
+    }
+    .summary-title h2 {
+      margin: 0 0 .25rem;
+      font-size: 1.3rem;
+      color: #fff;
+    }
+    .price {
+      font-size: 2.1rem;
+      font-weight: 900;
+      letter-spacing: -.06em;
+      color: #fff;
+      white-space: nowrap;
+    }
+    .price small {
+      font-size: .92rem;
+      color: rgba(236, 232, 248, .66);
+      font-weight: 700;
+      letter-spacing: normal;
+    }
+    .bullet-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: grid;
+      gap: .8rem;
+    }
+    .bullet-list li {
+      display: grid;
+      grid-template-columns: 22px 1fr;
+      gap: .75rem;
+      align-items: start;
+      color: rgba(236,232,248,.84);
+      line-height: 1.6;
+    }
+    .bullet-list li::before {
+      content: "✓";
+      width: 22px;
+      height: 22px;
+      display: grid;
+      place-items: center;
+      margin-top: .05rem;
+      border-radius: 50%;
+      background: rgba(52, 211, 153, .15);
+      color: var(--ok);
+      font-weight: 900;
+      font-size: .84rem;
+    }
+    .notice {
+      margin-top: 1.15rem;
+      border-radius: 18px;
+      padding: 1rem;
+      background: rgba(139, 92, 246, .12);
+      border: 1px solid rgba(168, 85, 247, .26);
+      color: #f2ebff;
+    }
+    .config-flag,
+    .flash {
+      margin-top: 1rem;
+      border-radius: 16px;
+      padding: .95rem 1rem;
+      font-size: .95rem;
+      line-height: 1.65;
+    }
+    .config-flag {
+      background: rgba(250, 204, 21, .12);
+      border: 1px solid rgba(250, 204, 21, .24);
+      color: #fef3c7;
+    }
+    .flash {
+      display: none;
+      background: rgba(244, 63, 94, .12);
+      border: 1px solid rgba(251, 113, 133, .24);
+      color: #ffe4e6;
+    }
+    .flash.is-visible { display: block; }
+    .form {
+      margin-top: 1.35rem;
+      display: grid;
+      gap: .95rem;
+    }
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: .95rem;
+    }
+    .field {
+      display: grid;
+      gap: .42rem;
+    }
+    .field label {
+      font-size: .92rem;
+      font-weight: 700;
+      color: #fff;
+    }
+    .field input {
+      width: 100%;
+      min-height: 50px;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 16px;
+      background: rgba(13, 10, 24, .65);
+      color: #fff;
+      padding: 0 .95rem;
+      font: inherit;
+      outline: none;
+    }
+    .field input:focus {
+      border-color: rgba(168, 85, 247, .72);
+      box-shadow: 0 0 0 4px rgba(139, 92, 246, .14);
+    }
+    .field small {
+      color: rgba(236,232,248,.58);
+      line-height: 1.5;
+    }
+    .cta {
+      margin-top: .2rem;
+      width: 100%;
+      min-height: 54px;
+      border: none;
+      border-radius: 999px;
+      background: linear-gradient(135deg, var(--accent-strong), #a855f7);
+      color: #fff;
+      font-size: 1rem;
+      font-weight: 800;
+      cursor: pointer;
+      box-shadow: 0 18px 38px rgba(124, 58, 237, .32);
+      transition: transform .16s ease, opacity .16s ease;
+    }
+    .cta:hover { transform: translateY(-1px); }
+    .cta:disabled {
+      cursor: wait;
+      opacity: .7;
+      transform: none;
+    }
+    .footnote {
+      margin-top: .85rem;
+      font-size: .88rem;
+      color: rgba(236, 232, 248, .58);
+      line-height: 1.6;
+    }
+    @media (max-width: 920px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 720px) {
+      .shell {
+        width: min(100vw - 1rem, 1120px);
+        padding-top: .85rem;
+      }
+      .card {
+        border-radius: 24px;
+        padding: 1.15rem;
+      }
+      .field-grid {
+        grid-template-columns: 1fr;
+      }
+      .summary-title {
+        flex-direction: column;
+      }
+      .price {
+        font-size: 1.85rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <a class="back-link" href="create-account.html">Voltar para a landing</a>
+
+    <div class="grid">
+      <section class="card">
+        <span class="kicker" id="checkoutKicker">Checkout Criatyve</span>
+        <h1 id="checkoutHeading">Finalize sua assinatura</h1>
+        <p id="checkoutDescription">Escolha o plano ideal e siga para um checkout seguro.</p>
+
+        <div class="highlights">
+          <div class="highlight">
+            <strong>Checkout seguro no Asaas</strong>
+            <p>O pagamento e o cadastro do cartao acontecem no ambiente hospedado do gateway, reduzindo atrito e acelerando a ativacao.</p>
+          </div>
+          <div class="highlight">
+            <strong>Fluxo alinhado com o seu teste gratis</strong>
+            <p>No plano de 30 dias, o cartao fica cadastrado agora e a primeira cobranca so acontece no fim do periodo, se a assinatura continuar ativa.</p>
+          </div>
+        </div>
+
+        <form class="form" id="checkoutForm">
+          <div class="field">
+            <label for="checkoutName">Nome completo</label>
+            <input id="checkoutName" name="name" type="text" autocomplete="name" required />
+          </div>
+
+          <div class="field-grid">
+            <div class="field">
+              <label for="checkoutEmail">Email</label>
+              <input id="checkoutEmail" name="email" type="email" autocomplete="email" />
+            </div>
+            <div class="field">
+              <label for="checkoutPhone">Telefone</label>
+              <input id="checkoutPhone" name="phone" type="tel" autocomplete="tel" />
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="checkoutCpfCnpj">CPF ou CNPJ</label>
+            <input id="checkoutCpfCnpj" name="cpfCnpj" type="text" inputmode="numeric" />
+            <small>Os dados finais de pagamento e cadastro serao preenchidos no checkout seguro do Asaas.</small>
+          </div>
+        </form>
+      </section>
+
+      <aside class="card">
+        <div class="summary-title">
+          <div>
+            <h2 id="checkoutPlanName">Plano selecionado</h2>
+            <p id="checkoutPlanSubtitle">Resumo da sua escolha</p>
+          </div>
+          <div class="price" id="checkoutPrice">R$97,90 <small>/mes</small></div>
+        </div>
+
+        <ul class="bullet-list" id="checkoutBulletList"></ul>
+        <div class="notice" id="checkoutNotice"></div>
+        <div class="config-flag" id="checkoutConfigFlag" hidden>O gateway ainda nao foi configurado no backend.</div>
+        <div class="flash" id="checkoutFlash"></div>
+        <button class="cta" type="submit" form="checkoutForm" id="checkoutContinueBtn">Ir para o checkout seguro</button>
+        <p class="footnote" id="checkoutFootnote"></p>
+      </aside>
+    </div>
+  </main>
+
+  <script>
+    function resolveApiOrigin() {
+      const override = window.localStorage.getItem('criatyveApiOrigin');
+      if (override) return override.replace(/\/+$/, '');
+
+      const { protocol, hostname, port } = window.location;
+      if (
+        (hostname === 'localhost' || hostname === '127.0.0.1') &&
+        port &&
+        port !== '4000'
+      ) {
+        return `${protocol}//${hostname}:4000`;
+      }
+
+      return window.location.origin.replace(/\/+$/, '');
+    }
+
+    const API_ORIGIN = resolveApiOrigin();
+    const plans = {
+      pro: {
+        kicker: 'Checkout Pro',
+        heading: 'Assine o Criatyve Pro',
+        description: 'Libere creator completo, IA, aulas ao vivo, recursos interativos e o seu ambiente profissional em um checkout seguro.',
+        planName: 'Criatyve Pro',
+        planSubtitle: 'Assinatura mensal',
+        price: 'R$97,90 <small>/mes</small>',
+        bullets: [
+          'Acesso completo ao editor, IA, modulos interativos e portal do aluno.',
+          'Checkout hospedado no Asaas, com menos friccao na conversao.',
+          'Fluxo pronto para assinatura recorrente mensal.'
+        ],
+        notice: 'Ao continuar, voce sera levado ao checkout do Asaas para cadastrar o pagamento e concluir a assinatura.',
+        footnote: 'Se o pagamento for concluido, o gateway redireciona voce de volta para a plataforma.'
+      },
+      'trial-30-dias': {
+        kicker: 'Teste gratis',
+        heading: 'Ative seus 30 dias gratis',
+        description: 'Cadastre o cartao para liberar o teste completo da Criatyve. Se cancelar antes do fim do periodo, nenhum valor sera cobrado.',
+        planName: 'Criatyve Trial 30 dias',
+        planSubtitle: 'Teste completo com cartao cadastrado',
+        price: 'R$0 <small>agora</small>',
+        bullets: [
+          'O checkout coleta o cartao agora para ativar o seu periodo de teste.',
+          'A primeira cobranca fica programada para depois dos 30 dias, se a assinatura seguir ativa.',
+          'Cancelando antes do fim do periodo gratuito, nenhum valor sera cobrado.'
+        ],
+        notice: 'Esse fluxo exige cartao no checkout para ativacao do teste, mas o valor nao e cobrado se o cancelamento acontecer dentro dos 30 dias.',
+        footnote: 'Ideal para quem quer experimentar com calma antes de assumir a assinatura.'
+      }
+    };
+
+    const params = new URLSearchParams(window.location.search);
+    const planKey = params.get('plan') || 'pro';
+    const plan = plans[planKey] || plans.pro;
+    const submitButton = document.getElementById('checkoutContinueBtn');
+    const flash = document.getElementById('checkoutFlash');
+    const configFlag = document.getElementById('checkoutConfigFlag');
+
+    function setFlash(message) {
+      flash.textContent = message || '';
+      flash.classList.toggle('is-visible', Boolean(message));
+    }
+
+    function applyPlanData() {
+      document.getElementById('checkoutKicker').textContent = plan.kicker;
+      document.getElementById('checkoutHeading').textContent = plan.heading;
+      document.getElementById('checkoutDescription').textContent = plan.description;
+      document.getElementById('checkoutPlanName').textContent = plan.planName;
+      document.getElementById('checkoutPlanSubtitle').textContent = plan.planSubtitle;
+      document.getElementById('checkoutPrice').innerHTML = plan.price;
+      document.getElementById('checkoutNotice').textContent = plan.notice;
+      document.getElementById('checkoutFootnote').textContent = plan.footnote;
+
+      const bulletList = document.getElementById('checkoutBulletList');
+      bulletList.innerHTML = '';
+      plan.bullets.forEach((item) => {
+        const li = document.createElement('li');
+        li.textContent = item;
+        bulletList.appendChild(li);
+      });
+    }
+
+    async function loadGatewayConfig() {
+      try {
+        const response = await fetch(`${API_ORIGIN}/api/billing/config`);
+        const data = await response.json();
+        if (!response.ok || !data.configured) {
+          configFlag.hidden = false;
+          configFlag.textContent = 'O checkout esta pronto, mas falta configurar a chave do Asaas no backend/.env antes de publicar.';
+        }
+      } catch (error) {
+        configFlag.hidden = false;
+        configFlag.textContent = 'Nao foi possivel validar a configuracao do gateway agora. Voce ainda pode ajustar a chave do Asaas no backend.';
+      }
+    }
+
+    document.getElementById('checkoutForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      setFlash('');
+      submitButton.disabled = true;
+      submitButton.textContent = 'Abrindo checkout...';
+
+      const formData = new FormData(event.currentTarget);
+      const payload = {
+        plan: planKey,
+        name: String(formData.get('name') || '').trim(),
+        email: String(formData.get('email') || '').trim()
+      };
+
+      try {
+        const response = await fetch(`${API_ORIGIN}/api/billing/checkout-session`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.checkoutUrl) {
+          const providerDetails = Array.isArray(data.details?.errors)
+            ? data.details.errors.map((item) => item.description).filter(Boolean).join(' ')
+            : '';
+          throw new Error(providerDetails || data.message || 'Nao foi possivel iniciar o checkout.');
+        }
+        window.location.href = data.checkoutUrl;
+      } catch (error) {
+        submitButton.disabled = false;
+        submitButton.textContent = 'Ir para o checkout seguro';
+        setFlash(error.message || 'Nao foi possivel iniciar o checkout agora.');
+      }
+    });
+
+    applyPlanData();
+    loadGatewayConfig();
+  </script>
+</body>
+</html>

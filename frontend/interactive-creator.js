@@ -90,7 +90,8 @@ const builderState = {
     lockNextModuleUntilCompleted: false,
     isPublic: false,
     coverImage: '',
-    allowStudentPen: false
+    allowStudentPen: false,
+    allowLiveCursors: true
   }
 };
 
@@ -122,12 +123,14 @@ let copyPublicModuleLinkBtn;
 let openPublicModuleLinkBtn;
 let modulePublicLinkStatus;
 let toggleLiveStageShareBtn;
+let allowLiveCursorsToggle;
 let liveStageShareLinkInput;
 let copyLiveStageShareLinkBtn;
 let openLiveStageShareLinkBtn;
 let liveStageShareStatus;
 let saveModuleBtn;
 let exportTemplateBtn;
+let downloadSlidesBtn;
 let importTemplateBtn;
 let templateImportInput;
 let templateStoreCard;
@@ -135,6 +138,20 @@ let templateStoreList;
 let templateStoreSearchInput;
 let refreshTemplateStoreBtn;
 let templateStoreStatus;
+let slideExportModal;
+let closeSlideExportModalBtn;
+let slideExportStatus;
+let slideExportScopeSelect;
+let slideExportModeSelect;
+let slideExportImageFormatField;
+let slideExportImageFormatSelect;
+let slideExportVideoFormatField;
+let slideExportVideoFormatSelect;
+let slideExportVideoDurationField;
+let slideExportVideoDurationInput;
+let slideExportScaleSelect;
+let slideExportSummary;
+let startSlideExportBtn;
 let courseModuleList;
 let courseModuleCard;
 let builderCourses = [];
@@ -586,6 +603,167 @@ const liveStudentPenOverlayState = {
   dismissedStrokeKeys: new Set()
 };
 
+const LIVE_CURSOR_SEND_INTERVAL_MS = 80;
+const LIVE_CURSOR_POLL_INTERVAL_MS = 150;
+const liveCursorRuntime = {
+  overlay: null,
+  pollTimer: null,
+  lastSentAt: 0,
+  lastSignature: '',
+  visible: false
+};
+
+const hashLiveCursorSeed = (value = '') => {
+  let hash = 0;
+  const input = String(value || '');
+  for (let index = 0; index < input.length; index += 1) {
+    hash = ((hash << 5) - hash) + input.charCodeAt(index);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+};
+
+const getLiveCursorColor = (seed = '') => {
+  const hue = hashLiveCursorSeed(seed) % 360;
+  return `hsl(${hue} 78% 52%)`;
+};
+
+const getCurrentLiveCursorIdentity = () => {
+  const currentUser = getCurrentUserData();
+  return {
+    userId: String(currentUser?.id || '').trim(),
+    fullName: String(currentUser?.fullName || currentUser?.name || 'Professor').trim(),
+    role: String(currentUser?.role || 'professor').trim()
+  };
+};
+
+const moduleAllowsLiveCursorsInCreator = () => builderState.moduleSettings?.allowLiveCursors !== false;
+
+const clearCreatorLiveCursorOverlay = () => {
+  if (liveCursorRuntime.overlay) {
+    liveCursorRuntime.overlay.remove();
+  }
+  liveCursorRuntime.overlay = null;
+};
+
+const ensureCreatorLiveCursorOverlay = () => {
+  if (!slideCanvas) return null;
+  let overlay = slideCanvas.querySelector('.live-cursor-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.className = 'live-cursor-overlay';
+    slideCanvas.appendChild(overlay);
+  }
+  liveCursorRuntime.overlay = overlay;
+  return overlay;
+};
+
+const createLiveCursorMarkerNode = (cursor) => {
+  const marker = document.createElement('div');
+  marker.className = 'live-cursor-marker';
+  marker.style.color = getLiveCursorColor(cursor?.userId || cursor?.peerKey || cursor?.fullName || 'cursor');
+  marker.style.left = `${(Number(cursor?.x) || 0) * 100}%`;
+  marker.style.top = `${(Number(cursor?.y) || 0) * 100}%`;
+  marker.innerHTML = `
+    <svg class="live-cursor-pointer" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+      <path d="M2 1.6 12.8 9H7.7l-2.1 5.4-1.9-.8L5.7 9H2z"></path>
+    </svg>
+    <span class="live-cursor-label" style="background:${escapeAttribute(getLiveCursorColor(cursor?.userId || cursor?.peerKey || cursor?.fullName || 'cursor'))};">${escapeHtml(cursor?.fullName || cursor?.role || 'Ao vivo')}</span>
+  `;
+  return marker;
+};
+
+const renderCreatorLiveCursors = (cursors = []) => {
+  if (!liveStageShareState.active || !moduleAllowsLiveCursorsInCreator()) {
+    clearCreatorLiveCursorOverlay();
+    return;
+  }
+  const overlay = ensureCreatorLiveCursorOverlay();
+  if (!overlay) return;
+  const identity = getCurrentLiveCursorIdentity();
+  overlay.innerHTML = '';
+  cursors
+    .filter((cursor) => {
+      const sameUser = identity.userId && String(cursor?.userId || '').trim() === identity.userId;
+      const sameRoleName =
+        !identity.userId &&
+        String(cursor?.role || '').trim() === identity.role &&
+        String(cursor?.fullName || '').trim() === identity.fullName;
+      return !(sameUser || sameRoleName);
+    })
+    .forEach((cursor) => {
+      overlay.appendChild(createLiveCursorMarkerNode(cursor));
+    });
+};
+
+const stopCreatorLiveCursorSync = () => {
+  if (liveCursorRuntime.pollTimer) {
+    clearInterval(liveCursorRuntime.pollTimer);
+    liveCursorRuntime.pollTimer = null;
+  }
+  liveCursorRuntime.lastSentAt = 0;
+  liveCursorRuntime.lastSignature = '';
+  clearCreatorLiveCursorOverlay();
+};
+
+const fetchCreatorLiveCursors = async () => {
+  if (!liveStageShareState.active || !liveStageShareState.shareId || !moduleAllowsLiveCursorsInCreator()) {
+    clearCreatorLiveCursorOverlay();
+    return;
+  }
+  try {
+    const response = await authorizedFetch(`/api/admin/live-stage-shares/${encodeURIComponent(liveStageShareState.shareId)}/cursors`);
+    if (!response.ok) return;
+    const payload = await response.json().catch(() => null);
+    renderCreatorLiveCursors(payload?.cursors || []);
+  } catch (error) {
+    console.warn('Nao foi possivel atualizar os cursores ao vivo no creator.', error);
+  }
+};
+
+const sendCreatorLiveCursor = async (point = null, active = true) => {
+  if (!liveStageShareState.active || !liveStageShareState.shareId || !moduleAllowsLiveCursorsInCreator()) {
+    return;
+  }
+  const now = Date.now();
+  const normalizedPoint = point
+    ? {
+        x: clamp((Number(point.x) || 0) / Math.max(1, builderState.stageSize?.width || DEFAULT_STAGE_SIZE.width), 0, 1),
+        y: clamp((Number(point.y) || 0) / Math.max(1, builderState.stageSize?.height || DEFAULT_STAGE_SIZE.height), 0, 1)
+      }
+    : { x: 0, y: 0 };
+  const signature = `${active ? '1' : '0'}:${normalizedPoint.x.toFixed(4)}:${normalizedPoint.y.toFixed(4)}`;
+  if (active && signature === liveCursorRuntime.lastSignature && now - liveCursorRuntime.lastSentAt < LIVE_CURSOR_SEND_INTERVAL_MS) {
+    return;
+  }
+  if (!active && signature === liveCursorRuntime.lastSignature && now - liveCursorRuntime.lastSentAt < 250) {
+    return;
+  }
+  liveCursorRuntime.lastSignature = signature;
+  liveCursorRuntime.lastSentAt = now;
+  try {
+    await authorizedFetch(`/api/admin/live-stage-shares/${encodeURIComponent(liveStageShareState.shareId)}/cursor`, {
+      method: 'POST',
+      body: JSON.stringify({
+        active,
+        x: normalizedPoint.x,
+        y: normalizedPoint.y
+      })
+    });
+  } catch (error) {
+    console.warn('Nao foi possivel enviar o cursor ao vivo do professor.', error);
+  }
+};
+
+const startCreatorLiveCursorSync = () => {
+  stopCreatorLiveCursorSync();
+  if (!liveStageShareState.active) return;
+  liveCursorRuntime.pollTimer = setInterval(() => {
+    void fetchCreatorLiveCursors();
+  }, LIVE_CURSOR_POLL_INTERVAL_MS);
+  void fetchCreatorLiveCursors();
+};
+
 let liveStageShareController = null;
 const stopLiveStageShare = (...args) => liveStageShareController?.stopShare(...args);
 const flushLiveStageShareSync = (...args) => liveStageShareController?.flushSync(...args);
@@ -596,6 +774,10 @@ const copyLiveStageShareLink = (...args) => liveStageShareController?.copyLink(.
 
 const clipboardState = {
   element: null
+};
+
+const slideExportState = {
+  busy: false
 };
 
 const DEFAULT_KEYBOARD_MOVE_STEP = 10;
@@ -1102,9 +1284,64 @@ let teacherScreenStream = null;
 
 const creatorStudentStreams = new Map();
 const creatorStudentPeerRefs = new Map();
+const creatorStudentAudioRefs = new Map();
+
+const syncCreatorStudentAudio = (peerId, stream, { muted = false } = {}) => {
+  if (!peerId || !(stream instanceof MediaStream)) return;
+  let audio = creatorStudentAudioRefs.get(peerId);
+  if (!(audio instanceof HTMLAudioElement)) {
+    audio = document.createElement('audio');
+    audio.autoplay = true;
+    audio.playsInline = true;
+    audio.style.display = 'none';
+    document.body.appendChild(audio);
+    creatorStudentAudioRefs.set(peerId, audio);
+  }
+  if (audio.srcObject !== stream) {
+    audio.srcObject = stream;
+  }
+  audio.muted = Boolean(muted);
+  audio.play().catch(() => {});
+};
+
+const setCreatorStudentAudioMuted = (peerId, muted = false) => {
+  const audio = creatorStudentAudioRefs.get(peerId);
+  if (audio instanceof HTMLAudioElement) {
+    audio.muted = Boolean(muted);
+    audio.play().catch(() => {});
+  }
+};
+
+const removeCreatorStudentAudio = (peerId) => {
+  const audio = creatorStudentAudioRefs.get(peerId);
+  if (audio instanceof HTMLAudioElement) {
+    audio.pause();
+    audio.srcObject = null;
+    audio.remove();
+  }
+  creatorStudentAudioRefs.delete(peerId);
+};
+
+const disconnectStudentPeerInCreator = (peerId) => {
+  if (!peerId) return;
+  const peer = creatorStudentPeerRefs.get(peerId);
+  if (peer && !peer.destroyed) {
+    try {
+      peer.destroy();
+    } catch (error) {
+      console.warn(`Creator error disconnecting student ${peerId}:`, error);
+    }
+  }
+  creatorStudentPeerRefs.delete(peerId);
+  creatorStudentStreams.delete(peerId);
+  removeCreatorStudentAudio(peerId);
+};
 
 const connectToStudentPeerInCreator = (peerId) => {
-  if (creatorStudentPeerRefs.has(peerId)) return;
+  if (!peerId) return;
+  const existingPeer = creatorStudentPeerRefs.get(peerId);
+  if (existingPeer && !existingPeer.destroyed && !existingPeer.disconnected) return;
+  disconnectStudentPeerInCreator(peerId);
 
   const peer = new Peer();
   creatorStudentPeerRefs.set(peerId, peer);
@@ -1117,13 +1354,48 @@ const connectToStudentPeerInCreator = (peerId) => {
     call.answer();
     call.on('stream', (stream) => {
       creatorStudentStreams.set(peerId, stream);
+      syncCreatorStudentAudio(peerId, stream);
+      stream.getTracks?.().forEach((track) => {
+        track.addEventListener('ended', () => {
+          if (creatorStudentStreams.get(peerId) === stream) {
+            creatorStudentStreams.delete(peerId);
+            removeCreatorStudentAudio(peerId);
+            renderSlide();
+          }
+        }, { once: true });
+      });
+      renderSlide();
+    });
+    call.on('close', () => {
+      creatorStudentStreams.delete(peerId);
+      removeCreatorStudentAudio(peerId);
+      renderSlide();
+    });
+    call.on('error', () => {
+      creatorStudentStreams.delete(peerId);
+      removeCreatorStudentAudio(peerId);
       renderSlide();
     });
   });
 
   peer.on('error', (err) => {
     console.warn(`Creator error connecting to student ${peerId}:`, err);
+    disconnectStudentPeerInCreator(peerId);
+    renderSlide();
+  });
+
+  peer.on('disconnected', () => {
     creatorStudentPeerRefs.delete(peerId);
+    creatorStudentStreams.delete(peerId);
+    removeCreatorStudentAudio(peerId);
+    renderSlide();
+  });
+
+  peer.on('close', () => {
+    creatorStudentPeerRefs.delete(peerId);
+    creatorStudentStreams.delete(peerId);
+    removeCreatorStudentAudio(peerId);
+    renderSlide();
   });
 };
 
@@ -1156,6 +1428,13 @@ const {
   updateCameraEditorVisibility: (...args) => updateCameraEditorVisibility(...args),
   applyStageConstraints: (...args) => applyStageConstraints(...args),
   normalizeVideoTriggerConfig: (...args) => normalizeVideoTriggerConfig(...args),
+  onDisconnectStudentCamera: (element) => {
+    disconnectStudentCameraElement(element);
+    flushLiveStageShareSync();
+  },
+  onStudentCameraAudioMuteChange: (peerId, muted) => {
+    setCreatorStudentAudioMuted(peerId, muted);
+  },
   getUiRefs: () => ({
     cameraElementWidthInput,
     cameraElementHeightInput,
@@ -2149,6 +2428,924 @@ const exportCurrentTemplate = () => {
   alert('Template exportado com sucesso.');
 };
 
+const waitForNextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+const waitForDelay = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+const downloadBlobFile = (blob, fileName) => {
+  const downloadUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = downloadUrl;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+};
+
+const formatSlideExportFileBase = () =>
+  createSlug(moduleTitleInput?.value || '') || createSlug(moduleDescriptionInput?.value || '') || 'slides';
+
+const formatSlideExportSlideLabel = (slide, index) => {
+  const titleSlug = createSlug(slide?.title || '');
+  return `${formatSlideExportFileBase()}-slide-${String(index + 1).padStart(2, '0')}${titleSlug ? `-${titleSlug}` : ''}`;
+};
+
+const getSlidesForExport = (scope = 'current') => {
+  if (scope === 'all') {
+    return Array.isArray(builderState.slides) ? builderState.slides.filter(Boolean) : [];
+  }
+  const currentSlide = getActiveSlide();
+  return currentSlide ? [currentSlide] : [];
+};
+
+const setSlideExportStatus = (message) => {
+  if (slideExportStatus) {
+    slideExportStatus.textContent = message;
+  }
+};
+
+const setSlideExportBusy = (busy, message = '') => {
+  slideExportState.busy = busy;
+  if (startSlideExportBtn) {
+    startSlideExportBtn.disabled = busy;
+    startSlideExportBtn.textContent = busy ? 'Gerando...' : 'Gerar arquivo';
+  }
+  if (closeSlideExportModalBtn) {
+    closeSlideExportModalBtn.disabled = busy;
+  }
+  if (downloadSlidesBtn) {
+    downloadSlidesBtn.disabled = busy;
+  }
+  if (message) {
+    setSlideExportStatus(message);
+  }
+};
+
+const updateSlideExportUi = () => {
+  const mode = slideExportModeSelect?.value || 'image';
+  const scope = slideExportScopeSelect?.value || 'current';
+  const imageFormat = slideExportImageFormatSelect?.value || 'png';
+  const videoFormat = slideExportVideoFormatSelect?.value || 'webm';
+  const secondsPerSlide = Math.max(1, Number(slideExportVideoDurationInput?.value) || 3);
+  if (slideExportImageFormatField) {
+    slideExportImageFormatField.classList.toggle('hidden', mode !== 'image');
+  }
+  if (slideExportVideoFormatField) {
+    slideExportVideoFormatField.classList.toggle('hidden', mode !== 'video');
+  }
+  if (slideExportVideoDurationField) {
+    slideExportVideoDurationField.classList.toggle('hidden', mode !== 'video');
+  }
+  if (slideExportSummary) {
+    const scopeLabel = scope === 'all' ? 'todos os slides' : 'o slide atual';
+    const formatLabel =
+      mode === 'image'
+        ? `imagens ${imageFormat.toUpperCase()}`
+        : mode === 'pdf'
+          ? 'um PDF'
+          : `um vídeo ${videoFormat.toUpperCase()} com ${secondsPerSlide}s por slide`;
+    slideExportSummary.innerHTML = `<small class="muted">O exportador vai gerar ${formatLabel} usando ${scopeLabel} no tamanho do palco.</small>`;
+  }
+};
+
+const openSlideExportModal = () => {
+  if (!builderState.slides.length) {
+    alert('Adicione ao menos um slide antes de exportar.');
+    return;
+  }
+  slideExportModal?.classList.remove('hidden');
+  slideExportModal?.setAttribute('aria-hidden', 'false');
+  updateSlideExportUi();
+  setSlideExportStatus('Escolha o alcance e o formato para gerar o arquivo.');
+};
+
+const closeSlideExportModal = () => {
+  if (slideExportState.busy) {
+    return;
+  }
+  slideExportModal?.classList.add('hidden');
+  slideExportModal?.setAttribute('aria-hidden', 'true');
+};
+
+const waitForMediaElementReady = (node) =>
+  new Promise((resolve) => {
+    if (!(node instanceof HTMLImageElement) && !(node instanceof HTMLVideoElement)) {
+      resolve();
+      return;
+    }
+    if (node instanceof HTMLImageElement) {
+      if (node.complete) {
+        resolve();
+        return;
+      }
+      node.addEventListener('load', () => resolve(), { once: true });
+      node.addEventListener('error', () => resolve(), { once: true });
+      return;
+    }
+    if (node.readyState >= 2) {
+      resolve();
+      return;
+    }
+    node.preload = 'auto';
+    node.muted = true;
+    node.playsInline = true;
+    node.addEventListener('loadeddata', () => resolve(), { once: true });
+    node.addEventListener('error', () => resolve(), { once: true });
+    window.setTimeout(resolve, 1200);
+  });
+
+const copyComputedStyles = (sourceNode, targetNode) => {
+  if (!(sourceNode instanceof Element) || !(targetNode instanceof Element)) {
+    return;
+  }
+  const computedStyle = window.getComputedStyle(sourceNode);
+  const styleText = Array.from(computedStyle)
+    .map((property) => `${property}:${computedStyle.getPropertyValue(property)};`)
+    .join('');
+  targetNode.setAttribute('style', styleText);
+  targetNode.removeAttribute('id');
+};
+
+const captureVideoNodeFrameDataUrl = (videoNode) => {
+  if (!(videoNode instanceof HTMLVideoElement)) {
+    return '';
+  }
+  const width = Math.max(1, Number(videoNode.videoWidth) || Number(videoNode.clientWidth) || Number(videoNode.offsetWidth) || 1);
+  const height = Math.max(1, Number(videoNode.videoHeight) || Number(videoNode.clientHeight) || Number(videoNode.offsetHeight) || 1);
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    return '';
+  }
+  try {
+    context.drawImage(videoNode, 0, 0, width, height);
+    return canvas.toDataURL('image/png');
+  } catch (error) {
+    return '';
+  }
+};
+
+const createExportIframePlaceholder = (sourceNode) => {
+  const placeholder = document.createElement('div');
+  copyComputedStyles(sourceNode, placeholder);
+  placeholder.style.display = 'grid';
+  placeholder.style.placeItems = 'center';
+  placeholder.style.background = 'linear-gradient(135deg, #0f172a, #1e293b)';
+  placeholder.style.color = '#f8fafc';
+  placeholder.style.font = '600 16px Inter, Arial, sans-serif';
+  placeholder.style.textAlign = 'center';
+  placeholder.style.padding = '16px';
+  placeholder.textContent = 'Video incorporado';
+  return placeholder;
+};
+
+const cloneNodeForExport = async (node) => {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return document.createTextNode(node.textContent || '');
+  }
+  if (!(node instanceof Element)) {
+    return document.createTextNode('');
+  }
+  if (node instanceof HTMLCanvasElement) {
+    const image = document.createElement('img');
+    copyComputedStyles(node, image);
+    image.src = node.toDataURL('image/png');
+    return image;
+  }
+  if (node instanceof HTMLVideoElement) {
+    const image = document.createElement('img');
+    copyComputedStyles(node, image);
+    image.src = captureVideoNodeFrameDataUrl(node);
+    return image;
+  }
+  if (node instanceof HTMLIFrameElement) {
+    return createExportIframePlaceholder(node);
+  }
+  const clone = node.cloneNode(false);
+  copyComputedStyles(node, clone);
+  if (clone instanceof HTMLMediaElement) {
+    clone.removeAttribute('controls');
+  }
+  if (clone instanceof HTMLInputElement || clone instanceof HTMLTextAreaElement || clone instanceof HTMLSelectElement) {
+    clone.setAttribute('value', node.value || '');
+  }
+  for (const childNode of Array.from(node.childNodes)) {
+    clone.appendChild(await cloneNodeForExport(childNode));
+  }
+  return clone;
+};
+
+const rasterizeStageNodeForExport = async (node, width, height, scale = 2) => {
+  const rasterScale = Math.max(1, Math.min(3, Number(scale) || 2));
+  const wrapper = document.createElement('div');
+  wrapper.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
+  wrapper.style.width = `${width}px`;
+  wrapper.style.height = `${height}px`;
+  wrapper.style.margin = '0';
+  wrapper.style.padding = '0';
+  wrapper.style.overflow = 'hidden';
+  wrapper.style.position = 'relative';
+  const clone = await cloneNodeForExport(node);
+  if (clone instanceof HTMLElement) {
+    clone.style.position = 'relative';
+    clone.style.left = '0';
+    clone.style.top = '0';
+    clone.style.margin = '0';
+    clone.style.width = `${width}px`;
+    clone.style.height = `${height}px`;
+    clone.style.transform = 'none';
+  }
+  wrapper.appendChild(clone);
+  const markup = new XMLSerializer().serializeToString(wrapper);
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${width * rasterScale}" height="${height * rasterScale}" viewBox="0 0 ${width} ${height}">
+      <foreignObject width="100%" height="100%">${markup}</foreignObject>
+    </svg>
+  `;
+  const image = await loadImageElement(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(width * rasterScale));
+  canvas.height = Math.max(1, Math.round(height * rasterScale));
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('Nao foi possivel gerar o canvas da exportacao.');
+  }
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return canvas;
+};
+
+const createExportVideoPlaceholderNode = (element) => {
+  const shell = document.createElement('div');
+  shell.className = 'builder-media-embed';
+  const placeholder = document.createElement('div');
+  placeholder.className = 'builder-media-element';
+  placeholder.style.display = 'grid';
+  placeholder.style.placeItems = 'center';
+  placeholder.style.background = 'linear-gradient(135deg, #0f172a, #1e293b)';
+  placeholder.style.color = '#f8fafc';
+  placeholder.style.font = '600 16px Inter, Arial, sans-serif';
+  placeholder.textContent = element.provider === 'youtube' ? 'Video do YouTube' : 'Video';
+  shell.appendChild(placeholder);
+  return shell;
+};
+
+const renderSlideToExportStage = async (slide) => {
+  const stageSize = getStageDimensions();
+  const stageNode = document.createElement('div');
+  stageNode.className = 'stage-canvas';
+  stageNode.style.position = 'fixed';
+  stageNode.style.left = '-20000px';
+  stageNode.style.top = '0';
+  stageNode.style.width = `${stageSize.width}px`;
+  stageNode.style.height = `${stageSize.height}px`;
+  stageNode.style.minWidth = `${stageSize.width}px`;
+  stageNode.style.minHeight = `${stageSize.height}px`;
+  stageNode.style.maxWidth = `${stageSize.width}px`;
+  stageNode.style.maxHeight = `${stageSize.height}px`;
+  stageNode.style.overflow = 'hidden';
+  stageNode.style.pointerEvents = 'none';
+  stageNode.style.transform = 'none';
+  stageNode.style.zIndex = '-1';
+  document.body.appendChild(stageNode);
+  const backgroundStyles = getSlideBackgroundStyles(slide);
+  renderStageBackgroundMedia(stageNode, slide, { interactive: false });
+  stageNode.style.backgroundImage = backgroundStyles.backgroundImage;
+  stageNode.style.backgroundSize = backgroundStyles.backgroundImage ? 'cover' : '';
+  stageNode.style.backgroundPosition = backgroundStyles.backgroundImage ? 'center' : '';
+  stageNode.style.backgroundColor = backgroundStyles.backgroundColor;
+  const deferredCaptionOverlays = [];
+  (slide?.elements || [])
+    .filter((element) => !element?.initiallyHidden)
+    .slice()
+    .sort((a, b) => (Number(a.zIndex) || 0) - (Number(b.zIndex) || 0))
+    .forEach((element) => {
+      let node = createPreviewElementNode(element, slide, { forExport: true });
+      if (element.type === 'video' && element.provider === 'youtube' && element.embedSrc) {
+        node = createExportVideoPlaceholderNode(element);
+      }
+      stageNode.appendChild(node);
+      if (['audio', 'video'].includes(element.type)) {
+        const mediaNode = getPreviewMediaNode(node);
+        if (mediaNode instanceof HTMLVideoElement) {
+          mediaNode.controls = false;
+          mediaNode.muted = true;
+          mediaNode.currentTime = 0;
+        }
+        if (mediaNode instanceof HTMLAudioElement) {
+          mediaNode.controls = false;
+        }
+        const overlayNode = createMediaCaptionOverlayNode(element, mediaNode, {
+          stageNode,
+          interactive: false,
+          keepVisibleWhenIdle: true
+        });
+        if (overlayNode) {
+          deferredCaptionOverlays.push({
+            element,
+            overlayNode,
+            zIndex: Number(element.zIndex) || 0
+          });
+        }
+      }
+    });
+  deferredCaptionOverlays
+    .sort((a, b) => a.zIndex - b.zIndex)
+    .forEach(({ element, overlayNode, zIndex }) => {
+      overlayNode.style.zIndex = String(zIndex + 1);
+      stageNode.appendChild(overlayNode);
+      positionCaptionOverlayNode(overlayNode, element, stageNode);
+    });
+  await document.fonts?.ready?.catch?.(() => {});
+  await Promise.all(Array.from(stageNode.querySelectorAll('img, video')).map((node) => waitForMediaElementReady(node)));
+  await waitForNextFrame();
+  return { stageNode, stageSize };
+};
+
+const drawExportImage = (context, image, x, y, width, height, fit = 'cover', options = {}) => {
+  const sourceWidth = image.naturalWidth || image.videoWidth || image.width || 1;
+  const sourceHeight = image.naturalHeight || image.videoHeight || image.height || 1;
+  const radius = Math.max(0, Number(options.radius) || 0);
+  const clip = options.clip !== false;
+  context.save();
+  if (clip) {
+    drawRoundedRectPath(context, x, y, width, height, radius);
+    context.clip();
+  }
+  if (fit === 'fill') {
+    context.drawImage(image, x, y, width, height);
+    context.restore();
+    return;
+  }
+  const scale = fit === 'contain'
+    ? Math.min(width / sourceWidth, height / sourceHeight)
+    : Math.max(width / sourceWidth, height / sourceHeight);
+  const drawWidth = sourceWidth * scale;
+  const drawHeight = sourceHeight * scale;
+  context.drawImage(image, x + (width - drawWidth) / 2, y + (height - drawHeight) / 2, drawWidth, drawHeight);
+  context.restore();
+};
+
+const buildExportFillStyle = (context, source = {}, width = 1, height = 1, fallback = '#f4f6ff') => {
+  if (source.useGradient && source.gradientStart && source.gradientEnd) {
+    const gradient = context.createLinearGradient(0, 0, width, height);
+    gradient.addColorStop(0, source.gradientStart);
+    gradient.addColorStop(1, source.gradientEnd);
+    return gradient;
+  }
+  return source.solidColor || source.backgroundColor || fallback;
+};
+
+const drawExportShapeBackground = (context, source = {}, width = 1, height = 1, fallback = '#f4f6ff') => {
+  context.save();
+  buildBlockCanvasPath(context, source.shape || 'rectangle', width, height);
+  context.clip();
+  context.fillStyle = buildExportFillStyle(context, source, width, height, fallback);
+  context.fillRect(0, 0, width, height);
+  context.restore();
+};
+
+const wrapCanvasText = (context, text = '', maxWidth = 100) => {
+  const paragraphs = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  const lines = [];
+  paragraphs.forEach((paragraph) => {
+    const words = paragraph.split(/\s+/).filter(Boolean);
+    if (!words.length) {
+      lines.push('');
+      return;
+    }
+    let currentLine = '';
+    words.forEach((word) => {
+      const candidate = currentLine ? `${currentLine} ${word}` : word;
+      if (context.measureText(candidate).width <= maxWidth || !currentLine) {
+        currentLine = candidate;
+      } else {
+        lines.push(currentLine);
+        currentLine = word;
+      }
+    });
+    if (currentLine) {
+      lines.push(currentLine);
+    }
+  });
+  return lines;
+};
+
+const drawExportTextLines = (context, lines = [], x, y, width, height, options = {}) => {
+  const fontSize = Math.max(8, Number(options.fontSize) || 18);
+  const lineHeight = Math.max(10, fontSize * 1.28);
+  const maxLines = Math.max(1, Math.floor(height / lineHeight));
+  const visibleLines = lines.slice(0, maxLines);
+  context.save();
+  context.fillStyle = options.color || '#0f142c';
+  context.font = `${options.fontWeight || '500'} ${fontSize}px ${options.fontFamily || 'Inter, Arial, sans-serif'}`;
+  context.textBaseline = 'top';
+  context.textAlign = options.align === 'center' ? 'center' : options.align === 'right' ? 'right' : 'left';
+  const textX = options.align === 'center' ? x + width / 2 : options.align === 'right' ? x + width : x;
+  visibleLines.forEach((line, index) => {
+    context.fillText(line, textX, y + index * lineHeight, width);
+  });
+  context.restore();
+};
+
+const drawExportTextElement = (context, element, width, height) => {
+  const flags = getTextDecorationFlags(element, { hasTextBackground: false, hasTextBorder: false, hasTextBlock: false });
+  if (flags.hasTextBackground && element.backgroundColor) {
+    context.save();
+    context.fillStyle = element.backgroundColor;
+    drawRoundedRectPath(context, 0, 0, width, height, 12);
+    context.fill();
+    context.restore();
+  }
+  if (flags.hasTextBorder) {
+    context.save();
+    context.strokeStyle = element.borderColor || 'rgba(15, 23, 42, 0.2)';
+    context.lineWidth = 2;
+    drawRoundedRectPath(context, 1, 1, width - 2, height - 2, 12);
+    context.stroke();
+    context.restore();
+  }
+  const padding = flags.hasTextBackground || flags.hasTextBorder ? 12 : 0;
+  context.font = `${element.fontWeight || '400'} ${Math.max(8, Number(element.fontSize) || 24)}px ${element.fontFamily || 'Inter, Arial, sans-serif'}`;
+  const lines = wrapCanvasText(context, stripHtml(element.content || ''), Math.max(1, width - padding * 2));
+  drawExportTextLines(context, lines, padding, padding, Math.max(1, width - padding * 2), Math.max(1, height - padding * 2), {
+    color: element.textColor || '#0f142c',
+    fontSize: element.fontSize || 24,
+    fontFamily: element.fontFamily || 'Inter, Arial, sans-serif',
+    fontWeight: element.fontWeight || '400',
+    align: element.textAlign || 'left'
+  });
+};
+
+const drawExportBlockLikeElement = (context, element, width, height, text = '') => {
+  drawExportShapeBackground(context, element, width, height, '#f4f6ff');
+  const padding = Math.max(12, Math.min(24, Math.min(width, height) * 0.08));
+  context.font = `${element.fontWeight || '500'} ${Math.max(8, Number(element.fontSize) || 18)}px ${element.fontFamily || 'Inter, Arial, sans-serif'}`;
+  const lines = wrapCanvasText(context, stripHtml(text || element.content || ''), Math.max(1, width - padding * 2));
+  drawExportTextLines(context, lines, padding, padding, Math.max(1, width - padding * 2), Math.max(1, height - padding * 2), {
+    color: element.textColor || '#0f142c',
+    fontSize: element.fontSize || 18,
+    fontFamily: element.fontFamily || 'Inter, Arial, sans-serif',
+    fontWeight: element.fontWeight || '500',
+    align: element.textAlign || 'left'
+  });
+};
+
+const drawExportPlaceholder = (context, label, width, height) => {
+  context.save();
+  context.fillStyle = '#111827';
+  drawRoundedRectPath(context, 0, 0, width, height, 14);
+  context.fill();
+  context.fillStyle = '#f8fafc';
+  context.font = '700 16px Inter, Arial, sans-serif';
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  context.fillText(label, width / 2, height / 2, Math.max(20, width - 24));
+  context.restore();
+};
+
+const drawExportQuizElement = (context, element, width, height) => {
+  context.save();
+  context.fillStyle = element.quizBackgroundColor || '#ffffff';
+  drawRoundedRectPath(context, 0, 0, width, height, 18);
+  context.fill();
+  context.strokeStyle = 'rgba(15, 23, 42, 0.12)';
+  context.stroke();
+  const padding = 18;
+  context.font = `${element.fontWeight || '700'} ${Math.max(12, Number(element.fontSize) || 18)}px ${element.fontFamily || 'Inter, Arial, sans-serif'}`;
+  const questionLines = wrapCanvasText(context, stripHtml(element.question || 'Pergunta'), width - padding * 2);
+  drawExportTextLines(context, questionLines, padding, padding, width - padding * 2, height * 0.28, {
+    color: element.quizQuestionColor || '#171934',
+    fontSize: element.fontSize || 18,
+    fontFamily: element.fontFamily || 'Inter, Arial, sans-serif',
+    fontWeight: '700'
+  });
+  let optionY = padding + Math.min(height * 0.28, questionLines.length * ((Number(element.fontSize) || 18) * 1.28) + 10);
+  (Array.isArray(element.options) ? element.options : []).slice(0, 4).forEach((option, index) => {
+    const optionHeight = Math.min(34, Math.max(24, (height - optionY - 52) / 4));
+    context.fillStyle = element.quizOptionBackgroundColor || '#f4f6ff';
+    drawRoundedRectPath(context, padding, optionY, width - padding * 2, optionHeight, 10);
+    context.fill();
+    context.fillStyle = element.quizOptionTextColor || '#25284c';
+    context.font = `500 ${Math.max(11, Number(element.fontSize) - 2 || 14)}px ${element.fontFamily || 'Inter, Arial, sans-serif'}`;
+    context.textAlign = 'left';
+    context.textBaseline = 'middle';
+    context.fillText(`${index + 1}. ${stripHtml(option)}`, padding + 12, optionY + optionHeight / 2, width - padding * 2 - 24);
+    optionY += optionHeight + 8;
+  });
+  context.fillStyle = element.quizButtonBackgroundColor || '#6d63ff';
+  drawRoundedRectPath(context, padding, Math.max(optionY, height - 48), Math.min(190, width - padding * 2), 34, 10);
+  context.fill();
+  context.fillStyle = '#ffffff';
+  context.font = '700 13px Inter, Arial, sans-serif';
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  context.fillText(element.actionLabel || 'Validar resposta', padding + Math.min(190, width - padding * 2) / 2, Math.max(optionY, height - 48) + 17);
+  context.restore();
+};
+
+const drawExportDetectorElement = (context, element, width, height) => {
+  context.save();
+  context.fillStyle = 'rgba(59, 130, 246, 0.08)';
+  context.strokeStyle = element.borderColor || 'rgba(37, 99, 235, 0.8)';
+  context.lineWidth = 3;
+  context.setLineDash([10, 7]);
+  drawRoundedRectPath(context, 2, 2, Math.max(1, width - 4), Math.max(1, height - 4), 16);
+  context.fill();
+  context.stroke();
+  context.setLineDash([]);
+  context.fillStyle = 'rgba(37, 99, 235, 0.9)';
+  context.font = '700 14px Inter, Arial, sans-serif';
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  context.fillText(element.type === 'timedTrigger' ? 'Gatilho por tempo' : 'Detector', width / 2, height / 2, Math.max(20, width - 20));
+  context.restore();
+};
+
+const drawExportElement = async (context, element, slide, scale) => {
+  const renderState = getElementRenderState(element);
+  const width = Math.max(1, Number(renderState.width) || Number(element.width) || MIN_ELEMENT_SIZE);
+  const height = Math.max(1, Number(renderState.height) || Number(element.height) || MIN_ELEMENT_SIZE);
+  const x = Number(renderState.x) || 0;
+  const y = Number(renderState.y) || 0;
+  const rotation = (Number(renderState.rotation) || 0) * Math.PI / 180;
+  context.save();
+  context.globalAlpha = clamp(Number(renderState.opacity ?? 1), 0, 1);
+  context.translate((x + width / 2) * scale, (y + height / 2) * scale);
+  context.rotate(rotation);
+  context.scale(scale, scale);
+  context.translate(-width / 2, -height / 2);
+  switch (element.type) {
+    case 'text':
+      drawExportTextElement(context, element, width, height);
+      break;
+    case 'block':
+      drawExportBlockLikeElement(context, element, width, height);
+      break;
+    case 'floatingButton':
+      drawExportBlockLikeElement(context, { ...element, backgroundColor: element.backgroundColor || element.solidColor || '#6d63ff', textAlign: 'center' }, width, height, element.label || 'Acao');
+      break;
+    case 'image': {
+      try {
+        const image = await loadImageElement(element.src || IMAGE_FALLBACK_SRC);
+        drawExportImage(context, image, 0, 0, width, height, getElementMediaObjectFit(element), { radius: 16, clip: true });
+      } catch (error) {
+        drawExportPlaceholder(context, 'Imagem', width, height);
+      }
+      break;
+    }
+    case 'pen': {
+      const penCanvas = renderPenElementToCanvas(element, width, height, scale);
+      context.drawImage(penCanvas, 0, 0, width, height);
+      break;
+    }
+    case 'quiz':
+      drawExportQuizElement(context, element, width, height);
+      break;
+    case 'input':
+      drawExportBlockLikeElement(context, {
+        ...element,
+        backgroundColor: element.backgroundColor || '#ffffff',
+        textColor: element.textColor || '#334155',
+        fontSize: element.fontSize || 16,
+        fontWeight: element.fontWeight || '500'
+      }, width, height, element.placeholder || 'Digite sua resposta');
+      break;
+    case 'detector':
+    case 'timedTrigger':
+      drawExportDetectorElement(context, element, width, height);
+      break;
+    case 'audio':
+      drawExportPlaceholder(context, 'Audio', width, height);
+      break;
+    case 'video':
+      drawExportPlaceholder(context, element.provider === 'youtube' ? 'Video do YouTube' : 'Video', width, height);
+      break;
+    case 'camera':
+    case 'screenShare':
+      drawExportPlaceholder(context, element.type === 'screenShare' ? 'Tela' : 'Camera', width, height);
+      break;
+    case 'key':
+      drawExportBlockLikeElement(context, {
+        ...element,
+        backgroundColor: element.backgroundColor || element.solidColor || '#2563eb',
+        textColor: element.textColor || '#ffffff',
+        textAlign: 'center'
+      }, width, height, 'Tecla');
+      break;
+    default:
+      drawExportBlockLikeElement(context, element, width, height, element.content || 'Elemento');
+      break;
+  }
+  context.restore();
+};
+
+const drawExportSlideBackground = async (context, slide, width, height, scale) => {
+  const normalized = normalizeSlideBackgroundFill(slide);
+  context.save();
+  if (normalized.backgroundFillType === 'gradient') {
+    const gradient = context.createLinearGradient(0, 0, width * scale, height * scale);
+    gradient.addColorStop(0, normalized.backgroundGradientStart || '#fdfbff');
+    gradient.addColorStop(1, normalized.backgroundGradientEnd || '#dfe7ff');
+    context.fillStyle = gradient;
+  } else {
+    context.fillStyle = normalized.backgroundColor || '#fdfbff';
+  }
+  context.fillRect(0, 0, width * scale, height * scale);
+  context.restore();
+  if (normalized.backgroundImage) {
+    try {
+      const image = await loadImageElement(normalized.backgroundImage);
+      drawExportImage(context, image, 0, 0, width * scale, height * scale, 'cover');
+    } catch (error) {
+      console.warn('Nao foi possivel desenhar a imagem de fundo na exportacao.', error);
+    }
+  }
+};
+
+const renderSlideToCanvasDirect = async (slide, options = {}) => {
+  const stageSize = getStageDimensions();
+  const scale = Math.max(1, Math.min(3, Number(options.scale) || 2));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(stageSize.width * scale));
+  canvas.height = Math.max(1, Math.round(stageSize.height * scale));
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('Nao foi possivel preparar a exportacao.');
+  }
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
+  await drawExportSlideBackground(context, slide, stageSize.width, stageSize.height, scale);
+  const elements = (slide?.elements || [])
+    .filter((element) => !element?.initiallyHidden)
+    .slice()
+    .sort((a, b) => (Number(a.zIndex) || 0) - (Number(b.zIndex) || 0));
+  for (const element of elements) {
+    await drawExportElement(context, element, slide, scale);
+  }
+  return canvas;
+};
+
+const renderSlideToExportCanvas = async (slide, options = {}) => {
+  return renderSlideToCanvasDirect(slide, options);
+};
+
+const canvasToBlob = (canvas, mimeType, quality = 0.92) =>
+  new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) {
+        resolve(blob);
+        return;
+      }
+      reject(new Error('Nao foi possivel gerar o arquivo.'));
+    }, mimeType, quality);
+  });
+
+const dataUrlToUint8Array = (dataUrl) => {
+  const base64 = String(dataUrl || '').split(',')[1] || '';
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+};
+
+const getJpegDimensions = (bytes) => {
+  let offset = 2;
+  while (offset < bytes.length) {
+    if (bytes[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+    const marker = bytes[offset + 1];
+    const blockLength = (bytes[offset + 2] << 8) + bytes[offset + 3];
+    const isStartOfFrame =
+      marker >= 0xc0 &&
+      marker <= 0xcf &&
+      ![0xc4, 0xc8, 0xcc].includes(marker);
+    if (isStartOfFrame) {
+      return {
+        height: (bytes[offset + 5] << 8) + bytes[offset + 6],
+        width: (bytes[offset + 7] << 8) + bytes[offset + 8]
+      };
+    }
+    offset += 2 + blockLength;
+  }
+  throw new Error('Nao foi possivel ler as dimensoes do JPEG.');
+};
+
+const encodePdfAscii = (value) => new TextEncoder().encode(value);
+
+const buildPdfFromJpegDataUrls = (pages = []) => {
+  const objects = [];
+  const pageObjectNumbers = [];
+  const imageObjectNumbers = [];
+  const contentObjectNumbers = [];
+  const totalObjectCount = 2 + (pages.length * 3);
+  let nextObjectNumber = 3;
+
+  pages.forEach(() => {
+    pageObjectNumbers.push(nextObjectNumber);
+    nextObjectNumber += 1;
+    imageObjectNumbers.push(nextObjectNumber);
+    nextObjectNumber += 1;
+    contentObjectNumbers.push(nextObjectNumber);
+    nextObjectNumber += 1;
+  });
+
+  const pageKids = pageObjectNumbers.map((objectNumber) => `${objectNumber} 0 R`).join(' ');
+  objects.push({
+    number: 1,
+    chunks: [encodePdfAscii(`<< /Type /Catalog /Pages 2 0 R >>`)]
+  });
+  objects.push({
+    number: 2,
+    chunks: [encodePdfAscii(`<< /Type /Pages /Count ${pages.length} /Kids [${pageKids}] >>`)]
+  });
+
+  pages.forEach((page, index) => {
+    const imageBytes = dataUrlToUint8Array(page.dataUrl);
+    const dimensions = getJpegDimensions(imageBytes);
+    const mediaWidth = Math.max(1, dimensions.width);
+    const mediaHeight = Math.max(1, dimensions.height);
+    const imageName = `Im${index + 1}`;
+    const contentStream = `q\n${mediaWidth} 0 0 ${mediaHeight} 0 0 cm\n/${imageName} Do\nQ`;
+    objects.push({
+      number: pageObjectNumbers[index],
+      chunks: [encodePdfAscii(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${mediaWidth} ${mediaHeight}] /Resources << /XObject << /${imageName} ${imageObjectNumbers[index]} 0 R >> >> /Contents ${contentObjectNumbers[index]} 0 R >>`)]
+    });
+    objects.push({
+      number: imageObjectNumbers[index],
+      chunks: [
+        encodePdfAscii(`<< /Type /XObject /Subtype /Image /Width ${mediaWidth} /Height ${mediaHeight} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${imageBytes.length} >>\nstream\n`),
+        imageBytes,
+        encodePdfAscii(`\nendstream`)
+      ]
+    });
+    const contentBytes = encodePdfAscii(contentStream);
+    objects.push({
+      number: contentObjectNumbers[index],
+      chunks: [
+        encodePdfAscii(`<< /Length ${contentBytes.length} >>\nstream\n`),
+        contentBytes,
+        encodePdfAscii(`\nendstream`)
+      ]
+    });
+  });
+
+  const xrefEntries = ['0000000000 65535 f '];
+  const fileChunks = [encodePdfAscii('%PDF-1.4\n%\xFF\xFF\xFF\xFF\n')];
+  let currentLength = fileChunks[0].length;
+
+  objects
+    .sort((left, right) => left.number - right.number)
+    .forEach((object) => {
+      xrefEntries.push(String(currentLength).padStart(10, '0') + ' 00000 n ');
+      const header = encodePdfAscii(`${object.number} 0 obj\n`);
+      const footer = encodePdfAscii(`\nendobj\n`);
+      fileChunks.push(header);
+      currentLength += header.length;
+      object.chunks.forEach((chunk) => {
+        fileChunks.push(chunk);
+        currentLength += chunk.length;
+      });
+      fileChunks.push(footer);
+      currentLength += footer.length;
+    });
+
+  const xrefOffset = currentLength;
+  const xrefBlock = encodePdfAscii(
+    `xref\n0 ${totalObjectCount + 1}\n${xrefEntries.join('\n')}\ntrailer\n<< /Size ${totalObjectCount + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`
+  );
+  fileChunks.push(xrefBlock);
+
+  return new Blob(fileChunks, { type: 'application/pdf' });
+};
+
+const getSupportedSlideExportVideoMimeType = () => {
+  if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') {
+    return '';
+  }
+  return ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
+    .find((candidate) => MediaRecorder.isTypeSupported(candidate)) || '';
+};
+
+const exportSlidesAsVideo = async (slides, canvases, options = {}) => {
+  if (typeof MediaRecorder === 'undefined') {
+    throw new Error('Este navegador nao suporta exportacao de video.');
+  }
+  const firstCanvas = canvases[0];
+  if (!(firstCanvas instanceof HTMLCanvasElement)) {
+    throw new Error('Nao foi possivel preparar os slides para o video.');
+  }
+  const secondsPerSlide = Math.max(1, Number(options.secondsPerSlide) || 3);
+  const fps = 30;
+  const frameDelay = Math.max(16, Math.round(1000 / fps));
+  const outputCanvas = document.createElement('canvas');
+  outputCanvas.width = firstCanvas.width;
+  outputCanvas.height = firstCanvas.height;
+  const context = outputCanvas.getContext('2d');
+  if (!context) {
+    throw new Error('Nao foi possivel criar o video.');
+  }
+  const stream = outputCanvas.captureStream(fps);
+  const mimeType = getSupportedSlideExportVideoMimeType();
+  const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+  const chunks = [];
+  recorder.addEventListener('dataavailable', (event) => {
+    if (event.data?.size) {
+      chunks.push(event.data);
+    }
+  });
+  const stopped = new Promise((resolve, reject) => {
+    recorder.addEventListener('stop', () => resolve(), { once: true });
+    recorder.addEventListener('error', (event) => reject(event.error || new Error('Falha ao gravar o video.')), { once: true });
+  });
+  recorder.start();
+  for (let slideIndex = 0; slideIndex < canvases.length; slideIndex += 1) {
+    const canvas = canvases[slideIndex];
+    const startedAt = performance.now();
+    while (performance.now() - startedAt < secondsPerSlide * 1000) {
+      context.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
+      context.drawImage(canvas, 0, 0, outputCanvas.width, outputCanvas.height);
+      await waitForDelay(frameDelay);
+    }
+  }
+  await waitForDelay(120);
+  recorder.stop();
+  await stopped;
+  stream.getTracks().forEach((track) => track.stop());
+  const extension = mimeType.includes('vp9') || mimeType.includes('vp8') || mimeType.includes('webm') ? 'webm' : 'webm';
+  downloadBlobFile(new Blob(chunks, { type: mimeType || 'video/webm' }), `${formatSlideExportFileBase()}.${extension}`);
+};
+
+const exportSlidesAsImages = async (slides, canvases, options = {}) => {
+  const mimeType = options.format === 'jpeg' ? 'image/jpeg' : 'image/png';
+  const extension = options.format === 'jpeg' ? 'jpg' : 'png';
+  for (let index = 0; index < canvases.length; index += 1) {
+    const blob = await canvasToBlob(canvases[index], mimeType, options.format === 'jpeg' ? 0.92 : 1);
+    const fileName = `${formatSlideExportSlideLabel(slides[index], index)}.${extension}`;
+    downloadBlobFile(blob, fileName);
+    if (canvases.length > 1) {
+      await waitForDelay(180);
+    }
+  }
+};
+
+const exportSlidesAsPdf = async (slides, canvases) => {
+  const jpegPages = canvases.map((canvas) => ({
+    dataUrl: canvas.toDataURL('image/jpeg', 0.94)
+  }));
+  const pdfBlob = buildPdfFromJpegDataUrls(jpegPages);
+  const suffix = slides.length > 1 ? '-todos' : '-atual';
+  downloadBlobFile(pdfBlob, `${formatSlideExportFileBase()}${suffix}.pdf`);
+};
+
+const startSlideExport = async () => {
+  if (slideExportState.busy) {
+    return;
+  }
+  const scope = slideExportScopeSelect?.value || 'current';
+  const mode = slideExportModeSelect?.value || 'image';
+  const imageFormat = slideExportImageFormatSelect?.value || 'png';
+  const secondsPerSlide = Math.max(1, Number(slideExportVideoDurationInput?.value) || 3);
+  const scale = Math.max(1, Math.min(3, Number(slideExportScaleSelect?.value) || 2));
+  const slides = getSlidesForExport(scope);
+  if (!slides.length) {
+    alert('Nao ha slides para exportar.');
+    return;
+  }
+  try {
+    setSlideExportBusy(true, 'Preparando slides para exportacao...');
+    const canvases = [];
+    for (let index = 0; index < slides.length; index += 1) {
+      setSlideExportStatus(`Renderizando slide ${index + 1} de ${slides.length}...`);
+      canvases.push(await renderSlideToExportCanvas(slides[index], { scale }));
+    }
+    if (mode === 'image') {
+      setSlideExportStatus('Gerando imagens...');
+      await exportSlidesAsImages(slides, canvases, { format: imageFormat });
+    } else if (mode === 'pdf') {
+      setSlideExportStatus('Gerando PDF...');
+      await exportSlidesAsPdf(slides, canvases);
+    } else {
+      setSlideExportStatus('Gerando video...');
+      await exportSlidesAsVideo(slides, canvases, { secondsPerSlide });
+    }
+    setSlideExportBusy(false, 'Exportacao concluida.');
+    closeSlideExportModal();
+  } catch (error) {
+    console.error('Falha ao exportar slides', error);
+    setSlideExportBusy(false, error.message || 'Nao foi possivel exportar os slides.');
+    alert(error.message || 'Nao foi possivel exportar os slides.');
+  }
+};
+
 const importTemplateFromFile = async (file) => {
   if (!file) {
     return;
@@ -2805,10 +4002,19 @@ const buildLiveStageSharePayload = () => {
         allowStudentPen:
           document.getElementById('allowLiveStudentPenToggle')?.checked === true ||
           Boolean(builderState.moduleSettings?.allowStudentPen) ||
-          moduleHasStudentPaintEnabled(builderState.slides || [])
+          moduleHasStudentPaintEnabled(builderState.slides || []),
+        allowLiveCursors:
+          document.getElementById('allowLiveCursorsToggle')?.checked !== false &&
+          builderState.moduleSettings?.allowLiveCursors !== false
       },
       liveCameraPeerId: liveStageShareState.liveCameraPeerId || null,
-      liveScreenPeerId: liveStageShareState.liveScreenPeerId || null
+      liveScreenPeerId: liveStageShareState.liveScreenPeerId || null,
+      disconnectedStudentIds: Array.isArray(liveStageShareState.disconnectedStudentIds)
+        ? liveStageShareState.disconnectedStudentIds.map((id) => String(id || '').trim()).filter(Boolean)
+        : [],
+      disconnectedStudentNames: Array.isArray(liveStageShareState.disconnectedStudentNames)
+        ? liveStageShareState.disconnectedStudentNames.map((name) => String(name || '').trim()).filter(Boolean)
+        : []
     }
   };
 };
@@ -2830,9 +4036,15 @@ const syncLiveStageShareUi = () => {
     transmitCameraBtn?.classList.remove('hidden');
     transmitScreenBtn?.classList.remove('hidden');
     liveStageShareStatus.textContent = 'Compartilhamento ao vivo ativo. Os alunos veem o palco sendo editado em tempo real.';
+    if (moduleAllowsLiveCursorsInCreator()) {
+      startCreatorLiveCursorSync();
+    } else {
+      stopCreatorLiveCursorSync();
+    }
   } else {
     transmitCameraBtn?.classList.add('hidden');
     transmitScreenBtn?.classList.add('hidden');
+    stopCreatorLiveCursorSync();
     stopCameraShare();
     stopScreenShare();
     liveStageShareStatus.textContent = 'Os alunos verão o palco sendo editado em tempo real, sem acesso ao editor.';
@@ -2842,8 +4054,105 @@ const syncLiveStageShareUi = () => {
 
 let liveCameraRequests = [];
 
+const findStudentCameraElements = (req = {}) => {
+  const requestUserId = String(req.userId || '').trim();
+  const requestPeerId = String(req.peerId || '').trim();
+  const requestFullName = String(req.fullName || '').trim();
+  const elements = [];
+  (builderState.slides || []).forEach((slide) => {
+    (slide?.elements || []).forEach((element) => {
+      if (element?.type !== 'camera') return;
+      const sameUser = requestUserId && String(element.studentUserId || '').trim() === requestUserId;
+      const samePeer = requestPeerId && String(element.studentPeerId || '').trim() === requestPeerId;
+      const sameName = !element.studentUserId && requestFullName && String(element.studentName || '').trim() === requestFullName;
+      if (sameUser || samePeer || sameName) {
+        elements.push({ slide, element });
+      }
+    });
+  });
+  return elements;
+};
+
+const markStudentCameraDisconnected = (studentUserId, studentName = '') => {
+  const normalizedUserId = String(studentUserId || '').trim();
+  const normalizedName = String(studentName || '').trim();
+  const currentIds = Array.isArray(liveStageShareState.disconnectedStudentIds)
+    ? liveStageShareState.disconnectedStudentIds.map((id) => String(id || '').trim()).filter(Boolean)
+    : [];
+  const currentNames = Array.isArray(liveStageShareState.disconnectedStudentNames)
+    ? liveStageShareState.disconnectedStudentNames.map((name) => String(name || '').trim()).filter(Boolean)
+    : [];
+  if (normalizedUserId && !currentIds.includes(normalizedUserId)) {
+    liveStageShareState.disconnectedStudentIds = [...currentIds, normalizedUserId];
+  }
+  if (normalizedName && !currentNames.includes(normalizedName)) {
+    liveStageShareState.disconnectedStudentNames = [...currentNames, normalizedName];
+  }
+};
+
+const clearStudentCameraDisconnected = (studentUserId, studentName = '') => {
+  const normalizedUserId = String(studentUserId || '').trim();
+  const normalizedName = String(studentName || '').trim();
+  const currentIds = Array.isArray(liveStageShareState.disconnectedStudentIds)
+    ? liveStageShareState.disconnectedStudentIds.map((id) => String(id || '').trim()).filter(Boolean)
+    : [];
+  const currentNames = Array.isArray(liveStageShareState.disconnectedStudentNames)
+    ? liveStageShareState.disconnectedStudentNames.map((name) => String(name || '').trim()).filter(Boolean)
+    : [];
+  if (normalizedUserId) {
+    liveStageShareState.disconnectedStudentIds = currentIds.filter((id) => id !== normalizedUserId);
+  }
+  if (normalizedName) {
+    liveStageShareState.disconnectedStudentNames = currentNames.filter((name) => name !== normalizedName);
+  }
+};
+
+const disconnectStudentCameraElement = (element) => {
+  if (!element || element.type !== 'camera') return;
+  markStudentCameraDisconnected(element.studentUserId, element.studentName);
+  if (element.studentPeerId) {
+    disconnectStudentPeerInCreator(element.studentPeerId);
+  }
+};
+
+const applyStudentCameraReconnects = (requests = []) => {
+  let changed = false;
+  requests.forEach((req) => {
+    const nextPeerId = String(req?.peerId || '').trim();
+    if (!nextPeerId) return;
+    findStudentCameraElements(req).forEach(({ element }) => {
+      const previousPeerId = String(element.studentPeerId || '').trim();
+      if (previousPeerId && previousPeerId !== nextPeerId) {
+        disconnectStudentPeerInCreator(previousPeerId);
+      }
+      if (element.studentPeerId !== nextPeerId) {
+        element.studentPeerId = nextPeerId;
+        changed = true;
+      }
+      if (req.userId && element.studentUserId !== req.userId) {
+        element.studentUserId = req.userId;
+        changed = true;
+      }
+      if (req.fullName && element.studentName !== req.fullName) {
+        element.studentName = req.fullName;
+        changed = true;
+      }
+      clearStudentCameraDisconnected(req.userId, req.fullName);
+      connectToStudentPeerInCreator(nextPeerId);
+    });
+  });
+  if (changed) {
+    renderSlide();
+    scheduleBuilderAutosave();
+    flushLiveStageShareSync();
+  }
+  return changed;
+};
+
 const handleLiveStageCameraRequests = (requests) => {
-  liveCameraRequests = requests;
+  const normalizedRequests = Array.isArray(requests) ? requests : [];
+  applyStudentCameraReconnects(normalizedRequests);
+  liveCameraRequests = normalizedRequests.filter((req) => findStudentCameraElements(req).length === 0);
   renderCameraRequestsUi();
 };
 
@@ -2899,13 +4208,22 @@ const renderCameraRequestsUi = () => {
 };
 
 const rejectStudentCameraRequest = (req) => {
-  liveCameraRequests = liveCameraRequests.filter(r => r.peerId !== req.peerId);
+  liveCameraRequests = liveCameraRequests.filter(r => r.peerId !== req.peerId && r.userId !== req.userId);
   renderCameraRequestsUi();
 };
 
 const addStudentCameraToStage = (req) => {
   const slide = getActiveSlide();
   if (!slide) return;
+
+  const existing = findStudentCameraElements(req);
+  if (existing.length) {
+    clearStudentCameraDisconnected(req.userId, req.fullName);
+    applyStudentCameraReconnects([req]);
+    liveCameraRequests = liveCameraRequests.filter((item) => item.peerId !== req.peerId && item.userId !== req.userId);
+    renderCameraRequestsUi();
+    return;
+  }
 
   const elementId = `element-${Date.now()}`;
   const el = {
@@ -2918,13 +4236,16 @@ const addStudentCameraToStage = (req) => {
     rotation: 0,
     zIndex: (slide.elements?.length || 0) + 1,
     studentPeerId: req.peerId,
+    studentUserId: req.userId,
     studentName: req.fullName
   };
 
   if (!slide.elements) slide.elements = [];
   slide.elements.push(el);
+  clearStudentCameraDisconnected(req.userId, req.fullName);
 
   renderSlide();
+  connectToStudentPeerInCreator(req.peerId);
   scheduleBuilderAutosave();
 
   // Opcional: remover da lista após adicionar
@@ -3156,6 +4477,8 @@ liveStageShareController = createLiveStageShareController({
       if (stream && stream.getTracks) stream.getTracks().forEach((track) => track.stop());
     });
     creatorStudentStreams.clear();
+    stopCreatorLiveCursorSync();
+    Array.from(creatorStudentAudioRefs.keys()).forEach((peerId) => removeCreatorStudentAudio(peerId));
     destroyLiveStudentPenOverlay();
     creatorStudentPeerRefs.forEach((peer) => {
       if (peer && !peer.destroyed) peer.destroy();
@@ -4994,6 +6317,9 @@ const applyEditorSnapshot = (snapshot) => {
   }
   if (modulePublicToggle) {
     modulePublicToggle.checked = Boolean(builderState.moduleSettings.isPublic);
+  }
+  if (allowLiveCursorsToggle) {
+    allowLiveCursorsToggle.checked = builderState.moduleSettings.allowLiveCursors !== false;
   }
   syncModuleCoverPreview();
   syncPublicModuleLinkUi();
@@ -10020,7 +11346,8 @@ function updateModuleBehavior() {
     requireQuizCompletion: Boolean(moduleRequireQuizToggle?.checked),
     isPublic: Boolean(modulePublicToggle?.checked),
     coverImage: getModuleCoverValue(),
-    allowStudentPen: moduleHasStudentPaintEnabled(builderState.slides || [])
+    allowStudentPen: moduleHasStudentPaintEnabled(builderState.slides || []),
+    allowLiveCursors: allowLiveCursorsToggle?.checked !== false
   };
   syncPublicModuleLinkUi();
   syncModuleCoverPreview();
@@ -10035,7 +11362,8 @@ const resetBuilder = () => {
     lockNextModuleUntilCompleted: false,
     isPublic: false,
     coverImage: '',
-    allowStudentPen: false
+    allowStudentPen: false,
+    allowLiveCursors: true
   };
   if (moduleCoverUrlInput) {
     moduleCoverUrlInput.value = '';
@@ -10045,6 +11373,9 @@ const resetBuilder = () => {
   }
   if (modulePublicToggle) {
     modulePublicToggle.checked = false;
+  }
+  if (allowLiveCursorsToggle) {
+    allowLiveCursorsToggle.checked = true;
   }
   syncPublicModuleLinkUi();
   syncModuleCoverPreview();
@@ -10155,7 +11486,10 @@ const startEditingModule = (courseId, moduleId) => {
     allowStudentPen:
       module.builder_data?.moduleSettings?.allowStudentPen === true ||
       module.builder_data?.moduleSettings?.allowStudentPen === 'true' ||
-      moduleHasStudentPaintEnabled(module.builder_data?.slides || [])
+      moduleHasStudentPaintEnabled(module.builder_data?.slides || []),
+    allowLiveCursors:
+      module.builder_data?.moduleSettings?.allowLiveCursors !== false &&
+      module.builder_data?.moduleSettings?.allowLiveCursors !== 'false'
   };
   if (moduleCoverUrlInput) {
     moduleCoverUrlInput.value = builderState.moduleSettings.coverImage || '';
@@ -12823,7 +14157,8 @@ const handlePreviewKeyTriggerEvent = (event) => {
   return executed;
 };
 
-const createPreviewElementNode = (element, slide) => {
+const createPreviewElementNode = (element, slide, options = {}) => {
+  const forExport = Boolean(options.forExport);
   const renderState = getElementRenderState(element);
   const preservedElapsedSeconds = getPreviewAnimationElapsed(slide, element);
   let node;
@@ -12880,20 +14215,39 @@ const createPreviewElementNode = (element, slide) => {
         const mediaNode = document.createElement('audio');
         mediaNode.className = 'builder-media-element';
         mediaNode.src = element.src || '';
+        mediaNode.controls = !forExport;
         applyPreviewAudioPresentation(mediaNode, element);
         node = wrapMediaNodeWithCaptions(mediaNode, element);
-        restorePreviewMediaState(slide, element, node);
+        if (!forExport) {
+          restorePreviewMediaState(slide, element, node);
+        }
       }
       break;
     case 'video':
-      {
+      if (element.provider === 'youtube' && element.embedSrc) {
+        node = document.createElement('div');
+        node.className = 'builder-media-embed';
+        const frame = document.createElement('iframe');
+        frame.className = 'builder-media-element';
+        frame.src = element.embedSrc;
+        frame.title = 'Video do YouTube';
+        frame.allow =
+          'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
+        frame.allowFullscreen = true;
+        frame.referrerPolicy = 'strict-origin-when-cross-origin';
+        node.appendChild(frame);
+      } else {
         const mediaNode = document.createElement('video');
         mediaNode.className = 'builder-media-element';
-        mediaNode.controls = true;
+        mediaNode.controls = !forExport;
         mediaNode.src = element.src || '';
-        attachPreviewVideoTimedTrigger(mediaNode, element);
+        if (!forExport) {
+          attachPreviewVideoTimedTrigger(mediaNode, element);
+        }
         node = wrapMediaNodeWithCaptions(mediaNode, element);
-        restorePreviewMediaState(slide, element, node);
+        if (!forExport) {
+          restorePreviewMediaState(slide, element, node);
+        }
       }
       break;
     case 'camera':
@@ -12936,6 +14290,9 @@ const createPreviewElementNode = (element, slide) => {
       node = createInputElementNode(element, {
         preview: true,
         runActions: () => {
+          if (forExport) {
+            return;
+          }
           let shouldRerender = false;
           (element.interactionTriggers || []).forEach((trigger) => {
             if (trigger?.enabled === false) {
@@ -12971,19 +14328,24 @@ const createPreviewElementNode = (element, slide) => {
           node.classList.add('floating-button-completed');
         }
       }
-      node.addEventListener('click', (event) => {
-        event.stopPropagation();
-        executePreviewFloatingButtonTriggers(element);
-      });
+      if (!forExport) {
+        node.addEventListener('click', (event) => {
+          event.stopPropagation();
+          executePreviewFloatingButtonTriggers(element);
+        });
+      }
       break;
     case 'key':
       if (!getVisibleKeyTriggers(element).length) {
         return document.createComment(`hidden-key-${element?.id || 'element'}`);
       }
       node = createKeyElementNode(element, {
-        interactive: true,
+        interactive: !forExport,
         preview: true,
         onTrigger: (trigger) => {
+          if (forExport) {
+            return;
+          }
           const result = runPreviewKeyTrigger(element, trigger, slide);
           if (result.rerender) {
             renderSlide();
@@ -13553,13 +14915,29 @@ document.addEventListener('DOMContentLoaded', () => {
   openPublicModuleLinkBtn = document.getElementById('openPublicModuleLinkBtn');
   modulePublicLinkStatus = document.getElementById('modulePublicLinkStatus');
   toggleLiveStageShareBtn = document.getElementById('toggleLiveStageShareBtn');
+  allowLiveCursorsToggle = document.getElementById('allowLiveCursorsToggle');
   liveStageShareLinkInput = document.getElementById('liveStageShareLinkInput');
   copyLiveStageShareLinkBtn = document.getElementById('copyLiveStageShareLinkBtn');
   openLiveStageShareLinkBtn = document.getElementById('openLiveStageShareLinkBtn');
   liveStageShareStatus = document.getElementById('liveStageShareStatus');
   saveModuleBtn = document.getElementById('saveModuleBtn');
   exportTemplateBtn = document.getElementById('exportTemplateBtn');
+  downloadSlidesBtn = document.getElementById('downloadSlidesBtn');
   importTemplateBtn = document.getElementById('importTemplateBtn');
+  slideExportModal = document.getElementById('slideExportModal');
+  closeSlideExportModalBtn = document.getElementById('closeSlideExportModalBtn');
+  slideExportStatus = document.getElementById('slideExportStatus');
+  slideExportScopeSelect = document.getElementById('slideExportScopeSelect');
+  slideExportModeSelect = document.getElementById('slideExportModeSelect');
+  slideExportImageFormatField = document.getElementById('slideExportImageFormatField');
+  slideExportImageFormatSelect = document.getElementById('slideExportImageFormatSelect');
+  slideExportVideoFormatField = document.getElementById('slideExportVideoFormatField');
+  slideExportVideoFormatSelect = document.getElementById('slideExportVideoFormatSelect');
+  slideExportVideoDurationField = document.getElementById('slideExportVideoDurationField');
+  slideExportVideoDurationInput = document.getElementById('slideExportVideoDurationInput');
+  slideExportScaleSelect = document.getElementById('slideExportScaleSelect');
+  slideExportSummary = document.getElementById('slideExportSummary');
+  startSlideExportBtn = document.getElementById('startSlideExportBtn');
   templateImportInput = document.getElementById('templateImportInput');
   templateStoreCard = document.getElementById('templateStoreCard');
   templateStoreList = document.getElementById('templateStoreList');
@@ -14091,7 +15469,22 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
   exportTemplateBtn?.addEventListener('click', exportCurrentTemplate);
+  downloadSlidesBtn?.addEventListener('click', openSlideExportModal);
   importTemplateBtn?.addEventListener('click', () => templateImportInput?.click());
+  closeSlideExportModalBtn?.addEventListener('click', closeSlideExportModal);
+  slideExportModal?.addEventListener('click', (event) => {
+    const target = event.target;
+    if (target instanceof Element && target.closest('[data-close-slide-export-modal="true"]')) {
+      closeSlideExportModal();
+    }
+  });
+  [slideExportScopeSelect, slideExportModeSelect, slideExportImageFormatSelect, slideExportVideoFormatSelect, slideExportVideoDurationInput, slideExportScaleSelect]
+    .forEach((control) => control?.addEventListener('change', updateSlideExportUi));
+  slideExportVideoDurationInput?.addEventListener('input', updateSlideExportUi);
+  startSlideExportBtn?.addEventListener('click', () => {
+    void startSlideExport();
+  });
+  updateSlideExportUi();
   refreshTemplateStoreBtn?.addEventListener('click', () => loadTemplateStore());
   templateStoreSearchInput?.addEventListener('input', renderTemplateStoreList);
   templateImportInput?.addEventListener('change', async (event) => {
@@ -14881,5 +16274,22 @@ document.addEventListener('DOMContentLoaded', () => {
     if (liveStageShareState.active) {
       flushLiveStageShareSync();
     }
+  });
+  document.getElementById('allowLiveCursorsToggle')?.addEventListener('change', () => {
+    if (liveStageShareState.active) {
+      flushLiveStageShareSync();
+    }
+  });
+  slideCanvas?.addEventListener('pointermove', (event) => {
+    if (!liveStageShareState.active || !moduleAllowsLiveCursorsInCreator()) {
+      return;
+    }
+    void sendCreatorLiveCursor(getStagePointerPosition(event), true);
+  });
+  slideCanvas?.addEventListener('pointerleave', () => {
+    if (!liveStageShareState.active) {
+      return;
+    }
+    void sendCreatorLiveCursor(null, false);
   });
 });

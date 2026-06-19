@@ -2405,6 +2405,146 @@ body.mobile-builder-panel-open {
   background: rgba(239, 68, 68, 0.94);
 }
 
+.builder-camera-call-controls {
+  position: absolute;
+  left: 50%;
+  bottom: 0.75rem;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.45rem;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.72);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 12px 26px rgba(15, 23, 42, 0.24);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translate(-50%, 8px);
+  transition: opacity 0.18s ease, transform 0.18s ease, visibility 0.18s ease;
+}
+
+.builder-camera-element:hover .builder-camera-call-controls,
+.builder-camera-element:focus-within .builder-camera-call-controls {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translate(-50%, 0);
+}
+
+.builder-camera-call-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 2.2rem;
+  height: 2.2rem;
+  border: 0;
+  border-radius: 999px;
+  color: #f8fafc;
+  background: rgba(51, 65, 85, 0.96);
+  cursor: pointer;
+  transition: transform 0.16s ease, background 0.16s ease, opacity 0.16s ease;
+}
+
+.builder-camera-call-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.builder-camera-call-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.builder-camera-call-btn.is-active {
+  background: rgba(96, 165, 250, 0.96);
+}
+
+.builder-camera-call-btn.is-danger {
+  background: rgba(239, 68, 68, 0.96);
+}
+
+.builder-camera-call-btn svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.1;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.builder-camera-preview.is-video-hidden {
+  opacity: 0;
+}
+
+.live-cursor-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 12;
+  overflow: hidden;
+}
+
+.live-cursor-marker {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform: translate(-2px, -2px);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  will-change: transform;
+}
+
+.live-cursor-pointer {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  filter: drop-shadow(0 2px 6px rgba(15, 23, 42, 0.22));
+}
+
+.live-cursor-pointer path {
+  fill: currentColor;
+  stroke: #fff;
+  stroke-width: 1.1;
+  stroke-linejoin: round;
+}
+
+.live-cursor-label {
+  max-width: 150px;
+  padding: 0.18rem 0.45rem;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.16);
+}
+
+.slide-export-modal-card {
+  width: min(760px, calc(100vw - 2rem));
+}
+
+.slide-export-modal-body {
+  padding-top: 1.1rem;
+}
+
+.slide-export-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.slide-export-grid .builder-field-span {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 720px) {
+  .slide-export-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .stage-viewer .builder-camera-element {
   box-shadow: none;
 }

@@ -127,7 +127,8 @@ export const normalizeTemplateModuleSettings = (moduleSettings) => ({
   requireQuizCompletion: Boolean(moduleSettings?.requireQuizCompletion),
   isPublic: Boolean(moduleSettings?.isPublic),
   coverImage: typeof moduleSettings?.coverImage === 'string' ? moduleSettings.coverImage : '',
-  allowStudentPen: moduleSettings?.allowStudentPen === true || moduleSettings?.allowStudentPen === 'true'
+  allowStudentPen: moduleSettings?.allowStudentPen === true || moduleSettings?.allowStudentPen === 'true',
+  allowLiveCursors: moduleSettings?.allowLiveCursors !== false && moduleSettings?.allowLiveCursors !== 'false'
 });
 export const normalizeQuizElement = (element) => {
   if (!element || element.type !== 'quiz') {

@@ -175,6 +175,15 @@ body {
   box-shadow: $shadow;
 }
 
+.auth-secondary-link {
+  width: 100%;
+  margin-top: 0.75rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
 .field-group {
   display: flex;
   flex-direction: column;
@@ -206,6 +215,640 @@ body {
   color: #fff;
   background: linear-gradient(135deg, $accent, #7455ff);
   cursor: pointer;
+}
+
+.signup-page {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
+  gap: 2rem;
+  padding: 2rem;
+  max-width: 1440px;
+  margin: 0 auto;
+  align-items: start;
+}
+
+.signup-hero {
+  display: grid;
+  gap: 1.75rem;
+  align-content: start;
+  padding: 1rem 0.5rem 1rem 0;
+  min-width: 0;
+}
+
+.signup-hero-copy {
+  display: grid;
+  gap: 1rem;
+}
+
+.signup-hero-copy h1 {
+  margin: 0;
+  font-size: clamp(2.2rem, 4vw, 4.1rem);
+  line-height: 1.02;
+}
+
+.signup-hero-copy p {
+  margin: 0;
+  max-width: 760px;
+  font-size: 1.02rem;
+  line-height: 1.7;
+  color: #47507c;
+}
+
+.signup-proof-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.signup-proof-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 0.65rem 1rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba($accent, 0.18);
+  color: #40476d;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.signup-hero-mode {
+  display: grid;
+  gap: 1.75rem;
+}
+
+.signup-professor-mode {
+  gap: 2rem;
+}
+
+.signup-professor-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(280px, 440px);
+  gap: 1.5rem;
+  padding: 1.5rem;
+  border-radius: 1.8rem;
+  background: linear-gradient(160deg, #10121e 0%, #17172c 55%, #2d1f63 100%);
+  color: #fff;
+  overflow: hidden;
+  position: relative;
+}
+
+.signup-professor-hero::after {
+  content: "";
+  position: absolute;
+  inset: auto -80px -120px auto;
+  width: 240px;
+  height: 240px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(151, 123, 255, 0.34) 0%, rgba(151, 123, 255, 0) 72%);
+  pointer-events: none;
+}
+
+.signup-professor-hero-copy {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 1rem;
+  align-content: start;
+  min-width: 0;
+}
+
+.signup-eyebrow {
+  display: inline-flex;
+  width: fit-content;
+  padding: 0.42rem 0.8rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.86);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.signup-professor-hero-copy h2 {
+  margin: 0;
+  font-size: clamp(1.9rem, 3vw, 3.35rem);
+  line-height: 1.04;
+}
+
+.signup-professor-hero-copy p {
+  margin: 0;
+  max-width: 560px;
+  color: rgba(242, 244, 255, 0.82);
+  line-height: 1.72;
+}
+
+.signup-professor-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.signup-inline-cta {
+  width: auto;
+  min-width: 188px;
+  text-decoration: none;
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.signup-inline-cta-alt {
+  width: auto;
+  min-width: 188px;
+  text-decoration: none;
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.signup-inline-cta-alt:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.signup-professor-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+.signup-stat-card {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.95rem;
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.signup-stat-card strong {
+  color: #fff;
+  font-size: 0.94rem;
+}
+
+.signup-stat-card span {
+  color: rgba(242, 244, 255, 0.72);
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.signup-professor-hero-media {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.signup-dashboard-frame {
+  width: 100%;
+  border-radius: 1.35rem;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
+}
+
+.signup-dashboard-image {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 5;
+  object-fit: cover;
+  object-position: top center;
+}
+
+.signup-feature-story,
+.signup-video-section,
+.signup-testimonials {
+  display: grid;
+  gap: 1rem;
+}
+
+.signup-feature-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.signup-feature-grid-rich {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.signup-feature-card,
+.signup-testimonial-card,
+.signup-student-panel,
+.signup-form-card {
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(228, 232, 247, 0.95);
+  box-shadow: 0 24px 44px rgba(15, 20, 53, 0.12);
+}
+
+.signup-feature-card {
+  border-radius: 1.2rem;
+  padding: 1.2rem;
+}
+
+.signup-feature-card h3 {
+  margin: 0;
+  font-size: 1rem;
+  color: #1f2343;
+}
+
+.signup-feature-card h2,
+.signup-section-heading h2,
+.signup-form-card h2 {
+  margin: 0;
+  font-size: 1.08rem;
+}
+
+.signup-feature-card p,
+.signup-testimonial-card p,
+.signup-form-card p,
+.signup-benefit-list li {
+  color: #556084;
+  line-height: 1.65;
+}
+
+.signup-feature-card-large {
+  grid-column: span 2;
+}
+
+.signup-feature-card-media {
+  min-height: 220px;
+  border-radius: 1rem;
+  margin-bottom: 1rem;
+  overflow: hidden;
+}
+
+.signup-feature-card-media-dark {
+  padding: 1rem;
+  background: linear-gradient(145deg, #15192f, #2d1f63);
+}
+
+.signup-mini-window {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.signup-mini-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.44);
+}
+
+.signup-mini-stage {
+  margin-top: 1rem;
+  height: calc(100% - 1rem);
+  min-height: 160px;
+  display: grid;
+  grid-template-columns: 1.1fr 0.95fr;
+  gap: 0.8rem;
+  position: relative;
+}
+
+.signup-mini-stage-panel {
+  border-radius: 1rem;
+}
+
+.signup-mini-stage-panel-purple {
+  background: linear-gradient(135deg, #7c4dff, #c278ff);
+}
+
+.signup-mini-stage-panel-light {
+  background: linear-gradient(135deg, #f7f8ff, #dde3ff);
+}
+
+.signup-mini-stage-chip {
+  position: absolute;
+  left: 0.9rem;
+  bottom: 0.9rem;
+  display: inline-flex;
+  padding: 0.45rem 0.75rem;
+  border-radius: 999px;
+  background: rgba(12, 14, 26, 0.72);
+  color: #fff;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.signup-feature-icon {
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 0.9rem;
+  background: linear-gradient(135deg, rgba(109, 99, 255, 0.16), rgba(116, 85, 255, 0.26));
+  color: $accent;
+  font-weight: 800;
+  font-size: 0.9rem;
+}
+
+.signup-section-heading {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.signup-section-heading span {
+  color: $accent;
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.signup-testimonials {
+  display: grid;
+  gap: 1rem;
+}
+
+.signup-testimonial-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.signup-video-placeholder {
+  border-radius: 1.5rem;
+  overflow: hidden;
+  background: linear-gradient(160deg, #0d101e, #1e2240 65%, #5d2bff 100%);
+  box-shadow: 0 28px 60px rgba(15, 20, 53, 0.18);
+}
+
+.signup-video-player-ui {
+  padding: 1rem;
+}
+
+.signup-video-topbar,
+.signup-video-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+}
+
+.signup-video-topbar {
+  color: rgba(255, 255, 255, 0.92);
+  margin-bottom: 1rem;
+}
+
+.signup-video-topbar small,
+.signup-video-meta small {
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.signup-video-canvas {
+  aspect-ratio: 16 / 9;
+  border-radius: 1.2rem;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(170, 138, 255, 0.35), rgba(170, 138, 255, 0) 26%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.signup-video-play {
+  width: 88px;
+  height: 88px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  position: relative;
+  backdrop-filter: blur(8px);
+}
+
+.signup-video-play::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-36%, -50%);
+  border-top: 14px solid transparent;
+  border-bottom: 14px solid transparent;
+  border-left: 22px solid #fff;
+}
+
+.signup-video-controls {
+  margin-top: 1rem;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.signup-video-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+}
+
+.signup-video-progress span {
+  display: block;
+  width: 28%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #7f6bff, #bb7dff);
+}
+
+.signup-testimonial-card {
+  border-radius: 1.2rem;
+  padding: 1.2rem;
+  display: grid;
+  gap: 0.8rem;
+}
+
+.signup-testimonial-card p {
+  margin: 0;
+}
+
+.signup-testimonial-card strong {
+  color: #1f2343;
+}
+
+.signup-testimonial-card span {
+  color: #7d86a8;
+  font-size: 0.9rem;
+}
+
+.signup-student-panel {
+  border-radius: 1.3rem;
+  padding: 1.35rem;
+}
+
+.signup-benefit-list {
+  margin: 0;
+  padding-left: 1.25rem;
+  display: grid;
+  gap: 0.8rem;
+}
+
+.signup-form-shell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+}
+
+.signup-form-card {
+  width: 100%;
+  max-width: 420px;
+  border-radius: 1.5rem;
+  padding: 2rem;
+  position: sticky;
+  top: 2rem;
+}
+
+.signup-role-toggle {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  padding: 0.35rem;
+  border-radius: 999px;
+  background: #eef1ff;
+  gap: 0.35rem;
+  margin-bottom: 1.4rem;
+}
+
+.signup-role-btn {
+  border: none;
+  min-height: 44px;
+  border-radius: 999px;
+  background: transparent;
+  color: #5d6689;
+  font-size: 0.95rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.signup-role-btn.active {
+  background: linear-gradient(135deg, $accent, #7455ff);
+  color: #fff;
+  box-shadow: 0 12px 22px rgba($accent, 0.28);
+}
+
+.signup-inline-note {
+  border-radius: 1rem;
+  padding: 0.95rem 1rem;
+  background: #f6f7ff;
+  color: #556084;
+  line-height: 1.6;
+}
+
+.signup-inline-note-highlight {
+  background: linear-gradient(145deg, rgba($accent, 0.12), rgba(116, 85, 255, 0.06));
+  border: 1px solid rgba($accent, 0.18);
+}
+
+@media (max-width: 1280px) {
+  .signup-page {
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
+    gap: 1.5rem;
+  }
+
+  .signup-professor-hero {
+    grid-template-columns: minmax(0, 1fr) minmax(260px, 360px);
+  }
+
+  .signup-testimonial-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1080px) {
+  .signup-page {
+    grid-template-columns: 1fr;
+    max-width: 920px;
+  }
+
+  .signup-form-card {
+    position: static;
+    max-width: none;
+  }
+
+  .signup-professor-hero,
+  .signup-feature-grid-rich {
+    grid-template-columns: 1fr;
+  }
+
+  .signup-professor-stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .signup-testimonial-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .signup-feature-card-large {
+    grid-column: auto;
+  }
+
+  .signup-form-shell {
+    order: -1;
+  }
+
+  .signup-hero {
+    padding-right: 0;
+  }
+}
+
+@media (max-width: 760px) {
+  .signup-page {
+    padding: 1rem;
+    gap: 1.25rem;
+  }
+
+  .signup-feature-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .signup-form-card {
+    padding: 1.4rem;
+  }
+
+  .signup-hero-copy h1 {
+    font-size: 2rem;
+  }
+
+  .signup-professor-hero {
+    padding: 1.1rem;
+  }
+
+  .signup-professor-hero-copy h2 {
+    font-size: 1.9rem;
+  }
+
+  .signup-professor-stats,
+  .signup-testimonial-list {
+    grid-template-columns: 1fr;
+  }
+
+  .signup-professor-hero-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .signup-inline-cta,
+  .signup-inline-cta-alt {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .signup-feature-card-large {
+    grid-column: auto;
+  }
+
+  .signup-video-play {
+    width: 72px;
+    height: 72px;
+  }
 }
 
 .badge-pill {

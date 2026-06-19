@@ -9,7 +9,7 @@
     "summary": "Jogo em 3 fases estilo runner para apresentar o sistema com pontos, deteccao, drag and drop, botoes e CTA final."
   },
   "template": {
-    "title": "LearnSpace Runner - demo comercial",
+    "title": "Criatyve Runner - demo comercial",
     "description": "Template jogavel em 3 fases, inspirado em plataforma runner, para vender a proposta do sistema usando os recursos nativos do editor.",
     "builderData": {
       "slides": [
@@ -203,7 +203,7 @@
               "height": 78,
               "rotation": 0,
               "zIndex": 3,
-              "content": "Missao LearnSpace Runner",
+              "content": "Missao Criatyve Runner",
               "fontSize": 42,
               "fontFamily": "Inter, sans-serif",
               "fontWeight": "700",
@@ -1912,7 +1912,7 @@
               "shape": "rectangle",
               "actionConfig": {
                 "type": "addText",
-                "text": "Seu curso vira experiencia. Sua experiencia vira venda. E tudo nasce dentro do LearnSpace.",
+                "text": "Seu curso vira experiencia. Sua experiencia vira venda. E tudo nasce dentro da Criatyve.",
                 "insertX": 400,
                 "insertY": 250,
                 "insertWidth": 430,

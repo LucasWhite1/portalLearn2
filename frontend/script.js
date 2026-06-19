@@ -1108,6 +1108,21 @@ const redirectAfterLogin = (role) => {
   }
 };
 
+const persistAuthSession = (data) => {
+  if (!data?.token || !data?.user?.role) {
+    throw new Error('A API não retornou os dados de autenticação esperados.');
+  }
+  setToken(data.token);
+  localStorage.setItem(USER_ROLE_KEY, data.user.role);
+  localStorage.setItem('curso-platform-user', JSON.stringify({
+    fullName: data.user.fullName,
+    role: data.user.role,
+    aiCredits: data.user.aiCredits ?? null,
+    studentLimit: data.user.studentLimit ?? null,
+    storageLimitBytes: data.user.storageLimitBytes ?? null
+  }));
+};
+
 const initLogin = () => {
   const form = document.getElementById('loginForm');
   const signupForm = document.getElementById('studentSignupForm');
@@ -1227,18 +1242,7 @@ const initLogin = () => {
       if (!response.ok) {
         throw new Error(data?.message || 'Não foi possível concluir seu cadastro.');
       }
-      if (!data?.token || !data?.user?.role) {
-        throw new Error('A API não retornou os dados de cadastro esperados.');
-      }
-      setToken(data.token);
-      localStorage.setItem(USER_ROLE_KEY, data.user.role);
-      localStorage.setItem('curso-platform-user', JSON.stringify({
-        fullName: data.user.fullName,
-        role: data.user.role,
-        aiCredits: data.user.aiCredits ?? null,
-        studentLimit: data.user.studentLimit ?? null,
-        storageLimitBytes: data.user.storageLimitBytes ?? null
-      }));
+      persistAuthSession(data);
       redirectAfterLogin(data.user.role);
     } catch (error) {
       feedback.textContent = error.message;
@@ -1265,18 +1269,7 @@ const initLogin = () => {
       if (!response.ok) {
         throw new Error(data?.message || 'Falha no login');
       }
-      if (!data?.token || !data?.user?.role) {
-        throw new Error('A API não retornou os dados de login esperados.');
-      }
-      setToken(data.token);
-      localStorage.setItem(USER_ROLE_KEY, data.user.role);
-      localStorage.setItem('curso-platform-user', JSON.stringify({
-        fullName: data.user.fullName,
-        role: data.user.role,
-        aiCredits: data.user.aiCredits ?? null,
-        studentLimit: data.user.studentLimit ?? null,
-        storageLimitBytes: data.user.storageLimitBytes ?? null
-      }));
+      persistAuthSession(data);
       redirectAfterLogin(data.user.role);
     } catch (error) {
       feedback.textContent = error.message;
@@ -1317,6 +1310,121 @@ const initLogin = () => {
         feedback.style.display = 'block';
       });
   }
+};
+
+const initCreateAccount = () => {
+  const form = document.getElementById('createAccountForm');
+  const feedback = document.getElementById('createAccountFeedback');
+  const title = document.getElementById('createAccountTitle');
+  const subtitle = document.getElementById('createAccountSubtitle');
+  const submitBtn = document.getElementById('createAccountSubmitBtn');
+  const roleInput = document.getElementById('createAccountRole');
+  const toggleButtons = Array.from(document.querySelectorAll('[data-account-role]'));
+  const rolePanels = Array.from(document.querySelectorAll('[data-role-panel]'));
+  const heroModes = Array.from(document.querySelectorAll('[data-hero-mode]'));
+  const loginLinks = Array.from(document.querySelectorAll('[data-go-login]'));
+  if (!form || !feedback || !roleInput) return;
+
+  const roleCopy = {
+    student: {
+      title: 'Criar conta de aluno',
+      subtitle: 'Entre na plataforma, acompanhe módulos, tarefas, lives e seu progresso em um só lugar.',
+      submitLabel: 'Criar conta de aluno'
+    },
+    professor: {
+      title: 'Criar conta de professor',
+      subtitle: 'Comece com um ambiente completo para vender, ensinar ao vivo e construir aulas interativas.',
+      submitLabel: 'Começar como professor'
+    }
+  };
+
+  const setFeedback = (message = '', color = '#ff6b6b') => {
+    feedback.textContent = message;
+    feedback.style.color = color;
+    feedback.style.display = message ? 'block' : 'none';
+  };
+
+  const applyRoleMode = (nextRole) => {
+    const role = nextRole === 'professor' ? 'professor' : 'student';
+    roleInput.value = role;
+    const copy = roleCopy[role];
+    if (title) title.textContent = copy.title;
+    if (subtitle) subtitle.textContent = copy.subtitle;
+    if (submitBtn) submitBtn.textContent = copy.submitLabel;
+    toggleButtons.forEach((button) => {
+      const isActive = button.dataset.accountRole === role;
+      button.classList.toggle('active', isActive);
+      button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    });
+    rolePanels.forEach((panel) => {
+      panel.hidden = panel.dataset.rolePanel !== role;
+    });
+    heroModes.forEach((panel) => {
+      panel.hidden = panel.dataset.heroMode !== role;
+    });
+    setFeedback('');
+  };
+
+  toggleButtons.forEach((button) => {
+    button.addEventListener('click', () => applyRoleMode(button.dataset.accountRole));
+  });
+  loginLinks.forEach((link) => {
+    link.addEventListener('click', (event) => {
+      event.preventDefault();
+      window.location.href = 'login.html';
+    });
+  });
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    setFeedback('');
+    const role = roleInput.value === 'professor' ? 'professor' : 'student';
+    const fullName = form.createAccountFullName?.value?.trim() || '';
+    const email = form.createAccountEmail?.value?.trim() || '';
+    const phone = form.createAccountPhone?.value?.trim() || '';
+    const password = form.createAccountPassword?.value || '';
+    const confirmPassword = form.createAccountConfirmPassword?.value || '';
+
+    if (!fullName || !email || !password) {
+      setFeedback('Preencha nome, email e senha para continuar.');
+      return;
+    }
+    if (password.length < 8) {
+      setFeedback('A senha precisa ter pelo menos 8 caracteres.');
+      return;
+    }
+    if (password !== confirmPassword) {
+      setFeedback('As senhas não coincidem.');
+      return;
+    }
+
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      const response = await fetch(`${API_BASE}/api/auth/signup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fullName,
+          email,
+          phone,
+          password,
+          role
+        })
+      });
+      const data = await parseJsonSafely(response);
+      if (!response.ok) {
+        throw new Error(data?.message || 'Não foi possível criar a conta.');
+      }
+      persistAuthSession(data);
+      redirectAfterLogin(data.user.role);
+    } catch (error) {
+      setFeedback(error.message || 'Não foi possível criar a conta.');
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
+  });
+
+  applyRoleMode(roleInput.value || 'student');
 };
 
 const loadAdminStudents = async () => {
@@ -2914,6 +3022,10 @@ const init = () => {
   setupLogoutButtons();
   if (document.getElementById('loginForm')) {
     initLogin();
+    return;
+  }
+  if (document.getElementById('createAccountForm')) {
+    initCreateAccount();
     return;
   }
 

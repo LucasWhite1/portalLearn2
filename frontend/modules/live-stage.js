@@ -12,7 +12,9 @@ export const createLiveStageShareState = () => ({
   drawingStrokes: [],
   lastError: '',
   liveCameraPeerId: null,
-  liveScreenPeerId: null
+  liveScreenPeerId: null,
+  disconnectedStudentIds: [],
+  disconnectedStudentNames: []
 });
 
 export const getLiveStageShareViewerUrl = (shareId) => {
@@ -51,6 +53,10 @@ export const createLiveStageShareController = ({
     state.pending = false;
     state.lastFingerprint = '';
     state.lastError = '';
+    state.liveCameraPeerId = null;
+    state.liveScreenPeerId = null;
+    state.disconnectedStudentIds = [];
+    state.disconnectedStudentNames = [];
     if (typeof onStopRuntime === 'function') {
       onStopRuntime();
     }

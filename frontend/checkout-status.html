@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Status do checkout | Criatyve</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 1rem;
+      font-family: 'Inter', system-ui, sans-serif;
+      color: #f4f1ff;
+      background:
+        radial-gradient(circle at top left, rgba(124, 58, 237, .24), transparent 28rem),
+        linear-gradient(180deg, #0b0914 0%, #131024 100%);
+    }
+    .panel {
+      width: min(100%, 760px);
+      border-radius: 28px;
+      padding: 1.5rem;
+      border: 1px solid rgba(255,255,255,.11);
+      background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.04));
+      box-shadow: 0 28px 70px rgba(0,0,0,.28);
+    }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      padding: .44rem .78rem;
+      border-radius: 999px;
+      background: rgba(139, 92, 246, .16);
+      font-size: .8rem;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      font-weight: 800;
+    }
+    h1 {
+      margin: 1rem 0 .7rem;
+      font-size: clamp(2rem, 4vw, 3rem);
+      line-height: 1.04;
+      letter-spacing: -.05em;
+    }
+    p {
+      margin: 0;
+      color: rgba(236, 232, 248, .8);
+      line-height: 1.7;
+    }
+    .note {
+      margin-top: 1rem;
+      padding: 1rem;
+      border-radius: 18px;
+      background: rgba(255,255,255,.04);
+      border: 1px solid rgba(255,255,255,.08);
+    }
+    .actions {
+      margin-top: 1.25rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: .85rem;
+    }
+    .button {
+      min-height: 50px;
+      padding: 0 1.1rem;
+      border-radius: 999px;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      border: 1px solid rgba(255,255,255,.12);
+      color: #fff;
+      background: rgba(255,255,255,.06);
+    }
+    .button--primary {
+      border: none;
+      background: linear-gradient(135deg, #7c3aed, #a855f7);
+      box-shadow: 0 18px 38px rgba(124, 58, 237, .32);
+    }
+  </style>
+</head>
+<body>
+  <main class="panel">
+    <span class="eyebrow" id="statusEyebrow">Checkout Criatyve</span>
+    <h1 id="statusHeading">Processo concluido</h1>
+    <p id="statusText">Seu checkout foi processado.</p>
+    <div class="note" id="statusNote"></div>
+    <div class="actions">
+      <a class="button button--primary" id="statusPrimaryAction" href="login.html">Ir para o login</a>
+      <a class="button" href="create-account.html">Voltar para a landing</a>
+    </div>
+  </main>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const status = params.get('status') || 'success';
+    const plan = params.get('plan') || 'pro';
+
+    const messages = {
+      success: {
+        eyebrow: 'Checkout concluido',
+        heading: plan === 'trial-30-dias' ? 'Seu teste gratis foi iniciado' : 'Sua assinatura foi iniciada',
+        text: plan === 'trial-30-dias'
+          ? 'Agora o cartao ja ficou cadastrado no gateway e o periodo de 30 dias comeca a contar.'
+          : 'Seu pagamento foi enviado ao gateway e a assinatura ja pode seguir para ativacao.',
+        note: plan === 'trial-30-dias'
+          ? 'Lembrete importante: se voce cancelar antes do fim do periodo gratuito, nenhum valor sera cobrado.'
+          : 'Se precisar confirmar detalhes financeiros ou acompanhar o status da cobranca, o ideal e complementar isso com a consulta da assinatura no painel administrativo.'
+      },
+      cancel: {
+        eyebrow: 'Checkout cancelado',
+        heading: 'Voce interrompeu o checkout',
+        text: 'Nenhuma assinatura foi concluida nesse fluxo.',
+        note: 'Se quiser retomar depois, basta voltar para a landing e iniciar novamente o processo.'
+      },
+      expired: {
+        eyebrow: 'Checkout expirado',
+        heading: 'O tempo do checkout terminou',
+        text: 'O link expirou antes da conclusao.',
+        note: 'Volte para a landing, gere um novo checkout e siga com a assinatura.'
+      }
+    };
+
+    const current = messages[status] || messages.success;
+    document.getElementById('statusEyebrow').textContent = current.eyebrow;
+    document.getElementById('statusHeading').textContent = current.heading;
+    document.getElementById('statusText').textContent = current.text;
+    document.getElementById('statusNote').textContent = current.note;
+  </script>
+</body>
+</html>

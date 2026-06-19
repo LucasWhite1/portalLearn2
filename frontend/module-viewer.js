@@ -42,6 +42,7 @@ const IMAGE_FALLBACK_SRC =
   );
 
 const getToken = () => localStorage.getItem(STORAGE_KEY);
+const getCurrentSessionUser = () => JSON.parse(localStorage.getItem('curso-platform-user') || '{}');
 
 const authorizedFetch = async (path, options = {}) => {
   const token = getToken();
@@ -117,6 +118,15 @@ const viewerState = {
   penColor: '#111827',
   penSize: 8,
   penSettingsTouched: false
+};
+
+const LIVE_CURSOR_SEND_INTERVAL_MS = 80;
+const LIVE_CURSOR_POLL_INTERVAL_MS = 150;
+const viewerLiveCursorState = {
+  overlay: null,
+  pollTimer: null,
+  lastSentAt: 0,
+  lastSignature: ''
 };
 
 let viewerResizeSyncFrame = null;
@@ -405,6 +415,194 @@ const moduleAllowsViewerPen = (module) => {
     return false;
   }
   return Array.isArray(module?.builder_data?.slides) && module.builder_data.slides.some((slide) => slideHasStudentPaintablePen(slide));
+};
+
+const moduleAllowsViewerLiveCursors = (module) => {
+  const explicitFlag = module?.builder_data?.moduleSettings?.allowLiveCursors;
+  return explicitFlag !== false && explicitFlag !== 'false';
+};
+
+const hashViewerLiveCursorSeed = (value = '') => {
+  let hash = 0;
+  const input = String(value || '');
+  for (let index = 0; index < input.length; index += 1) {
+    hash = ((hash << 5) - hash) + input.charCodeAt(index);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+};
+
+const getViewerLiveCursorColor = (seed = '') => {
+  const hue = hashViewerLiveCursorSeed(seed) % 360;
+  return `hsl(${hue} 78% 52%)`;
+};
+
+const getViewerLiveCursorIdentity = () => {
+  const currentUser = getCurrentSessionUser();
+  return {
+    userId: String(currentUser?.id || '').trim(),
+    fullName: String(currentUser?.fullName || currentUser?.name || 'Aluno').trim(),
+    role: String(currentUser?.role || 'student').trim()
+  };
+};
+
+const shouldSyncViewerLiveCursors = () =>
+  isLiveShareMode() &&
+  Boolean(viewerState.liveShareId) &&
+  !isReplayMode() &&
+  moduleAllowsViewerLiveCursors(getCurrentModule());
+
+const clearViewerLiveCursorOverlay = () => {
+  if (viewerLiveCursorState.overlay) {
+    viewerLiveCursorState.overlay.remove();
+  }
+  viewerLiveCursorState.overlay = null;
+};
+
+const ensureViewerLiveCursorOverlay = () => {
+  const wrapper = ensureStageContentWrapper();
+  if (!wrapper || !shouldSyncViewerLiveCursors()) {
+    clearViewerLiveCursorOverlay();
+    return null;
+  }
+  let overlay = viewerLiveCursorState.overlay;
+  if (!(overlay instanceof HTMLDivElement)) {
+    overlay = document.createElement('div');
+    overlay.className = 'live-cursor-overlay';
+    viewerLiveCursorState.overlay = overlay;
+  }
+  if (overlay.parentElement !== wrapper) {
+    wrapper.appendChild(overlay);
+  }
+  return overlay;
+};
+
+const createViewerLiveCursorMarkerNode = (cursor) => {
+  const color = getViewerLiveCursorColor(cursor?.userId || cursor?.peerKey || cursor?.fullName || 'cursor');
+  const marker = document.createElement('div');
+  marker.className = 'live-cursor-marker';
+  marker.style.color = color;
+  marker.style.left = `${clamp(Number(cursor?.x) || 0, 0, 1) * 100}%`;
+  marker.style.top = `${clamp(Number(cursor?.y) || 0, 0, 1) * 100}%`;
+  marker.innerHTML = `
+    <svg class="live-cursor-pointer" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+      <path d="M2 1.6 12.8 9H7.7l-2.1 5.4-1.9-.8L5.7 9H2z"></path>
+    </svg>
+    <span class="live-cursor-label" style="background:${escapeAttribute(color)};">${escapeHtml(cursor?.fullName || cursor?.role || 'Ao vivo')}</span>
+  `;
+  return marker;
+};
+
+const renderViewerLiveCursors = (cursors = []) => {
+  if (!shouldSyncViewerLiveCursors()) {
+    clearViewerLiveCursorOverlay();
+    return;
+  }
+  const overlay = ensureViewerLiveCursorOverlay();
+  if (!overlay) {
+    return;
+  }
+  const identity = getViewerLiveCursorIdentity();
+  overlay.innerHTML = '';
+  cursors
+    .filter((cursor) => {
+      const sameUser = identity.userId && String(cursor?.userId || '').trim() === identity.userId;
+      const sameRoleName =
+        !identity.userId &&
+        String(cursor?.role || '').trim() === identity.role &&
+        String(cursor?.fullName || '').trim() === identity.fullName;
+      return !(sameUser || sameRoleName);
+    })
+    .forEach((cursor) => {
+      overlay.appendChild(createViewerLiveCursorMarkerNode(cursor));
+    });
+};
+
+const stopViewerLiveCursorSync = () => {
+  if (viewerLiveCursorState.pollTimer) {
+    clearInterval(viewerLiveCursorState.pollTimer);
+    viewerLiveCursorState.pollTimer = null;
+  }
+  viewerLiveCursorState.lastSentAt = 0;
+  viewerLiveCursorState.lastSignature = '';
+  clearViewerLiveCursorOverlay();
+};
+
+const fetchViewerLiveCursors = async () => {
+  if (!shouldSyncViewerLiveCursors()) {
+    clearViewerLiveCursorOverlay();
+    return;
+  }
+  try {
+    const response = await authorizedFetch(`/api/student/live-stage/${encodeURIComponent(viewerState.liveShareId)}/cursors`);
+    if (!response.ok) {
+      return;
+    }
+    const payload = await response.json().catch(() => null);
+    renderViewerLiveCursors(payload?.cursors || []);
+  } catch (error) {
+    console.warn('Nao foi possivel atualizar os cursores ao vivo no aluno.', error);
+  }
+};
+
+const startViewerLiveCursorSync = () => {
+  stopViewerLiveCursorSync();
+  if (!shouldSyncViewerLiveCursors()) {
+    return;
+  }
+  viewerLiveCursorState.pollTimer = setInterval(() => {
+    void fetchViewerLiveCursors();
+  }, LIVE_CURSOR_POLL_INTERVAL_MS);
+  void fetchViewerLiveCursors();
+};
+
+const getViewerLiveCursorPoint = (event) => {
+  const wrapper = ensureStageContentWrapper();
+  if (!(wrapper instanceof HTMLDivElement)) {
+    return null;
+  }
+  const rect = wrapper.getBoundingClientRect();
+  if (!rect.width || !rect.height) {
+    return null;
+  }
+  return {
+    x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
+    y: clamp((event.clientY - rect.top) / rect.height, 0, 1)
+  };
+};
+
+const sendViewerLiveCursor = async (point = null, active = true) => {
+  if (!shouldSyncViewerLiveCursors()) {
+    return;
+  }
+  const now = Date.now();
+  const normalizedPoint = point
+    ? {
+        x: clamp(Number(point.x) || 0, 0, 1),
+        y: clamp(Number(point.y) || 0, 0, 1)
+      }
+    : { x: 0, y: 0 };
+  const signature = `${active ? '1' : '0'}:${normalizedPoint.x.toFixed(4)}:${normalizedPoint.y.toFixed(4)}`;
+  if (active && signature === viewerLiveCursorState.lastSignature && now - viewerLiveCursorState.lastSentAt < LIVE_CURSOR_SEND_INTERVAL_MS) {
+    return;
+  }
+  if (!active && signature === viewerLiveCursorState.lastSignature && now - viewerLiveCursorState.lastSentAt < 250) {
+    return;
+  }
+  viewerLiveCursorState.lastSignature = signature;
+  viewerLiveCursorState.lastSentAt = now;
+  try {
+    await authorizedFetch(`/api/student/live-stage/${encodeURIComponent(viewerState.liveShareId)}/cursor`, {
+      method: 'POST',
+      body: JSON.stringify({
+        active,
+        x: normalizedPoint.x,
+        y: normalizedPoint.y
+      })
+    });
+  } catch (error) {
+    console.warn('Nao foi possivel enviar o cursor ao vivo do aluno.', error);
+  }
 };
 
 const slideAllowsViewerPen = (module, slide) => {
@@ -1803,16 +2001,18 @@ const createViewerCameraNode = (element, slide) => {
   previewVideo.playsInline = true;
   
   if (isLiveShareMode) {
-    previewVideo.muted = false;
+    previewVideo.muted = true;
     if (isStudentCamera) {
       if (studentPeerId === studentCameraPeerId) {
         // Sou eu!
         previewVideo.srcObject = studentCameraLocalStream;
         previewVideo.muted = true; // Não ouvir o próprio áudio
+        previewVideo.classList.toggle('is-video-hidden', studentCameraVideoMuted);
       } else {
         const remoteStream = viewerStudentStreams.get(studentPeerId);
         if (remoteStream) {
           previewVideo.srcObject = remoteStream;
+          syncLiveRemoteAudio(`student:${studentPeerId}`, remoteStream);
         } else {
           connectToStudentPeer(studentPeerId);
         }
@@ -1820,6 +2020,7 @@ const createViewerCameraNode = (element, slide) => {
     } else {
       if (viewerCameraStream) {
         previewVideo.srcObject = viewerCameraStream;
+        syncLiveRemoteAudio('teacher-camera', viewerCameraStream);
       }
     }
   } else {
@@ -1877,6 +2078,51 @@ const createViewerCameraNode = (element, slide) => {
     overlay.appendChild(emptyState);
   }
   node.appendChild(overlay);
+
+  if (isLiveShareMode) {
+    if (isStudentCamera && studentPeerId === studentCameraPeerId) {
+      const callControls = document.createElement('div');
+      callControls.className = 'builder-camera-call-controls';
+      ['pointerdown', 'click'].forEach((eventName) => {
+        callControls.addEventListener(eventName, (event) => {
+          event.stopPropagation();
+        });
+      });
+
+      callControls.appendChild(createViewerCameraCallButton({
+        icon: studentCameraAudioMuted ? 'micOff' : 'mic',
+        title: studentCameraAudioMuted ? 'Ativar microfone' : 'Mutar microfone',
+        active: studentCameraAudioMuted,
+        onClick: () => {
+          studentCameraAudioMuted = !studentCameraAudioMuted;
+          applyStudentCameraTrackState();
+          renderSlide(getCurrentSlide());
+        }
+      }));
+
+      callControls.appendChild(createViewerCameraCallButton({
+        icon: studentCameraVideoMuted ? 'videoOff' : 'video',
+        title: studentCameraVideoMuted ? 'Ligar camera' : 'Desligar camera',
+        active: studentCameraVideoMuted,
+        onClick: () => {
+          studentCameraVideoMuted = !studentCameraVideoMuted;
+          applyStudentCameraTrackState();
+          renderSlide(getCurrentSlide());
+        }
+      }));
+
+      callControls.appendChild(createViewerCameraCallButton({
+        icon: 'phoneOff',
+        title: 'Desligar chamada',
+        danger: true,
+        onClick: () => {
+          stopStudentCameraCall();
+        }
+      }));
+      node.appendChild(callControls);
+    }
+    return node;
+  }
 
   const controls = document.createElement('div');
   controls.className = 'builder-camera-controls';
@@ -1965,13 +2211,14 @@ const createViewerScreenShareNode = () => {
   video.className = 'builder-camera-preview is-screen-share';
   video.autoplay = true;
   video.playsInline = true;
-  video.muted = false;
+  video.muted = true;
   video.style.width = '100%';
   video.style.height = '100%';
   video.style.objectFit = 'contain';
 
   if (viewerScreenStream) {
     video.srcObject = viewerScreenStream;
+    syncLiveRemoteAudio('teacher-screen', viewerScreenStream);
   }
   node.appendChild(video);
 
@@ -5263,6 +5510,7 @@ const clearStage = (message) => {
   viewerState.penSettingsTouched = false;
   resetViewerStageZoom();
   destroyViewerPenOverlay();
+  stopViewerLiveCursorSync();
   viewerTimedVideoTriggers.clear();
   viewerMediaState.clear();
   clearTimedViewerSlideTriggerTimers();
@@ -5315,8 +5563,44 @@ let viewerScreenStream = null;
 let studentCameraPeer = null;
 let studentCameraPeerId = null;
 let studentCameraLocalStream = null;
+let studentCameraAudioMuted = false;
+let studentCameraVideoMuted = false;
+const STUDENT_CAMERA_REQUEST_PREFIX = 'liveStudentCameraRequested:';
 const viewerStudentStreams = new Map();
 const studentPeerRefs = new Map();
+const liveRemoteAudioRefs = new Map();
+
+const syncLiveRemoteAudio = (key, stream, { muted = false } = {}) => {
+  if (!key || !(stream instanceof MediaStream)) return;
+  let audio = liveRemoteAudioRefs.get(key);
+  if (!(audio instanceof HTMLAudioElement)) {
+    audio = document.createElement('audio');
+    audio.autoplay = true;
+    audio.playsInline = true;
+    audio.style.display = 'none';
+    document.body.appendChild(audio);
+    liveRemoteAudioRefs.set(key, audio);
+  }
+  if (audio.srcObject !== stream) {
+    audio.srcObject = stream;
+  }
+  audio.muted = Boolean(muted);
+  audio.play().catch(() => {});
+};
+
+const removeLiveRemoteAudio = (key) => {
+  const audio = liveRemoteAudioRefs.get(key);
+  if (audio instanceof HTMLAudioElement) {
+    audio.pause();
+    audio.srcObject = null;
+    audio.remove();
+  }
+  liveRemoteAudioRefs.delete(key);
+};
+
+const clearLiveRemoteAudio = () => {
+  Array.from(liveRemoteAudioRefs.keys()).forEach((key) => removeLiveRemoteAudio(key));
+};
 
 const connectViewerPeer = (peerId, onStream, peerRef, mediaConnRef) => {
   if (peerRef.current && !peerRef.current.disconnected && mediaConnRef.current?.peer === peerId) return;
@@ -5343,22 +5627,32 @@ const syncLiveScreenShare = (cameraPeerId, screenPeerId) => {
   // --- Camera ---
   if (!cameraPeerId) {
     viewerCameraStream = null;
+    removeLiveRemoteAudio('teacher-camera');
     if (cameraPeerRef.current) { cameraPeerRef.current.destroy(); cameraPeerRef.current = null; }
     cameraConnRef.current = null;
   } else {
     connectViewerPeer(cameraPeerId,
-      (stream) => { viewerCameraStream = stream; if (viewerModules?.length > 0) renderSlide(getCurrentSlide()); },
+      (stream) => {
+        viewerCameraStream = stream;
+        syncLiveRemoteAudio('teacher-camera', stream);
+        if (viewerModules?.length > 0) renderSlide(getCurrentSlide());
+      },
       cameraPeerRef, cameraConnRef
     );
   }
   // --- Screen ---
   if (!screenPeerId) {
     viewerScreenStream = null;
+    removeLiveRemoteAudio('teacher-screen');
     if (screenPeerRef.current) { screenPeerRef.current.destroy(); screenPeerRef.current = null; }
     screenConnRef.current = null;
   } else {
     connectViewerPeer(screenPeerId,
-      (stream) => { viewerScreenStream = stream; if (viewerModules?.length > 0) renderSlide(getCurrentSlide()); },
+      (stream) => {
+        viewerScreenStream = stream;
+        syncLiveRemoteAudio('teacher-screen', stream);
+        if (viewerModules?.length > 0) renderSlide(getCurrentSlide());
+      },
       screenPeerRef, screenConnRef
     );
   }
@@ -5383,6 +5677,22 @@ const applyLiveStageModule = (module) => {
   viewerState.moduleId = module.id;
   viewerState.courseId = module.courseId;
   viewerState.liveShareRevision = Number(module.liveShare?.revision) || viewerState.liveShareRevision || 0;
+
+  const currentSessionUser = getCurrentSessionUser();
+  const currentUserId = String(currentSessionUser?.id || '').trim();
+  const currentUserName = String(currentSessionUser?.fullName || '').trim();
+  const disconnectedStudentIds = Array.isArray(module?.builder_data?.disconnectedStudentIds)
+    ? module.builder_data.disconnectedStudentIds.map((id) => String(id || '').trim()).filter(Boolean)
+    : [];
+  const disconnectedStudentNames = Array.isArray(module?.builder_data?.disconnectedStudentNames)
+    ? module.builder_data.disconnectedStudentNames.map((name) => String(name || '').trim()).filter(Boolean)
+    : [];
+  const wasDisconnectedByTeacher =
+    (currentUserId && disconnectedStudentIds.includes(currentUserId)) ||
+    (currentUserName && disconnectedStudentNames.includes(currentUserName));
+  if (wasDisconnectedByTeacher && studentCameraLocalStream) {
+    stopStudentCameraCall({ statusMessage: 'O professor encerrou sua chamada.' });
+  }
   
   syncViewerToLiveShareSlide(module);
   syncLiveScreenShare(
@@ -5391,6 +5701,11 @@ const applyLiveStageModule = (module) => {
   );
   syncViewerDetachedLiveStrokes(module);
   syncViewerLiveDrawingStrokes(module);
+  if (moduleAllowsViewerLiveCursors(module)) {
+    startViewerLiveCursorSync();
+  } else {
+    stopViewerLiveCursorSync();
+  }
   
   if (dataChanged || slideChanged) {
     renderModuleList();
@@ -5437,8 +5752,111 @@ const startLiveStagePolling = () => {
   }
 };
 
+const disconnectStudentPeer = (peerId) => {
+  if (!peerId) return;
+  const peer = studentPeerRefs.get(peerId);
+  if (peer && !peer.destroyed) {
+    try {
+      peer.destroy();
+    } catch (error) {
+      console.warn(`Erro ao desconectar aluno ${peerId}:`, error);
+    }
+  }
+  studentPeerRefs.delete(peerId);
+  viewerStudentStreams.delete(peerId);
+  removeLiveRemoteAudio(`student:${peerId}`);
+};
+
+const applyStudentCameraTrackState = () => {
+  if (!studentCameraLocalStream) return;
+  studentCameraLocalStream.getAudioTracks?.().forEach((track) => {
+    track.enabled = !studentCameraAudioMuted;
+  });
+  studentCameraLocalStream.getVideoTracks?.().forEach((track) => {
+    track.enabled = !studentCameraVideoMuted;
+  });
+};
+
+const createViewerCameraCallIcon = (name) => {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  const paths = {
+    mic: ['M12 3a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z', 'M19 10v1a7 7 0 0 1-14 0v-1', 'M12 18v3', 'M8 21h8'],
+    micOff: ['M3 3l18 18', 'M9 9v2a3 3 0 0 0 5.12 2.12', 'M15 9.34V6a3 3 0 0 0-5.94-.6', 'M19 10v1a7 7 0 0 1-1.4 4.2', 'M5 10v1a7 7 0 0 0 10.8 5.88', 'M12 18v3', 'M8 21h8'],
+    video: ['M15 10l5-3v10l-5-3Z', 'M3 6h12v12H3z'],
+    videoOff: ['M3 3l18 18', 'M15 10l5-3v8', 'M3 6h8', 'M15 14.5V18H6.5', 'M3 9.5V18h8.5'],
+    phoneOff: ['M10.68 13.31a16 16 0 0 0 3.41 2.56l2.27-2.27a1 1 0 0 1 1.01-.24 11.36 11.36 0 0 0 3.56.57 1 1 0 0 1 1 1V18a2 2 0 0 1-2 2A17 17 0 0 1 3 3a2 2 0 0 1 2-2h3.09a1 1 0 0 1 1 1 11.36 11.36 0 0 0 .57 3.56 1 1 0 0 1-.24 1.01L7.15 8.85', 'M3 3l18 18']
+  };
+  (paths[name] || paths.video).forEach((d) => {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', d);
+    svg.appendChild(path);
+  });
+  return svg;
+};
+
+const createViewerCameraCallButton = ({ icon, title, active = false, danger = false, onClick }) => {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = `builder-camera-call-btn${active ? ' is-active' : ''}${danger ? ' is-danger' : ''}`;
+  button.title = title;
+  button.setAttribute('aria-label', title);
+  button.appendChild(createViewerCameraCallIcon(icon));
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    onClick?.(event);
+  });
+  return button;
+};
+
+const stopStudentCameraCall = ({ statusMessage = 'Chamada encerrada.' } = {}) => {
+  if (studentCameraLocalStream) {
+    studentCameraLocalStream.getTracks().forEach((track) => track.stop());
+    studentCameraLocalStream = null;
+  }
+  if (studentCameraPeer) {
+    studentCameraPeer.destroy();
+    studentCameraPeer = null;
+  }
+  studentCameraPeerId = null;
+  studentCameraAudioMuted = false;
+  studentCameraVideoMuted = false;
+  forgetStudentCameraRequest();
+  const btn = document.getElementById('requestCameraBtn');
+  const status = document.getElementById('requestCameraStatus');
+  if (btn) {
+    btn.style.display = '';
+    btn.disabled = false;
+  }
+  if (status) {
+    status.textContent = statusMessage;
+  }
+  if (viewerModules?.length > 0) {
+    renderSlide(getCurrentSlide());
+  }
+};
+
+const syncVisibleStudentPeers = (visiblePeerIds = new Set()) => {
+  studentPeerRefs.forEach((peer, peerId) => {
+    if (!visiblePeerIds.has(peerId)) {
+      disconnectStudentPeer(peerId);
+    }
+  });
+  viewerStudentStreams.forEach((stream, peerId) => {
+    if (!visiblePeerIds.has(peerId)) {
+      viewerStudentStreams.delete(peerId);
+      removeLiveRemoteAudio(`student:${peerId}`);
+    }
+  });
+};
+
 const connectToStudentPeer = (peerId) => {
-  if (studentPeerRefs.has(peerId)) return;
+  if (!peerId) return;
+  const existingPeer = studentPeerRefs.get(peerId);
+  if (existingPeer && !existingPeer.destroyed && !existingPeer.disconnected) return;
+  disconnectStudentPeer(peerId);
   
   const peer = new Peer();
   studentPeerRefs.set(peerId, peer);
@@ -5451,6 +5869,26 @@ const connectToStudentPeer = (peerId) => {
     call.answer();
     call.on('stream', (stream) => {
       viewerStudentStreams.set(peerId, stream);
+      syncLiveRemoteAudio(`student:${peerId}`, stream);
+      stream.getTracks?.().forEach((track) => {
+        track.addEventListener('ended', () => {
+          if (viewerStudentStreams.get(peerId) === stream) {
+            viewerStudentStreams.delete(peerId);
+            removeLiveRemoteAudio(`student:${peerId}`);
+            if (viewerModules?.length > 0) renderSlide(getCurrentSlide());
+          }
+        }, { once: true });
+      });
+      if (viewerModules?.length > 0) renderSlide(getCurrentSlide());
+    });
+    call.on('close', () => {
+      viewerStudentStreams.delete(peerId);
+      removeLiveRemoteAudio(`student:${peerId}`);
+      if (viewerModules?.length > 0) renderSlide(getCurrentSlide());
+    });
+    call.on('error', () => {
+      viewerStudentStreams.delete(peerId);
+      removeLiveRemoteAudio(`student:${peerId}`);
       if (viewerModules?.length > 0) renderSlide(getCurrentSlide());
     });
   });
@@ -5458,11 +5896,49 @@ const connectToStudentPeer = (peerId) => {
   peer.on('error', (err) => {
     console.warn(`Erro ao conectar com aluno ${peerId}:`, err);
     studentPeerRefs.delete(peerId);
+    viewerStudentStreams.delete(peerId);
+    removeLiveRemoteAudio(`student:${peerId}`);
   });
+
+  peer.on('disconnected', () => {
+    studentPeerRefs.delete(peerId);
+    viewerStudentStreams.delete(peerId);
+    removeLiveRemoteAudio(`student:${peerId}`);
+  });
+
+  peer.on('close', () => {
+    studentPeerRefs.delete(peerId);
+    viewerStudentStreams.delete(peerId);
+    removeLiveRemoteAudio(`student:${peerId}`);
+  });
+};
+
+const getStudentCameraRequestStorageKey = () =>
+  viewerState.liveShareId ? `${STUDENT_CAMERA_REQUEST_PREFIX}${viewerState.liveShareId}` : '';
+
+const rememberStudentCameraRequest = () => {
+  const key = getStudentCameraRequestStorageKey();
+  if (key) {
+    sessionStorage.setItem(key, '1');
+  }
+};
+
+const forgetStudentCameraRequest = () => {
+  const key = getStudentCameraRequestStorageKey();
+  if (key) {
+    sessionStorage.removeItem(key);
+  }
+};
+
+const shouldRestoreStudentCameraRequest = () => {
+  const key = getStudentCameraRequestStorageKey();
+  return Boolean(key && sessionStorage.getItem(key) === '1');
 };
 
 const handleLiveSessionEnded = () => {
   stopLiveStagePolling();
+  stopViewerLiveCursorSync();
+  forgetStudentCameraRequest();
   
   if (studentCameraLocalStream) {
     studentCameraLocalStream.getTracks().forEach(track => track.stop());
@@ -5478,6 +5954,7 @@ const handleLiveSessionEnded = () => {
     if (stream && stream.getTracks) stream.getTracks().forEach(t => t.stop());
   });
   viewerStudentStreams.clear();
+  clearLiveRemoteAudio();
   
   studentPeerRefs.forEach(peer => {
     if (peer && !peer.destroyed) peer.destroy();
@@ -5505,6 +5982,7 @@ const initStudentCameraRequest = async () => {
   try {
     if (!studentCameraLocalStream) {
       studentCameraLocalStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      applyStudentCameraTrackState();
     }
 
     if (!studentCameraPeer) {
@@ -5520,6 +5998,7 @@ const initStudentCameraRequest = async () => {
           });
           
           if (response.ok) {
+            rememberStudentCameraRequest();
             status.textContent = 'Solicitação enviada! Aguarde o professor.';
             btn.style.display = 'none';
           } else {
@@ -5552,6 +6031,7 @@ const initStudentCameraRequest = async () => {
         body: JSON.stringify({ peerId: studentCameraPeerId })
       });
       if (response.ok) {
+        rememberStudentCameraRequest();
         status.textContent = 'Solicitação reenviada!';
         btn.style.display = 'none';
       } else {
@@ -5608,6 +6088,7 @@ const loadModule = (modules) => {
   applyModuleStageDimensions(moduleStageDimensions);
   if (!slides.length) {
     syncVisibleViewerCameraSessions(new Set());
+    syncVisibleStudentPeers(new Set());
     viewerHiddenElements.clear();
     viewerTimedVideoTriggers.clear();
     viewerMediaState.clear();
@@ -5631,6 +6112,7 @@ const renderSlide = (slide) => {
   if (!moduleStage) return;
   if (!slide) {
     syncVisibleViewerCameraSessions(new Set());
+    syncVisibleStudentPeers(new Set());
     return;
   }
   clearCurrentSlideProgressTimer();
@@ -5652,6 +6134,13 @@ const renderSlide = (slide) => {
       (slide.elements || [])
         .filter((element) => element?.type === 'camera' && element?.id)
         .map((element) => getViewerCameraSessionKey(getViewerCameraContext(element, slide)))
+    )
+  );
+  syncVisibleStudentPeers(
+    new Set(
+      (slide.elements || [])
+        .filter((element) => element?.type === 'camera' && element?.studentPeerId)
+        .map((element) => String(element.studentPeerId))
     )
   );
   wrapper.innerHTML = '';
@@ -5694,7 +6183,17 @@ const renderSlide = (slide) => {
   }
   performStageScaleUpdate();
   ensureViewerPenOverlay(slide);
+  ensureViewerLiveCursorOverlay();
   updateViewerPenToolState(slide);
+  if (isLiveShareMode()) {
+    if (moduleAllowsViewerLiveCursors(getCurrentModule())) {
+      startViewerLiveCursorSync();
+    } else {
+      stopViewerLiveCursorSync();
+    }
+  } else {
+    stopViewerLiveCursorSync();
+  }
   if (isReplayMode()) {
     renderReplayEventOverlay();
   }
@@ -6316,7 +6815,26 @@ const initModuleViewerPage = async () => {
     persistCurrentSlideProgress({ force: true });
     clearCurrentSlideProgressTimer();
     clearTimedViewerSlideTriggerTimers();
+    void sendViewerLiveCursor(null, false);
+    stopViewerLiveCursorSync();
     stopLiveStagePolling();
+  });
+
+  moduleStage?.addEventListener('pointermove', (event) => {
+    if (!shouldSyncViewerLiveCursors() || viewerState.penToolActive || event.pointerType === 'touch') {
+      return;
+    }
+    const point = getViewerLiveCursorPoint(event);
+    if (point) {
+      void sendViewerLiveCursor(point, true);
+    }
+  });
+
+  moduleStage?.addEventListener('pointerleave', () => {
+    if (!isLiveShareMode()) {
+      return;
+    }
+    void sendViewerLiveCursor(null, false);
   });
 
   if (isLiveShareMode()) {
@@ -6376,6 +6894,11 @@ const initModuleViewerPage = async () => {
       const liveModule = await fetchLiveStageModule(viewerState.liveShareId);
       applyLiveStageModule(liveModule);
       startLiveStagePolling();
+      if (shouldRestoreStudentCameraRequest()) {
+        setTimeout(() => {
+          void initStudentCameraRequest().catch(() => {});
+        }, 300);
+      }
       return;
     }
     if (viewerState.isPublic) {
