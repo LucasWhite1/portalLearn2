@@ -273,6 +273,11 @@ const signupLinkRegisterRateLimiter = createRateLimiter({
   max: 10,
   keyFn: (req) => `${req.ip}:${sanitizeEmail(req.body?.email || '')}:signup-link-register`
 });
+const selfSignupRateLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 8,
+  keyFn: (req) => `${req.ip}:${sanitizeEmail(req.body?.email || '')}:self-signup`
+});
 
 router.post('/login', loginRateLimiter, async (req, res) => {
   await ensureRoleAndOwnershipSetup();
@@ -302,6 +307,71 @@ router.post('/login', loginRateLimiter, async (req, res) => {
   res.json(buildSessionPayload(user));
 });
 
+router.post('/signup', selfSignupRateLimiter, async (req, res) => {
+  await ensureRoleAndOwnershipSetup();
+  await ensureProfessorCreditColumns();
+  await ensureProfessorQuotaColumns();
+  await ensureClassesTable();
+
+  const fullName = sanitizeText(req.body?.fullName || '', 160);
+  const email = sanitizeEmail(req.body?.email || '');
+  const phone = sanitizePhone(req.body?.phone || '');
+  const password = sanitizeText(req.body?.password || '', 256, { trim: false });
+  const roleInput = sanitizeText(req.body?.role || '', 32).toLowerCase();
+  const role = roleInput === 'professor' ? 'professor' : roleInput === 'student' ? 'student' : '';
+
+  if (!fullName || !email || !password || !role) {
+    return res.status(400).json({ message: 'Nome, email, senha e tipo de conta são obrigatórios.' });
+  }
+  if (password.length < 8) {
+    return res.status(400).json({ message: 'A senha precisa ter pelo menos 8 caracteres.' });
+  }
+
+  const { rows: existingRows } = await db.query('SELECT id FROM users WHERE email = $1', [email]);
+  if (existingRows.length) {
+    return res.status(409).json({ message: 'Já existe um usuário cadastrado com este email.' });
+  }
+
+  const passwordHash = await bcrypt.hash(password, 10);
+  const userId = uuidv4();
+  const isProfessor = role === 'professor';
+  const className = isProfessor ? 'Professor' : 'Turma A';
+  const aiCredits = 0;
+  const studentLimit = isProfessor ? 25 : null;
+  const storageLimitBytes = isProfessor ? 5 * 1024 * 1024 * 1024 : null;
+
+  try {
+    await db.query(
+      `INSERT INTO users (
+         id, full_name, email, phone, password_hash, role, class_name, is_active, owner_user_id,
+         ai_credits, ai_credits_updated_at, student_limit, storage_limit_bytes
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, $8, $9, NOW(), $10, $11)`,
+      [
+        userId,
+        fullName,
+        email,
+        phone || null,
+        passwordHash,
+        role,
+        className,
+        null,
+        aiCredits,
+        studentLimit,
+        storageLimitBytes
+      ]
+    );
+  } catch (error) {
+    if (error?.code === '23505') {
+      return res.status(409).json({ message: 'Já existe um usuário cadastrado com este email.' });
+    }
+    throw error;
+  }
+
+  const { rows: createdRows } = await db.query('SELECT * FROM users WHERE id = $1', [userId]);
+  return res.status(201).json(buildSessionPayload(createdRows[0]));
+});
+
 router.post('/logout', requireAuth, (req, res) => {
   const authHeader = req.headers.authorization || '';
   const [, token] = authHeader.split(' ');
@@ -324,8 +394,8 @@ router.post('/forgot-password', loginRateLimiter, async (req, res) => {
   res.json({ message: 'Se o email estiver cadastrado, um token de recuperação foi enviado.' });
 
   const { rows } = await db.query(
-    'SELECT id, full_name, owner_user_id FROM users WHERE email = $1 AND role = $2',
-    [email, 'student']
+    'SELECT id, full_name, owner_user_id FROM users WHERE email = $1 AND role IN ($2, $3)',
+    [email, 'student', 'professor']
   );
   const user = rows[0];
   if (!user) return;

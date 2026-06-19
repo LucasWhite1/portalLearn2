@@ -4,6 +4,7 @@ const path = require('path');
 const authRoutes = require('./routes/auth');
 const adminRoutes = require('./routes/admin');
 const studentRoutes = require('./routes/student');
+const billingRoutes = require('./routes/billing');
 
 const app = express();
 const JSON_BODY_LIMIT = process.env.JSON_BODY_LIMIT || '50mb';
@@ -25,12 +26,17 @@ app.use(express.static(frontendDir));
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 app.get('/', (req, res) => res.sendFile(path.join(frontendDir, 'login.html')));
+app.get('/checkout', (req, res) => {
+  const plan = String(req.query?.plan || 'pro') === 'trial-30-dias' ? 'trial-30-dias' : 'pro';
+  res.redirect(303, `/api/billing/checkout-session?plan=${encodeURIComponent(plan)}`);
+});
 
 const chatRoutes = require('./routes/chat');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/student', studentRoutes);
+app.use('/api/billing', billingRoutes);
 app.use('/api/chat', chatRoutes);
 
 app.use((err, req, res, next) => {

@@ -3,7 +3,7 @@ const db = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const { compareImagesWithNanoBanana } = require('../aiProvider');
 const { readImageSource } = require('../pixian');
-const { getShare, listShares, addCameraRequest, addDrawingStroke, clearDrawingStrokes } = require('../liveStageShareStore');
+const { getShare, listShares, addCameraRequest, addDrawingStroke, updateCursorPosition, listCursorPositions, clearDrawingStrokes } = require('../liveStageShareStore');
 
 const { sanitizeText, sanitizeMediaUrl, isUuid } = require('../security');
 
@@ -223,6 +223,44 @@ router.post('/live-stage/:shareId/drawing', requireAuth, async (req, res) => {
     }
   });
 
+  res.json({ success: true });
+});
+
+router.get('/live-stage/:shareId/cursors', requireAuth, async (req, res) => {
+  const shareId = sanitizeText(req.params?.shareId || '', 64);
+  if (!LIVE_STAGE_SHARE_ID_REGEX.test(shareId)) {
+    return res.status(400).json({ message: 'Compartilhamento ao vivo inválido.' });
+  }
+  const share = getShare(shareId);
+  if (!share) {
+    return res.status(404).json({ message: 'Compartilhamento ao vivo não encontrado.' });
+  }
+  res.json({ cursors: listCursorPositions(shareId) || [] });
+});
+
+router.post('/live-stage/:shareId/cursor', requireAuth, async (req, res) => {
+  const shareId = sanitizeText(req.params?.shareId || '', 64);
+  if (!LIVE_STAGE_SHARE_ID_REGEX.test(shareId)) {
+    return res.status(400).json({ message: 'Compartilhamento ao vivo inválido.' });
+  }
+  const share = getShare(shareId);
+  if (!share) {
+    return res.status(404).json({ message: 'Compartilhamento ao vivo não encontrado.' });
+  }
+
+  const active = req.body?.active !== false;
+  const success = updateCursorPosition(shareId, {
+    userId: req.user.id,
+    peerKey: `student:${req.user.id}`,
+    role: req.user.role || 'student',
+    fullName: req.user.full_name || req.user.fullName || 'Aluno',
+    x: Number(req.body?.x),
+    y: Number(req.body?.y),
+    active
+  });
+  if (!success) {
+    return res.status(500).json({ message: 'Não foi possível atualizar o cursor.' });
+  }
   res.json({ success: true });
 });
 

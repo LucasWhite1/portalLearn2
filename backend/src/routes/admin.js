@@ -19,7 +19,7 @@ const {
 } = require('../aiProvider');
 const { readImageSource } = require('../pixian');
 const { extractAudioFromMediaSource, transcribeMediaSource } = require('../mediaProcessing');
-const { createShare, updateShare, deleteShare, clearDrawingStrokes, removeDrawingStroke } = require('../liveStageShareStore');
+const { createShare, updateShare, deleteShare, clearDrawingStrokes, removeDrawingStroke, getShare, updateCursorPosition, listCursorPositions } = require('../liveStageShareStore');
 const {
   sanitizeText,
   sanitizeEmail,
@@ -219,6 +219,44 @@ router.delete('/live-stage-shares/:shareId/drawing/:strokeId', requireAuth, requ
 
   const success = removeDrawingStroke(shareId, strokeId);
   res.json({ success });
+});
+
+router.get('/live-stage-shares/:shareId/cursors', async (req, res) => {
+  const shareId = sanitizeText(req.params?.shareId || '', 64);
+  if (!LIVE_STAGE_SHARE_ID_REGEX.test(shareId)) {
+    return res.status(400).json({ message: 'Compartilhamento ao vivo inválido.' });
+  }
+  const share = getShare(shareId);
+  if (!share || share.ownerUserId !== req.user.id) {
+    return res.status(404).json({ message: 'Compartilhamento ao vivo não encontrado.' });
+  }
+  res.json({ cursors: listCursorPositions(shareId) || [] });
+});
+
+router.post('/live-stage-shares/:shareId/cursor', async (req, res) => {
+  const shareId = sanitizeText(req.params?.shareId || '', 64);
+  if (!LIVE_STAGE_SHARE_ID_REGEX.test(shareId)) {
+    return res.status(400).json({ message: 'Compartilhamento ao vivo inválido.' });
+  }
+  const share = getShare(shareId);
+  if (!share || share.ownerUserId !== req.user.id) {
+    return res.status(404).json({ message: 'Compartilhamento ao vivo não encontrado.' });
+  }
+
+  const active = req.body?.active !== false;
+  const success = updateCursorPosition(shareId, {
+    userId: req.user.id,
+    peerKey: `teacher:${req.user.id}`,
+    role: req.user.role || 'professor',
+    fullName: req.user.full_name || req.user.fullName || 'Professor',
+    x: Number(req.body?.x),
+    y: Number(req.body?.y),
+    active
+  });
+  if (!success) {
+    return res.status(500).json({ message: 'Não foi possível atualizar o cursor.' });
+  }
+  res.json({ success: true });
 });
 
 const hashSignupLinkToken = (token) => crypto.createHash('sha256').update(String(token || '')).digest('hex');

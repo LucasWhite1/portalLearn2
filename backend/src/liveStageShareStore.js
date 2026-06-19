@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 
 const LIVE_STAGE_SHARE_TTL_MS = 1000 * 60 * 60 * 4;
+const LIVE_STAGE_CURSOR_TTL_MS = 1000 * 4;
 const liveStageShares = new Map();
 
 const createShareId = () => crypto.randomBytes(16).toString('hex');
@@ -10,6 +11,10 @@ const cleanupExpiredShares = () => {
   liveStageShares.forEach((share, shareId) => {
     if (!share || now - share.updatedAt > LIVE_STAGE_SHARE_TTL_MS) {
       liveStageShares.delete(shareId);
+      return;
+    }
+    if (Array.isArray(share.cursorPositions)) {
+      share.cursorPositions = share.cursorPositions.filter((cursor) => now - Number(cursor?.updatedAt || 0) <= LIVE_STAGE_CURSOR_TTL_MS);
     }
   });
 };
@@ -53,6 +58,7 @@ const createShare = ({ ownerUserId, ownerRole = null, payload }) => {
     revision: 1,
     cameraRequests: [],
     drawingStrokes: [],
+    cursorPositions: [],
     payload: clonePayload(payload)
   };
   liveStageShares.set(shareId, entry);
@@ -117,6 +123,50 @@ const addDrawingStroke = (shareId, stroke) => {
   return true;
 };
 
+const updateCursorPosition = (shareId, cursor) => {
+  cleanupExpiredShares();
+  const current = liveStageShares.get(shareId);
+  if (!current) return false;
+
+  const now = Date.now();
+  const userId = String(cursor?.userId || '').trim();
+  const peerKey = String(cursor?.peerKey || '').trim();
+  const role = String(cursor?.role || '').trim();
+  const fullName = String(cursor?.fullName || '').trim();
+  const x = Number(cursor?.x);
+  const y = Number(cursor?.y);
+  const active = cursor?.active !== false;
+
+  current.cursorPositions = Array.isArray(current.cursorPositions) ? current.cursorPositions : [];
+  current.cursorPositions = current.cursorPositions.filter((entry) => {
+    const sameUser = userId && String(entry?.userId || '').trim() === userId;
+    const samePeer = peerKey && String(entry?.peerKey || '').trim() === peerKey;
+    return !(sameUser || samePeer) && now - Number(entry?.updatedAt || 0) <= LIVE_STAGE_CURSOR_TTL_MS;
+  });
+
+  if (!active) {
+    return true;
+  }
+
+  current.cursorPositions.push({
+    userId,
+    peerKey,
+    role,
+    fullName,
+    x: Number.isFinite(x) ? Math.min(Math.max(x, 0), 1) : 0,
+    y: Number.isFinite(y) ? Math.min(Math.max(y, 0), 1) : 0,
+    updatedAt: now
+  });
+  return true;
+};
+
+const listCursorPositions = (shareId) => {
+  cleanupExpiredShares();
+  const current = liveStageShares.get(shareId);
+  if (!current) return null;
+  return Array.isArray(current.cursorPositions) ? clonePayload(current.cursorPositions) : [];
+};
+
 const removeDrawingStroke = (shareId, strokeId) => {
   cleanupExpiredShares();
   const current = liveStageShares.get(shareId);
@@ -156,6 +206,8 @@ module.exports = {
   updateShare,
   addCameraRequest,
   addDrawingStroke,
+  updateCursorPosition,
+  listCursorPositions,
   removeDrawingStroke,
   clearDrawingStrokes,
   deleteShare
