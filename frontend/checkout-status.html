@@ -109,8 +109,8 @@
           ? 'Agora o cartao ja ficou cadastrado no gateway e o periodo de 30 dias comeca a contar.'
           : 'Seu pagamento foi enviado ao gateway e a assinatura ja pode seguir para ativacao.',
         note: plan === 'trial-30-dias'
-          ? 'Lembrete importante: se voce cancelar antes do fim do periodo gratuito, nenhum valor sera cobrado.'
-          : 'Se precisar confirmar detalhes financeiros ou acompanhar o status da cobranca, o ideal e complementar isso com a consulta da assinatura no painel administrativo.'
+          ? 'Assim que a ativacao for processada, o login e a senha temporaria serao enviados para o email informado antes do checkout.'
+          : 'Assim que o pagamento for confirmado pelo Asaas, o login e a senha temporaria serao enviados para o email informado antes do checkout.'
       },
       cancel: {
         eyebrow: 'Checkout cancelado',
@@ -131,6 +131,9 @@
     document.getElementById('statusHeading').textContent = current.heading;
     document.getElementById('statusText').textContent = current.text;
     document.getElementById('statusNote').textContent = current.note;
+    document.getElementById('statusPrimaryAction').textContent = status === 'success'
+      ? 'Ja recebi meu acesso'
+      : 'Ir para o login';
   </script>
 </body>
 </html>

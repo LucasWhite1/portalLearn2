@@ -1252,8 +1252,8 @@
 
     const API_ORIGIN = resolveApiOrigin();
     const CHECKOUT_URLS = {
-      pro: `${API_ORIGIN}/api/billing/checkout-session?plan=pro`,
-      trial: `${API_ORIGIN}/api/billing/checkout-session?plan=trial-30-dias`
+      pro: 'checkout.html?plan=pro',
+      trial: 'checkout.html?plan=trial-30-dias'
     };
 
     const navbar = document.querySelector('.navbar');

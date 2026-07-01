@@ -281,7 +281,7 @@
         <div class="highlights">
           <div class="highlight">
             <strong>Checkout seguro no Asaas</strong>
-            <p>O pagamento e o cadastro do cartao acontecem no ambiente hospedado do gateway, reduzindo atrito e acelerando a ativacao.</p>
+            <p>Antes de abrir o ambiente do gateway, guardamos seu nome e email para criar o acesso do professor depois da confirmacao.</p>
           </div>
           <div class="highlight">
             <strong>Fluxo alinhado com o seu teste gratis</strong>
@@ -298,7 +298,7 @@
           <div class="field-grid">
             <div class="field">
               <label for="checkoutEmail">Email</label>
-              <input id="checkoutEmail" name="email" type="email" autocomplete="email" />
+              <input id="checkoutEmail" name="email" type="email" autocomplete="email" required />
             </div>
             <div class="field">
               <label for="checkoutPhone">Telefone</label>
@@ -309,7 +309,7 @@
           <div class="field">
             <label for="checkoutCpfCnpj">CPF ou CNPJ</label>
             <input id="checkoutCpfCnpj" name="cpfCnpj" type="text" inputmode="numeric" />
-            <small>Os dados finais de pagamento e cadastro serao preenchidos no checkout seguro do Asaas.</small>
+            <small>Os dados finais de pagamento serao preenchidos no checkout seguro do Asaas.</small>
           </div>
         </form>
       </section>
@@ -365,7 +365,7 @@
           'Fluxo pronto para assinatura recorrente mensal.'
         ],
         notice: 'Ao continuar, voce sera levado ao checkout do Asaas para cadastrar o pagamento e concluir a assinatura.',
-        footnote: 'Se o pagamento for concluido, o gateway redireciona voce de volta para a plataforma.'
+        footnote: 'Se o pagamento for concluido, o login e a senha temporaria serao enviados para o email informado aqui.'
       },
       'trial-30-dias': {
         kicker: 'Teste gratis',
@@ -380,7 +380,7 @@
           'Cancelando antes do fim do periodo gratuito, nenhum valor sera cobrado.'
         ],
         notice: 'Esse fluxo exige cartao no checkout para ativacao do teste, mas o valor nao e cobrado se o cancelamento acontecer dentro dos 30 dias.',
-        footnote: 'Ideal para quem quer experimentar com calma antes de assumir a assinatura.'
+        footnote: 'Depois da ativacao do teste, o login e a senha temporaria serao enviados para o email informado aqui.'
       }
     };
 
@@ -427,6 +427,12 @@
         name: String(formData.get('name') || '').trim(),
         email: String(formData.get('email') || '').trim()
       };
+      if (!payload.email) {
+        submitButton.disabled = false;
+        submitButton.textContent = 'Ir para o checkout seguro';
+        setFlash('Informe o email que recebera o login e a senha de acesso.');
+        return;
+      }
 
       try {
         const response = await fetch(`${API_ORIGIN}/api/billing/checkout-session`, {
@@ -445,7 +451,11 @@
       } catch (error) {
         submitButton.disabled = false;
         submitButton.textContent = 'Ir para o checkout seguro';
-        setFlash(error.message || 'Nao foi possivel iniciar o checkout agora.');
+        const isNetworkError = error instanceof TypeError && /fetch/i.test(error.message || '');
+        setFlash(isNetworkError
+          ? `Nao foi possivel conectar ao servidor em ${API_ORIGIN}. Inicie o backend na porta 4000 e tente novamente.`
+          : error.message || 'Nao foi possivel iniciar o checkout agora.'
+        );
       }
     });
 

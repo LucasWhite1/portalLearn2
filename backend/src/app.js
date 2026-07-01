@@ -74,7 +74,7 @@ app.get('/health', (req, res) => res.json({ status: 'ok' }));
 app.get('/', (req, res) => res.sendFile(path.join(frontendDir, 'login.html')));
 app.get('/checkout', (req, res) => {
   const plan = String(req.query?.plan || 'pro') === 'trial-30-dias' ? 'trial-30-dias' : 'pro';
-  res.redirect(303, `/api/billing/checkout-session?plan=${encodeURIComponent(plan)}`);
+  res.redirect(303, `/checkout.html?plan=${encodeURIComponent(plan)}`);
 });
 
 const publicStudentModuleRequest = (req) =>

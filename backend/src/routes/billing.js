@@ -743,6 +743,10 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
   const plan = getPlanConfig(sanitizeText(source?.plan || 'pro', 40));
   const name = sanitizeText(source?.name || '', 120);
   const email = sanitizeEmail(source?.email || '');
+  if (!name || !email) {
+    const message = 'Informe nome e email antes de iniciar o checkout. O email sera usado para enviar login e senha.';
+    return redirect ? res.status(400).send(message) : res.status(400).json({ message });
+  }
 
   const publicBaseUrl = buildPublicBaseUrl(req);
   const externalReference = `checkout:${plan.id}:${crypto.randomUUID()}`;
