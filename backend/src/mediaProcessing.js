@@ -4,6 +4,7 @@ const { execFile } = require('child_process');
 const { promisify } = require('util');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
+const { safeFetch, readResponseBuffer } = require('./security');
 
 const execFileAsync = promisify(execFile);
 
@@ -12,6 +13,8 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 const TEMP_ROOT_DIR = path.resolve(__dirname, '../.tmp/media-processing');
 const WHISPER_PATH = path.resolve(__dirname, '../whisper.cpp/build/bin/whisper-cli.exe');
 const WHISPER_MODEL_PATH = path.resolve(__dirname, '../whisper.cpp/models/ggml-base.bin');
+const MAX_MEDIA_BYTES = 40 * 1024 * 1024;
+const allowHttpRemoteSources = !['production', 'prod'].includes(String(process.env.NODE_ENV || process.env.APP_ENV || '').toLowerCase());
 
 const isDataUrl = (value = '') => /^data:/i.test(String(value || ''));
 
@@ -38,6 +41,9 @@ const parseDataUrl = (dataUrl = '') => {
   const buffer = isBase64Payload
     ? Buffer.from(payload, 'base64')
     : Buffer.from(decodeURIComponent(payload), 'utf8');
+  if (buffer.length > MAX_MEDIA_BYTES) {
+    throw new Error('A midia enviada excede o limite de 40 MB.');
+  }
   return {
     mimeType,
     buffer,
@@ -47,7 +53,11 @@ const parseDataUrl = (dataUrl = '') => {
 };
 
 const fetchRemoteMedia = async (sourceUrl, expectedType = '') => {
-  const response = await fetch(sourceUrl);
+  const response = await safeFetch(sourceUrl, {}, {
+    allowHttp: allowHttpRemoteSources,
+    allowCrossOriginRedirects: true,
+    timeoutMs: 30000
+  });
   if (!response.ok) {
     throw new Error('Nao foi possivel baixar a midia selecionada.');
   }
@@ -56,7 +66,7 @@ const fetchRemoteMedia = async (sourceUrl, expectedType = '') => {
     throw new Error(`A URL informada nao parece ser um arquivo de ${expectedType}.`);
   }
   const extension = getExtensionFromMimeType(mimeType);
-  const buffer = Buffer.from(await response.arrayBuffer());
+  const buffer = await readResponseBuffer(response, MAX_MEDIA_BYTES);
   return {
     mimeType,
     buffer,
@@ -98,9 +108,20 @@ const bufferToDataUrl = (buffer, mimeType) => `data:${mimeType};base64,${buffer.
 
 const runFfmpegCommand = (command) =>
   new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      callback(value);
+    };
+    const timeout = setTimeout(() => {
+      command.kill('SIGKILL');
+      finish(reject, new Error('O processamento da midia excedeu o tempo permitido.'));
+    }, 2 * 60 * 1000);
     command
-      .on('end', resolve)
-      .on('error', reject)
+      .on('end', () => finish(resolve))
+      .on('error', (error) => finish(reject, error))
       .run();
   });
 
@@ -231,6 +252,7 @@ const transcribeMediaSource = async (sourceUrl, { sourceType = 'audio', language
       ['-m', WHISPER_MODEL_PATH, '-f', wavPath, '-l', language, '-otxt', '-osrt', '-of', outputBasePath],
       {
         windowsHide: true,
+        timeout: 3 * 60 * 1000,
         maxBuffer: 20 * 1024 * 1024
       }
     );

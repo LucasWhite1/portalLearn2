@@ -4208,8 +4208,25 @@ const renderCameraRequestsUi = () => {
 };
 
 const rejectStudentCameraRequest = (req) => {
-  liveCameraRequests = liveCameraRequests.filter(r => r.peerId !== req.peerId && r.userId !== req.userId);
-  renderCameraRequestsUi();
+  if (!liveStageShareState.shareId) {
+    liveCameraRequests = liveCameraRequests.filter(r => r.peerId !== req.peerId && r.userId !== req.userId);
+    renderCameraRequestsUi();
+    return;
+  }
+  authorizedFetch(`/api/admin/live-stage-shares/${encodeURIComponent(liveStageShareState.shareId)}/camera-requests/respond`, {
+    method: 'POST',
+    body: JSON.stringify({
+      userId: req.userId,
+      peerId: req.peerId,
+      fullName: req.fullName,
+      approved: false
+    })
+  }).then(() => {
+    liveCameraRequests = liveCameraRequests.filter(r => r.peerId !== req.peerId && r.userId !== req.userId);
+    renderCameraRequestsUi();
+  }).catch((error) => {
+    alert(error.message || 'Nao foi possivel recusar a solicitacao de camera.');
+  });
 };
 
 const addStudentCameraToStage = (req) => {
@@ -4220,8 +4237,18 @@ const addStudentCameraToStage = (req) => {
   if (existing.length) {
     clearStudentCameraDisconnected(req.userId, req.fullName);
     applyStudentCameraReconnects([req]);
-    liveCameraRequests = liveCameraRequests.filter((item) => item.peerId !== req.peerId && item.userId !== req.userId);
-    renderCameraRequestsUi();
+    authorizedFetch(`/api/admin/live-stage-shares/${encodeURIComponent(liveStageShareState.shareId)}/camera-requests/respond`, {
+      method: 'POST',
+      body: JSON.stringify({
+        userId: req.userId,
+        peerId: req.peerId,
+        fullName: req.fullName,
+        approved: true
+      })
+    }).finally(() => {
+      liveCameraRequests = liveCameraRequests.filter((item) => item.peerId !== req.peerId && item.userId !== req.userId);
+      renderCameraRequestsUi();
+    });
     return;
   }
 
@@ -4247,10 +4274,18 @@ const addStudentCameraToStage = (req) => {
   renderSlide();
   connectToStudentPeerInCreator(req.peerId);
   scheduleBuilderAutosave();
-
-  // Opcional: remover da lista após adicionar
-  liveCameraRequests = liveCameraRequests.filter(r => r.peerId !== req.peerId);
-  renderCameraRequestsUi();
+  authorizedFetch(`/api/admin/live-stage-shares/${encodeURIComponent(liveStageShareState.shareId)}/camera-requests/respond`, {
+    method: 'POST',
+    body: JSON.stringify({
+      userId: req.userId,
+      peerId: req.peerId,
+      fullName: req.fullName,
+      approved: true
+    })
+  }).finally(() => {
+    liveCameraRequests = liveCameraRequests.filter(r => r.peerId !== req.peerId && r.userId !== req.userId);
+    renderCameraRequestsUi();
+  });
 };
 
 const buildLiveStudentStrokeKey = (strokeData = {}) => {
@@ -6483,6 +6518,7 @@ const renderStageBackgroundMedia = (stageNode, slide, options = {}) => {
       muted: false
     });
     mediaNode.title = 'Vídeo de fundo';
+    mediaNode.sandbox = 'allow-scripts allow-same-origin allow-presentation';
     mediaNode.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
     mediaNode.referrerPolicy = 'strict-origin-when-cross-origin';
   } else {
@@ -10206,6 +10242,13 @@ const syncProfessorCreditsFromPayload = (payload = null) => {
   if (Number.isFinite(Number(payload.aiCreditCostPerCall))) {
     nextData.aiCreditCostPerCall = Math.max(0.01, Number(Number(payload.aiCreditCostPerCall).toFixed(2)));
   }
+  if (Number.isFinite(Number(payload.aiTextCreditCostPerCall))) {
+    nextData.aiTextCreditCostPerCall = Math.max(0.01, Number(Number(payload.aiTextCreditCostPerCall).toFixed(2)));
+    nextData.aiCreditCostPerCall = nextData.aiTextCreditCostPerCall;
+  }
+  if (Number.isFinite(Number(payload.aiImageCreditCostPerCall))) {
+    nextData.aiImageCreditCostPerCall = Math.max(0.01, Number(Number(payload.aiImageCreditCostPerCall).toFixed(2)));
+  }
   if (payload.studentLimit !== undefined) {
     nextData.studentLimit = payload.studentLimit;
   }
@@ -10228,11 +10271,16 @@ const renderBuilderProfessorCreditsStatus = () => {
   }
   const user = getCurrentUserData();
   const credits = Number.isFinite(Number(user.aiCredits)) ? Math.max(0, Number(user.aiCredits)) : 0;
-  const cost = Number.isFinite(Number(user.aiCreditCostPerCall)) ? Math.max(0.01, Number(user.aiCreditCostPerCall)) : 0.5;
+  const textCost = Number.isFinite(Number(user.aiTextCreditCostPerCall || user.aiCreditCostPerCall))
+    ? Math.max(0.01, Number(user.aiTextCreditCostPerCall || user.aiCreditCostPerCall))
+    : 0.5;
+  const imageCost = Number.isFinite(Number(user.aiImageCreditCostPerCall))
+    ? Math.max(0.01, Number(user.aiImageCreditCostPerCall))
+    : 1.0;
   const storageText = user.storageLimitBytes
     ? ` | espaço: ${formatStorageAmount(user.storageUsedBytes || 0)} / ${formatStorageAmount(user.storageLimitBytes)}`
     : '';
-  builderProfessorCreditsStatus.textContent = `Saldo: ${formatCreditNumber(credits)} crédito(s) | custo/chamada: ${formatCreditNumber(cost)}${storageText}`;
+  builderProfessorCreditsStatus.textContent = `Saldo: ${formatCreditNumber(credits)} credito(s) | texto: ${formatCreditNumber(textCost)} | imagem: ${formatCreditNumber(imageCost)}${storageText}`;
   builderProfessorCreditsStatus.style.color = credits > 0 ? '#6d63ff' : '#ff6b6b';
 };
 
@@ -10306,71 +10354,6 @@ const applyOrQueueAiActions = (actions, options = {}) => {
   renderAiAssistantActions();
 };
 
-const executeAiPlanItem = async ({ request, plan, planItem, requireConfirmation, providerLabel }) => {
-  const maxSteps = 1;
-  let generatedCount = 0;
-  for (let localStep = 0; localStep < maxSteps; localStep += 1) {
-    const workingState = getAiAssistantWorkingState();
-    const response = await authorizedFetch('/api/admin/ai/slide-actions', {
-      method: 'POST',
-      body: JSON.stringify({
-        request,
-        slides: workingState.slides,
-        activeSlideId: workingState.activeSlideId,
-        stageSize: builderState.stageSize.width && builderState.stageSize.height ? builderState.stageSize : DEFAULT_STAGE_SIZE,
-        stepIndex: aiAssistantState.stepIndex,
-        recentActions: aiAssistantState.recentActions,
-        attachments: getAiAssistantAttachmentsPayload(),
-        executionPlan: plan,
-        currentPlanItem: planItem
-      })
-    });
-    const result = await response.json().catch(() => null);
-    if (!response.ok) {
-      throw new Error(result?.message || 'A IA não conseguiu gerar a próxima etapa.');
-    }
-    syncProfessorCreditsFromPayload(result);
-    aiAssistantState.debugInfo = {
-      request,
-      providerLabel: providerLabel || result?.providerLabel || '',
-      requireConfirmation,
-      plan,
-      currentPlanItem: planItem,
-      stepIndex: aiAssistantState.stepIndex,
-      lastStepResult: result,
-      generatedActionCount: aiAssistantState.generatedActions.length,
-      pendingActionCount: aiAssistantState.pendingActions.length
-    };
-    renderAiAssistantDebug();
-    if (result?.done) {
-      pushAiAssistantFeedback(
-        plan?.mode === 'simple' ? 'Pedido concluído' : `Slide ${planItem?.order || ''} planejado`,
-        result?.message || 'Etapa concluída.',
-        'success'
-      );
-      return generatedCount;
-    }
-    if (!result?.action) {
-      throw new Error('A IA não retornou uma ação válida nesta etapa.');
-    }
-    const stepAction = deepClone(result.action);
-    applyOrQueueAiActions([stepAction], { requireConfirmation });
-    aiAssistantState.stepIndex += 1;
-    generatedCount += 1;
-    pushAiAssistantFeedback(
-      plan?.mode === 'simple' ? 'Ação gerada' : `Slide ${planItem?.order || ''} em progresso`,
-      result?.message || stepAction.reason || 'A IA gerou uma nova ação.',
-      'success'
-    );
-  }
-  pushAiAssistantFeedback(
-    plan?.mode === 'simple' ? 'Encerrado' : `Slide ${planItem?.order || ''} encerrado`,
-    'A etapa atingiu o limite de ações para evitar loops.',
-    'muted'
-  );
-  return generatedCount;
-};
-
 const executeAiSlidePlanItem = async ({
   request,
   plan,
@@ -10428,6 +10411,24 @@ const executeAiSlidePlanItem = async ({
   return actions.length;
 };
 
+const executeAiSlidePlanItemWithRetry = async (options) => {
+  try {
+    return await executeAiSlidePlanItem(options);
+  } catch (error) {
+    const message = String(error?.message || 'Falha ao gerar o slide.');
+    if (/credito|crédito|saldo|limite|desativad|configur/i.test(message)) {
+      throw error;
+    }
+    pushAiAssistantFeedback(
+      `Repetindo slide ${options.planItem?.order || ''}`,
+      'A primeira tentativa falhou. Vou tentar esta etapa mais uma vez sem reiniciar o restante da fila.',
+      'muted'
+    );
+    await new Promise((resolve) => window.setTimeout(resolve, 500));
+    return executeAiSlidePlanItem(options);
+  }
+};
+
 const requestAiPlannedProposal = async (request, options = {}) => {
   const resolvedAttachments = Array.isArray(options.attachmentsPayload) ? options.attachmentsPayload : getAiAssistantAttachmentsPayload();
   const userFacingPrompt =
@@ -10461,6 +10462,7 @@ const requestAiPlannedProposal = async (request, options = {}) => {
   renderAiAssistantDebug();
 
   const requireConfirmation = planResponse?.requireConfirmation !== false;
+  let stoppedOnSlideError = false;
   if (plan.mode === 'simple') {
     pushAiAssistantFeedback('Plano simples', plan.summary || 'Pedido pontual detectado. Vou gerar só o necessário.', 'success');
     await executeAiSlidePlanItem({
@@ -10479,19 +10481,39 @@ const requestAiPlannedProposal = async (request, options = {}) => {
       'success'
     );
     for (const planItem of planItems) {
+      if (aiAssistantState.stopRequested) {
+        break;
+      }
       pushAiAssistantFeedback(
         `Executando slide ${planItem.order || ''}`,
         `${planItem.title || 'Slide'}: ${planItem.goal || 'Montando o layout deste slide.'}`,
         'muted'
       );
-      await executeAiSlidePlanItem({
-        request,
-        plan,
-        planItem,
-        requireConfirmation,
-        providerLabel: planResponse?.providerLabel || '',
-        attachmentsPayload: resolvedAttachments
-      });
+      try {
+        await executeAiSlidePlanItemWithRetry({
+          request,
+          plan,
+          planItem,
+          requireConfirmation,
+          providerLabel: planResponse?.providerLabel || '',
+          attachmentsPayload: resolvedAttachments
+        });
+      } catch (error) {
+        stoppedOnSlideError = true;
+        pushAiAssistantFeedback(
+          `Geração parou no slide ${planItem.order || ''}`,
+          `${error.message || 'A IA nao conseguiu montar este slide com qualidade suficiente.'} Refaça este slide ou tente novamente. Os slides anteriores foram preservados.`,
+          'error'
+        );
+        updateAiAssistantStatus(
+          `A geração parou no slide ${planItem.order || ''}. Revise o que ja foi gerado e tente novamente a partir deste ponto.`,
+          'error'
+        );
+        break;
+      }
+    }
+    if (stoppedOnSlideError && !aiAssistantState.generatedActions.length) {
+      return;
     }
   }
 
@@ -10502,6 +10524,16 @@ const requestAiPlannedProposal = async (request, options = {}) => {
   }
 
   rememberAiProposal(userFacingPrompt, aiAssistantState.generatedActions);
+  if (stoppedOnSlideError) {
+    if (requireConfirmation) {
+      renderAiAssistantActions();
+    }
+    updateAiAssistantStatus(
+      `Proposta parcial com ${aiAssistantState.generatedActions.length} acao(oes). A geracao parou no slide com erro; revise antes de aplicar.`,
+      'error'
+    );
+    return;
+  }
   if (requireConfirmation) {
     renderAiAssistantActions();
     updateAiAssistantStatus(
@@ -10575,7 +10607,11 @@ const loadAiAssistantSettings = async () => {
       throw new Error('Não foi possível carregar a integração de IA.');
     }
     aiAssistantState.settings = await response.json();
-    syncProfessorCreditsFromPayload({ aiCreditCostPerCall: aiAssistantState.settings?.aiCreditCostPerCall });
+    syncProfessorCreditsFromPayload({
+      aiCreditCostPerCall: aiAssistantState.settings?.aiCreditCostPerCall,
+      aiTextCreditCostPerCall: aiAssistantState.settings?.aiTextCreditCostPerCall,
+      aiImageCreditCostPerCall: aiAssistantState.settings?.aiImageCreditCostPerCall
+    });
     if (aiAssistantState.settings?.connected && aiAssistantState.settings?.isEnabled) {
       const imageProvider = aiAssistantState.settings?.imageProvider;
       updateAiAssistantStatus(
@@ -12303,21 +12339,42 @@ const addElementToSlide = (config) => {
   commitHistoryState();
 };
 
+const createUniqueSlideIdForState = (targetState, requestedId = '') => {
+  let nextId = requestedId || createId('slide');
+  while ((targetState?.slides || []).some((slide) => slide?.id === nextId)) {
+    nextId = createId('slide');
+  }
+  return nextId;
+};
+
+const createUniqueElementIdForState = (targetState, requestedId = '') => {
+  let nextId = requestedId || createId('element');
+  const idExists = (candidate) =>
+    (targetState?.slides || []).some((slide) =>
+      (slide?.elements || []).some((element) => element?.id === candidate)
+    );
+  while (idExists(nextId)) {
+    nextId = createId('element');
+  }
+  return nextId;
+};
+
 const addElementToSpecificSlide = (slideId, config) => {
   const slide = builderState.slides.find((entry) => entry.id === slideId);
   if (!slide) {
     throw new Error(`Slide alvo não encontrado: ${slideId}`);
   }
+  const elementId = createUniqueElementIdForState(builderState, config.id);
   const element = {
-    id: config.id || createId('element'),
     type: config.type,
-    x: config.x || 50,
-    y: config.y || 60,
+    x: config.x ?? 50,
+    y: config.y ?? 60,
     width: config.width,
     height: config.height,
     rotation: Number.isFinite(Number(config.rotation)) ? Number(config.rotation) : 0,
     zIndex: config.zIndex ?? getNextLayerIndex(slide),
-    ...config
+    ...config,
+    id: elementId
   };
   element.opacity = getElementBaseOpacity(element);
   if (!element.textColor) {
@@ -12603,7 +12660,10 @@ const createFallbackSlideFromAiUpdate = (targetState, action = {}) => {
     title: action.slide.title || `Slide ${existingSlides.length + 1}`,
     elements: [],
     backgroundImage: action.slide.backgroundImage || null,
-    backgroundColor: action.slide.backgroundColor || '#fdfbff'
+    backgroundColor: action.slide.backgroundColor || '#fdfbff',
+    backgroundFillType: action.slide.backgroundFillType || 'solid',
+    backgroundGradientStart: action.slide.backgroundGradientStart || action.slide.backgroundColor || '#fdfbff',
+    backgroundGradientEnd: action.slide.backgroundGradientEnd || '#dfe7ff'
   };
   insertSlideAfterInState(targetState, slide, action.afterSlideId);
   return slide;
@@ -12614,16 +12674,17 @@ const addElementToSpecificSlideState = (targetState, slideId, config) => {
   if (!slide) {
     throw new Error(`Slide alvo nÒ£o encontrado: ${slideId}`);
   }
+  const elementId = createUniqueElementIdForState(targetState, config.id);
   const element = {
-    id: config.id || createId('element'),
     type: config.type,
-    x: config.x || 50,
-    y: config.y || 60,
+    x: config.x ?? 50,
+    y: config.y ?? 60,
     width: config.width,
     height: config.height,
     rotation: Number.isFinite(Number(config.rotation)) ? Number(config.rotation) : 0,
     zIndex: config.zIndex ?? getNextLayerIndex(slide),
-    ...config
+    ...config,
+    id: elementId
   };
   element.opacity = getElementBaseOpacity(element);
   if (!element.textColor) {
@@ -12719,6 +12780,10 @@ const applyAiActions = (actions) => {
     if (action.element?.actionConfig?.targetElementId) {
       action.element.actionConfig.targetElementId = resolveElementAlias(action.element.actionConfig.targetElementId);
     }
+    if (typeof action.element?.actionConfig?.detectorAcceptedDrag === 'string' && action.element.actionConfig.detectorAcceptedDrag.startsWith('element:')) {
+      const dragId = action.element.actionConfig.detectorAcceptedDrag.slice('element:'.length);
+      action.element.actionConfig.detectorAcceptedDrag = `element:${resolveElementAlias(dragId)}`;
+    }
     if (Array.isArray(action.element?.interactionTriggers)) {
       action.element.interactionTriggers.forEach((trigger) => {
         if (trigger?.actionConfig?.targetSlideId) {
@@ -12727,17 +12792,25 @@ const applyAiActions = (actions) => {
         if (trigger?.actionConfig?.targetElementId) {
           trigger.actionConfig.targetElementId = resolveElementAlias(trigger.actionConfig.targetElementId);
         }
+        if (typeof trigger?.actionConfig?.detectorAcceptedDrag === 'string' && trigger.actionConfig.detectorAcceptedDrag.startsWith('element:')) {
+          const dragId = trigger.actionConfig.detectorAcceptedDrag.slice('element:'.length);
+          trigger.actionConfig.detectorAcceptedDrag = `element:${resolveElementAlias(dragId)}`;
+        }
       });
     }
     switch (action.type) {
       case 'add_slide': {
         const originalSlideId = action.slide?.id || '';
+        const uniqueSlideId = createUniqueSlideIdForState(builderState, originalSlideId);
         const slide = {
-          id: originalSlideId || createId('slide'),
+          id: uniqueSlideId,
           title: action.slide?.title || `Slide ${builderState.slides.length + 1}`,
           elements: [],
           backgroundImage: action.slide?.backgroundImage || null,
-          backgroundColor: action.slide?.backgroundColor || '#fdfbff'
+          backgroundColor: action.slide?.backgroundColor || '#fdfbff',
+          backgroundFillType: action.slide?.backgroundFillType || 'solid',
+          backgroundGradientStart: action.slide?.backgroundGradientStart || action.slide?.backgroundColor || '#fdfbff',
+          backgroundGradientEnd: action.slide?.backgroundGradientEnd || '#dfe7ff'
         };
         insertSlideAfter(slide, action.afterSlideId);
         if (originalSlideId) {
@@ -12916,6 +12989,10 @@ const applyAiActionsToState = (targetState, actions, options = {}) => {
     if (action.element?.actionConfig?.targetElementId) {
       action.element.actionConfig.targetElementId = resolveElementAlias(action.element.actionConfig.targetElementId);
     }
+    if (typeof action.element?.actionConfig?.detectorAcceptedDrag === 'string' && action.element.actionConfig.detectorAcceptedDrag.startsWith('element:')) {
+      const dragId = action.element.actionConfig.detectorAcceptedDrag.slice('element:'.length);
+      action.element.actionConfig.detectorAcceptedDrag = `element:${resolveElementAlias(dragId)}`;
+    }
     if (Array.isArray(action.element?.interactionTriggers)) {
       action.element.interactionTriggers.forEach((trigger) => {
         if (trigger?.actionConfig?.targetSlideId) {
@@ -12924,18 +13001,26 @@ const applyAiActionsToState = (targetState, actions, options = {}) => {
         if (trigger?.actionConfig?.targetElementId) {
           trigger.actionConfig.targetElementId = resolveElementAlias(trigger.actionConfig.targetElementId);
         }
+        if (typeof trigger?.actionConfig?.detectorAcceptedDrag === 'string' && trigger.actionConfig.detectorAcceptedDrag.startsWith('element:')) {
+          const dragId = trigger.actionConfig.detectorAcceptedDrag.slice('element:'.length);
+          trigger.actionConfig.detectorAcceptedDrag = `element:${resolveElementAlias(dragId)}`;
+        }
       });
     }
 
     switch (action.type) {
       case 'add_slide': {
         const originalSlideId = action.slide?.id || '';
+        const uniqueSlideId = createUniqueSlideIdForState(targetState, originalSlideId);
         const slide = {
-          id: originalSlideId || createId('slide'),
+          id: uniqueSlideId,
           title: action.slide?.title || `Slide ${(targetState?.slides?.length || 0) + 1}`,
           elements: [],
           backgroundImage: action.slide?.backgroundImage || null,
-          backgroundColor: action.slide?.backgroundColor || '#fdfbff'
+          backgroundColor: action.slide?.backgroundColor || '#fdfbff',
+          backgroundFillType: action.slide?.backgroundFillType || 'solid',
+          backgroundGradientStart: action.slide?.backgroundGradientStart || action.slide?.backgroundColor || '#fdfbff',
+          backgroundGradientEnd: action.slide?.backgroundGradientEnd || '#dfe7ff'
         };
         insertSlideAfterInState(targetState, slide, action.afterSlideId);
         if (originalSlideId) {
@@ -14231,6 +14316,7 @@ const createPreviewElementNode = (element, slide, options = {}) => {
         frame.className = 'builder-media-element';
         frame.src = element.embedSrc;
         frame.title = 'Video do YouTube';
+        frame.sandbox = 'allow-scripts allow-same-origin allow-presentation';
         frame.allow =
           'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
         frame.allowFullscreen = true;
@@ -14443,6 +14529,7 @@ const renderElementNode = (element) => {
         frame.className = 'builder-media-element';
         frame.src = element.embedSrc;
         frame.title = 'Vídeo do YouTube';
+        frame.sandbox = 'allow-scripts allow-same-origin allow-presentation';
         frame.allow =
           'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
         frame.allowFullscreen = true;

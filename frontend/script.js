@@ -5,7 +5,7 @@
   if (window.location.protocol === 'file:') {
     return 'http://localhost:4000';
   }
-  if (['localhost', '127.0.0.1'].includes(window.location.hostname) && window.location.port !== '4000') {
+  if (['localhost', '127.0.0.1'].includes(window.location.hostname) && /^55\d{2}$/.test(window.location.port)) {
     return `${window.location.protocol}//${window.location.hostname}:4000`;
   }
   return window.location.origin;
@@ -306,10 +306,10 @@ const authorizedFetch = async (path, options = {}) => {
   }
   const headers = {
     'Content-Type': 'application/json',
-    Authorization: `Bearer ${token}`,
     ...(options.headers || {})
   };
-  const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  if (/^[0-9a-f]{48}$/i.test(token)) headers.Authorization = `Bearer ${token}`;
+  const response = await fetch(`${API_BASE}${path}`, { ...options, headers, credentials: 'include' });
   if (response.status === 401) {
     clearToken();
     window.location.href = 'login.html';
@@ -938,7 +938,7 @@ const renderNotifications = async () => {
     data.forEach((note) => {
       const item = document.createElement('div');
       item.className = 'notification';
-      item.innerHTML = `<p style="margin:0;">${note.message}</p><small style="color:#8b92b1;">${new Date(note.created_at).toLocaleString()}</small>`;
+      item.innerHTML = `<p style="margin:0;">${escapeHtml(note.message)}</p><small style="color:#8b92b1;">${escapeHtml(new Date(note.created_at).toLocaleString())}</small>`;
       panel.appendChild(item);
     });
   } catch (err) {
@@ -1230,6 +1230,7 @@ const initLogin = () => {
     try {
       const response = await fetch(`${API_BASE}/api/auth/student-signup-link/${encodeURIComponent(inviteToken)}/register`, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           fullName: signupForm.studentSignupFullName.value,
@@ -1262,6 +1263,7 @@ const initLogin = () => {
     try {
       const response = await fetch(`${API_BASE}/api/auth/login`, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password })
       });
@@ -1389,8 +1391,8 @@ const initCreateAccount = () => {
       setFeedback('Preencha nome, email e senha para continuar.');
       return;
     }
-    if (password.length < 8) {
-      setFeedback('A senha precisa ter pelo menos 8 caracteres.');
+    if (password.length < 12) {
+      setFeedback('A senha precisa ter pelo menos 12 caracteres.');
       return;
     }
     if (password !== confirmPassword) {
@@ -1402,6 +1404,7 @@ const initCreateAccount = () => {
     try {
       const response = await fetch(`${API_BASE}/api/auth/signup`, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           fullName,
@@ -1622,6 +1625,9 @@ const renderAdminProfessors = () => {
           <button class="primary-btn" type="button" data-professor-credit-add="${professor.id}" style="width:auto;">Adicionar créditos</button>
           <button class="secondary-btn small" type="button" data-professor-toggle="${professor.id}">
             ${professor.is_active ? 'Bloquear' : 'Autorizar'}
+          </button>
+          <button class="secondary-btn small" type="button" data-professor-delete="${professor.id}" style="border-color:#ff8a8a; color:#ff6b6b;">
+            Excluir
           </button>
         </div>
       </div>
@@ -2185,9 +2191,9 @@ const renderAiSettingsStatus = (settings) => {
     imageProvider?.connected && imageProvider?.isEnabled
       ? ` • ${imageProvider.providerLabel} • ${imageProvider.model} • imagem ativa`
       : ' • Nano Banana não configurada';
-  statusNode.textContent = `${settings.providerLabel} • ${settings.model} • ${statusLabel} • ${confirmationLabel}${imageLabel}`;
-  statusNode.textContent += ` • custo/chamada: ${formatCreditNumber(settings.aiCreditCostPerCall || 0.5)}`;
-  statusNode.textContent = statusNode.textContent.replace(/ ?[•]\s*custo\/chamada:.*$/i, '');
+  const textCost = settings.aiTextCreditCostPerCall || settings.aiCreditCostPerCall || 0.5;
+  const imageCost = settings.aiImageCreditCostPerCall || 1.0;
+  statusNode.textContent = `${settings.providerLabel} • ${settings.model} • ${statusLabel} • ${confirmationLabel}${imageLabel} • texto: ${formatCreditNumber(textCost)} • imagem: ${formatCreditNumber(imageCost)}`;
   statusNode.style.color = settings.isEnabled ? '#6d63ff' : '#8b92b1';
 };
 
@@ -2197,14 +2203,16 @@ const fillAiSettingsForm = (settings) => {
   providerLabelInput.value = settings?.providerLabel || 'DeepSeek';
   document.getElementById('aiProviderKey').value = settings?.providerKey || 'deepseek';
   document.getElementById('aiBaseUrl').value = settings?.baseUrl || 'https://api.deepseek.com';
-  document.getElementById('aiModel').value = settings?.model || 'deepseek-chat';
+  document.getElementById('aiModel').value = settings?.model || 'deepseek-v4-pro';
   document.getElementById('aiImageProviderLabel').value = settings?.imageProvider?.providerLabel || 'Nano Banana';
   document.getElementById('aiImageProviderKey').value = settings?.imageProvider?.providerKey || 'google-gemini-image';
   document.getElementById('aiImageBaseUrl').value =
     settings?.imageProvider?.baseUrl || 'https://generativelanguage.googleapis.com/v1beta';
   document.getElementById('aiImageModel').value = settings?.imageProvider?.model || 'gemini-2.5-flash-image';
-  const aiCreditCostInput = document.getElementById('aiCreditCostPerCall');
-  if (aiCreditCostInput) aiCreditCostInput.value = settings?.aiCreditCostPerCall || 0.5;
+  const aiTextCreditCostInput = document.getElementById('aiTextCreditCostPerCall');
+  if (aiTextCreditCostInput) aiTextCreditCostInput.value = settings?.aiTextCreditCostPerCall || settings?.aiCreditCostPerCall || 0.5;
+  const aiImageCreditCostInput = document.getElementById('aiImageCreditCostPerCall');
+  if (aiImageCreditCostInput) aiImageCreditCostInput.value = settings?.aiImageCreditCostPerCall || 1.0;
   document.getElementById('aiSystemPrompt').value = settings?.systemPrompt || '';
   document.getElementById('aiRequireConfirmation').checked = settings?.requireConfirmation !== false;
   document.getElementById('aiEnabled').checked = settings?.isEnabled !== false;
@@ -2239,11 +2247,11 @@ const loadAdminNotifications = async () => {
       .map(
         (notification) => `
           <div class="module-list-item">
-            <h4>${notification.message}</h4>
-            <p>Destino: ${notification.target_type}${notification.target_value ? ` • ${notification.target_value}` : ''}</p>
-            <p>${new Date(notification.created_at).toLocaleString('pt-BR')}</p>
+            <h4>${escapeHtml(notification.message)}</h4>
+            <p>Destino: ${escapeHtml(notification.target_type)}${notification.target_value ? ` • ${escapeHtml(notification.target_value)}` : ''}</p>
+            <p>${escapeHtml(new Date(notification.created_at).toLocaleString('pt-BR'))}</p>
             <div class="actions">
-              <button class="secondary-btn danger" type="button" data-notification-id="${notification.id}">Apagar</button>
+              <button class="secondary-btn danger" type="button" data-notification-id="${escapeHtml(notification.id)}">Apagar</button>
             </div>
           </div>
         `
@@ -2257,6 +2265,13 @@ const loadAdminNotifications = async () => {
 const loadAdminSmtpSettings = async () => {
   const statusEl = document.getElementById('smtpSettingsStatus');
   if (!statusEl) return;
+  if (!isGlobalAdminUser()) {
+    const panel = document.getElementById('adminSmtpSettingsSection');
+    if (panel) {
+      panel.remove();
+    }
+    return;
+  }
   try {
     const response = await authorizedFetch('/api/admin/smtp-settings');
     const settings = await response.json();
@@ -2282,14 +2297,11 @@ const initAdminPage = () => {
     document.querySelector('[data-target="adminProfessorsSection"]')?.closest('li')?.remove();
     document.getElementById('adminProfessorsSection')?.remove();
     document.querySelector('#adminSettingsSection h2')?.replaceChildren(document.createTextNode('Configuracoes'));
-    const smtpTitle = document.querySelector('#adminSmtpSettingsSection h2');
-    if (smtpTitle) smtpTitle.textContent = 'Seu E-mail de Envio (SMTP)';
-    const smtpDescription = document.querySelector('#adminSmtpSettingsSection p');
-    if (smtpDescription) {
-      smtpDescription.textContent = 'Se voce nao configurar seu proprio SMTP, o sistema usa automaticamente o email padrao cadastrado pelo admin.';
-    }
-    const aiCostField = document.getElementById('aiCreditCostPerCall')?.closest('.field-group');
-    if (aiCostField) aiCostField.remove();
+    document.getElementById('adminSmtpSettingsSection')?.remove();
+    const aiTextCostField = document.getElementById('aiTextCreditCostPerCall')?.closest('.field-group');
+    if (aiTextCostField) aiTextCostField.remove();
+    const aiImageCostField = document.getElementById('aiImageCreditCostPerCall')?.closest('.field-group');
+    if (aiImageCostField) aiImageCostField.remove();
   }
   renderStudentSignupLinkPanel();
   loadProfessorCreditsStatus();
@@ -2492,18 +2504,38 @@ const initAdminPage = () => {
       }
     }
     const toggleButton = event.target.closest('button[data-professor-toggle]');
-    if (!toggleButton) return;
-    const professorId = toggleButton.dataset.professorToggle;
-    const professor = adminProfessorsCache.find((item) => item.id === professorId);
-    if (!professor) return;
-    try {
-      await authorizedFetch(`/api/admin/professors/${professorId}/status`, {
-        method: 'PUT',
-        body: JSON.stringify({ isActive: !professor.is_active })
-      });
-      await loadAdminProfessors();
-    } catch (error) {
-      alert(error.message || 'Não foi possível atualizar o professor.');
+    if (toggleButton) {
+      const professorId = toggleButton.dataset.professorToggle;
+      const professor = adminProfessorsCache.find((item) => item.id === professorId);
+      if (!professor) return;
+      try {
+        await authorizedFetch(`/api/admin/professors/${professorId}/status`, {
+          method: 'PUT',
+          body: JSON.stringify({ isActive: !professor.is_active })
+        });
+        await loadAdminProfessors();
+      } catch (error) {
+        alert(error.message || 'Não foi possível atualizar o professor.');
+      }
+      return;
+    }
+    const deleteButton = event.target.closest('button[data-professor-delete]');
+    if (deleteButton) {
+      const professorId = deleteButton.dataset.professorDelete;
+      const professor = adminProfessorsCache.find((item) => item.id === professorId);
+      if (!professor) return;
+      const confirmed = window.confirm(`Excluir o professor ${professor.full_name}?\n\nOs cursos, alunos e dados vinculados a ele também serão removidos.`);
+      if (!confirmed) {
+        return;
+      }
+      try {
+        await authorizedFetch(`/api/admin/professors/${professorId}`, {
+          method: 'DELETE'
+        });
+        await loadAdminProfessors();
+      } catch (error) {
+        alert(error.message || 'Não foi possível excluir o professor.');
+      }
     }
   });
 
@@ -2836,7 +2868,8 @@ const initAdminPage = () => {
       imageBaseUrl: document.getElementById('aiImageBaseUrl').value,
       imageModel: document.getElementById('aiImageModel').value,
       imageApiKey: document.getElementById('aiImageApiKey').value,
-      aiCreditCostPerCall: Number(document.getElementById('aiCreditCostPerCall')?.value) || 0.5,
+      aiTextCreditCostPerCall: Number(document.getElementById('aiTextCreditCostPerCall')?.value) || 0.5,
+      aiImageCreditCostPerCall: Number(document.getElementById('aiImageCreditCostPerCall')?.value) || 1.0,
       systemPrompt: document.getElementById('aiSystemPrompt').value,
       requireConfirmation: document.getElementById('aiRequireConfirmation').checked,
       isEnabled: document.getElementById('aiEnabled').checked,
@@ -3056,4 +3089,8 @@ const init = () => {
   }
 };
 
-document.addEventListener('DOMContentLoaded', init);
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init, { once: true });
+} else {
+  init();
+}

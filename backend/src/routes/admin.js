@@ -1,12 +1,11 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
-const { v4: uuidv4 } = require('uuid');
 const fs = require('fs/promises');
 const path = require('path');
 const db = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
-const { encryptApiKey } = require('../aiConfigCrypto');
+const { encryptApiKey, encryptSecret } = require('../aiConfigCrypto');
 const {
   buildPublicAiSettings,
   proposeMagicPenActions,
@@ -19,7 +18,7 @@ const {
 } = require('../aiProvider');
 const { readImageSource } = require('../pixian');
 const { extractAudioFromMediaSource, transcribeMediaSource } = require('../mediaProcessing');
-const { createShare, updateShare, deleteShare, clearDrawingStrokes, removeDrawingStroke, getShare, updateCursorPosition, listCursorPositions } = require('../liveStageShareStore');
+const { createShare, updateShare, deleteShare, clearDrawingStrokes, removeDrawingStroke, getShare, updateCursorPosition, listCursorPositions, removeCameraRequest } = require('../liveStageShareStore');
 const {
   sanitizeText,
   sanitizeEmail,
@@ -28,6 +27,9 @@ const {
   sanitizeMediaUrl,
   sanitizeBuilderData,
   sanitizeNotificationMessage,
+  getPasswordValidationError,
+  createRateLimiter,
+  assertSafeRemoteUrl,
   isUuid
 } = require('../security');
 
@@ -42,13 +44,22 @@ let courseAccessRequestsTableEnsured = false;
 let classesTableEnsured = false;
 let progressEventsColumnEnsured = false;
 let adminSmtpSettingsEnsured = false;
-let professorSmtpSettingsEnsured = false;
 let ownershipColumnsEnsured = false;
 let professorCreditColumnsEnsured = false;
 let professorQuotaColumnsEnsured = false;
 let reportCorrectionColumnEnsured = false;
 let studentSignupLinksTableEnsured = false;
 const LIVE_STAGE_SHARE_ID_REGEX = /^[0-9a-f]{32}$/i;
+const mediaHeavyRateLimiter = createRateLimiter({
+  windowMs: 10 * 60 * 1000,
+  max: 12,
+  keyFn: (req) => `media-heavy:${req.user?.id || req.ip}`
+});
+const aiRequestRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 30,
+  keyFn: (req) => `admin-ai:${req.user?.id || req.ip}`
+});
 
 const slugify = (value) => {
   if (!value) return '';
@@ -94,6 +105,32 @@ const sanitizeLiveStageSharePayload = (payload = {}) => ({
   activeSlideId: sanitizeText(payload?.activeSlideId || '', 120) || null,
   builderData: sanitizeBuilderData(payload?.builderData)
 });
+
+const professorOwnsLiveStagePayload = async (req, payload) => {
+  if (!isProfessor(req)) return true;
+  if (payload.courseId) {
+    const { rows } = await db.query(
+      'SELECT 1 FROM courses WHERE id = $1 AND owner_user_id = $2',
+      [payload.courseId, req.user.id]
+    );
+    if (!rows.length) return false;
+  }
+  if (payload.moduleId) {
+    const params = [payload.moduleId, req.user.id];
+    let query = `SELECT 1
+                   FROM modules m
+                   JOIN courses c ON c.id = m.course_id
+                  WHERE m.id = $1
+                    AND c.owner_user_id = $2`;
+    if (payload.courseId) {
+      params.push(payload.courseId);
+      query += ' AND m.course_id = $3';
+    }
+    const { rows } = await db.query(query, params);
+    if (!rows.length) return false;
+  }
+  return true;
+};
 
 const buildLiveStageShareResponse = (share) => ({
   shareId: share.shareId,
@@ -163,6 +200,9 @@ const ensureStudentSignupLinksTable = async () => {
 
 router.post('/live-stage-shares', async (req, res) => {
   const payload = sanitizeLiveStageSharePayload(req.body);
+  if (!(await professorOwnsLiveStagePayload(req, payload))) {
+    return res.status(404).json({ message: 'Curso ou modulo da aula ao vivo nao encontrado.' });
+  }
   const share = createShare({
     ownerUserId: req.user.id,
     ownerRole: req.user.role || null,
@@ -177,6 +217,9 @@ router.put('/live-stage-shares/:shareId', async (req, res) => {
     return res.status(400).json({ message: 'Compartilhamento ao vivo inválido.' });
   }
   const payload = sanitizeLiveStageSharePayload(req.body);
+  if (!(await professorOwnsLiveStagePayload(req, payload))) {
+    return res.status(404).json({ message: 'Curso ou modulo da aula ao vivo nao encontrado.' });
+  }
   const share = updateShare(shareId, req.user.id, payload);
   if (!share) {
     return res.status(404).json({ message: 'Compartilhamento ao vivo não encontrado.' });
@@ -202,6 +245,10 @@ router.delete('/live-stage-shares/:shareId/drawing', requireAuth, requireRole(['
     return res.status(400).json({ message: 'ID de compartilhamento inválido.' });
   }
 
+  const share = getShare(shareId);
+  if (!share || share.ownerUserId !== req.user.id) {
+    return res.status(404).json({ message: 'Compartilhamento ao vivo nao encontrado.' });
+  }
   const success = clearDrawingStrokes(shareId);
   res.json({ success });
 });
@@ -216,8 +263,37 @@ router.delete('/live-stage-shares/:shareId/drawing/:strokeId', requireAuth, requ
   if (!strokeId) {
     return res.status(400).json({ message: 'ID do traÃ§o invÃ¡lido.' });
   }
-
+  const share = getShare(shareId);
+  if (!share || share.ownerUserId !== req.user.id) {
+    return res.status(404).json({ message: 'Compartilhamento ao vivo nao encontrado.' });
+  }
   const success = removeDrawingStroke(shareId, strokeId);
+  res.json({ success });
+});
+
+router.post('/live-stage-shares/:shareId/camera-requests/respond', async (req, res) => {
+  const shareId = sanitizeText(req.params?.shareId || '', 64);
+  if (!LIVE_STAGE_SHARE_ID_REGEX.test(shareId)) {
+    return res.status(400).json({ message: 'Compartilhamento ao vivo invalido.' });
+  }
+  const share = getShare(shareId);
+  if (!share || share.ownerUserId !== req.user.id) {
+    return res.status(404).json({ message: 'Compartilhamento ao vivo nao encontrado.' });
+  }
+
+  const userId = sanitizeText(req.body?.userId || '', 80);
+  const peerId = sanitizeText(req.body?.peerId || '', 120);
+  const fullName = sanitizeText(req.body?.fullName || '', 160);
+  const approved = req.body?.approved === true;
+  if (!userId && !peerId) {
+    return res.status(400).json({ message: 'Solicitacao de camera invalida.' });
+  }
+
+  const success = removeCameraRequest(
+    shareId,
+    { userId, peerId, fullName },
+    { markRejected: !approved }
+  );
   res.json({ success });
 });
 
@@ -415,28 +491,37 @@ const getProfessorCreditStatus = async (userId) => {
     : null;
 };
 
-const getAiCreditCostPerCall = async (userId) => {
+const getAiCreditCostPerCall = async (userId, creditType = 'text') => {
   await ensureAdminAiImageColumns();
   const { rows } = await db.query(
-    `SELECT ai_credit_cost_per_call
+    `SELECT ai_credit_cost_per_call, image_ai_credit_cost_per_call
        FROM admin_ai_settings
       WHERE admin_user_id = $1`,
     [userId]
   );
+  if (creditType === 'image') {
+    return parseAiCreditCostInput(rows[0]?.image_ai_credit_cost_per_call) ?? 1.0;
+  }
   return parseAiCreditCostInput(rows[0]?.ai_credit_cost_per_call) ?? 0.5;
 };
 
-const consumeProfessorAiCredit = async (req, featureLabel) => {
+const consumeProfessorAiCredit = async (req, featureLabel, options = {}) => {
   if (!isProfessor(req)) {
     return {
       charged: false,
       remainingCredits: null,
       costPerCall: 0,
+      totalCost: 0,
+      creditType: options.creditType || 'text',
+      units: 0,
       refund: async () => {}
     };
   }
   await ensureProfessorCreditColumns();
-  const costPerCall = await getAiCreditCostPerCall(req.user.id);
+  const creditType = options.creditType === 'image' ? 'image' : 'text';
+  const units = Math.max(1, Math.min(50, Math.trunc(Number(options.units) || 1)));
+  const costPerCall = await getAiCreditCostPerCall(req.user.id, creditType);
+  const totalCost = Number((costPerCall * units).toFixed(2));
   const { rows } = await db.query(
     `UPDATE users
         SET ai_credits = ai_credits - $2,
@@ -446,13 +531,16 @@ const consumeProfessorAiCredit = async (req, featureLabel) => {
         AND is_active = TRUE
         AND ai_credits >= $2
     RETURNING ai_credits, ai_credits_updated_at`,
-    [req.user.id, costPerCall]
+    [req.user.id, totalCost]
   );
   if (!rows.length) {
     const currentStatus = await getProfessorQuotaStatus(req.user.id);
+    const costLabel = units > 1
+      ? `${units} chamada(s) de ${creditType === 'image' ? 'imagem' : 'texto'} (${totalCost} crÃ©ditos)`
+      : `${totalCost} crÃ©dito(s)`;
     const exhaustedMessage = currentStatus?.isActive === false
       ? 'Sua conta de professor est\u00e1 desativada.'
-      : `Seus cr\u00e9ditos de IA acabaram. Pe\u00e7a ao admin para adicionar novos cr\u00e9ditos antes de usar ${featureLabel}.`;
+      : `Seus cr\u00e9ditos de IA acabaram. Pe\u00e7a ao admin para adicionar novos cr\u00e9ditos antes de usar ${featureLabel}. Custo necessÃ¡rio: ${costLabel}.`;
     const error = new Error(exhaustedMessage);
     error.statusCode = 403;
     error.code = 'PROFESSOR_AI_CREDITS_EXHAUSTED';
@@ -464,6 +552,9 @@ const consumeProfessorAiCredit = async (req, featureLabel) => {
     charged: true,
     remainingCredits: getProfessorCreditsValue(rows[0].ai_credits),
     costPerCall,
+    totalCost,
+    creditType,
+    units,
     refund: async () => {
       if (refunded) {
         return;
@@ -475,10 +566,27 @@ const consumeProfessorAiCredit = async (req, featureLabel) => {
                 ai_credits_updated_at = NOW()
           WHERE id = $1
             AND role = 'professor'`,
-        [req.user.id, costPerCall]
+        [req.user.id, totalCost]
       );
     }
   };
+};
+
+const countGeneratedImageCharges = (value) => {
+  const actions = Array.isArray(value?.actions) ? value.actions : Array.isArray(value) ? value : [];
+  let count = 0;
+  actions.forEach((action) => {
+    if (typeof action?.slide?.backgroundImage === 'string' && action.slide.backgroundImage.startsWith('data:image/')) {
+      count += 1;
+    }
+    if (typeof action?.element?.src === 'string' && action.element.src.startsWith('data:image/')) {
+      count += 1;
+    }
+    if (typeof action?.element?.actionConfig?.url === 'string' && action.element.actionConfig.url.startsWith('data:image/')) {
+      count += 1;
+    }
+  });
+  return count;
 };
 
 const assertProfessorStudentLimit = async (req) => {
@@ -615,25 +723,6 @@ const ensureAdminSmtpSettingsTable = async () => {
   adminSmtpSettingsEnsured = true;
 };
 
-const ensureProfessorSmtpSettingsTable = async () => {
-  if (professorSmtpSettingsEnsured) {
-    return;
-  }
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS professor_smtp_settings (
-      professor_user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-      host TEXT,
-      port INT,
-      secure BOOLEAN,
-      user_email TEXT,
-      user_pass TEXT,
-      from_email TEXT,
-      updated_at TIMESTAMPTZ DEFAULT NOW()
-    )
-  `);
-  professorSmtpSettingsEnsured = true;
-};
-
 const isSmtpConfigUsable = (settings) =>
   Boolean(settings?.host && settings?.user_email && settings?.user_pass);
 
@@ -655,15 +744,22 @@ const ensureClassesTable = async () => {
   await db.query(`
     CREATE TABLE IF NOT EXISTS classes (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      name TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      owner_user_id UUID REFERENCES users(id) ON DELETE CASCADE,
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
+  `);
+  await db.query('ALTER TABLE classes ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE CASCADE');
+  await db.query('ALTER TABLE classes DROP CONSTRAINT IF EXISTS classes_name_key');
+  await db.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS classes_owner_name_unique
+    ON classes (COALESCE(owner_user_id, '00000000-0000-0000-0000-000000000000'::uuid), name)
   `);
   await db.query(
     `INSERT INTO classes (id, name)
      VALUES ($1, 'Turma A')
-     ON CONFLICT (name) DO NOTHING`,
-    [uuidv4()]
+     ON CONFLICT DO NOTHING`,
+    [crypto.randomUUID()]
   );
   classesTableEnsured = true;
 };
@@ -678,17 +774,17 @@ const ensureProgressEventsColumn = async () => {
   progressEventsColumnEnsured = true;
 };
 
-const ensureClassExists = async (className) => {
+const ensureClassExists = async (req, className) => {
   const cleanClassName = sanitizeText(className || '', 120);
   if (!cleanClassName) {
     return 'Turma A';
   }
   await ensureClassesTable();
   await db.query(
-    `INSERT INTO classes (id, name)
-     VALUES ($1, $2)
-     ON CONFLICT (name) DO NOTHING`,
-    [uuidv4(), cleanClassName]
+    `INSERT INTO classes (id, name, owner_user_id)
+     VALUES ($1, $2, $3)
+     ON CONFLICT DO NOTHING`,
+    [crypto.randomUUID(), cleanClassName, isProfessor(req) ? req.user.id : null]
   );
   return cleanClassName;
 };
@@ -780,8 +876,9 @@ const readTemplateStoreCatalog = async () => {
 };
 
 let adminAiImageColumnsEnsured = false;
+const DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-pro';
 
-const ADMIN_AI_SETTINGS_SELECT = `SELECT admin_user_id, provider_key, provider_label, base_url, model, encrypted_api_key, ai_credit_cost_per_call,
+const ADMIN_AI_SETTINGS_SELECT = `SELECT admin_user_id, provider_key, provider_label, base_url, model, encrypted_api_key, ai_credit_cost_per_call, image_ai_credit_cost_per_call,
         system_prompt, require_confirmation, is_enabled, updated_at,
         image_provider_key, image_provider_label, image_base_url, image_model, image_encrypted_api_key, image_is_enabled
    FROM admin_ai_settings`;
@@ -818,6 +915,18 @@ const ensureAdminAiImageColumns = async () => {
     `ALTER TABLE admin_ai_settings
        ADD COLUMN IF NOT EXISTS ai_credit_cost_per_call NUMERIC(12,2) NOT NULL DEFAULT 0.5`
   );
+  await db.query(
+    `ALTER TABLE admin_ai_settings
+       ADD COLUMN IF NOT EXISTS image_ai_credit_cost_per_call NUMERIC(12,2) NOT NULL DEFAULT 1.0`
+  );
+  await db.query(
+    `UPDATE admin_ai_settings
+        SET model = $1,
+            updated_at = NOW()
+      WHERE LOWER(provider_key) = 'deepseek'
+        AND model = 'deepseek-chat'`,
+    [DEFAULT_DEEPSEEK_MODEL]
+  );
   adminAiImageColumnsEnsured = true;
 };
 
@@ -853,10 +962,15 @@ router.get('/students', async (req, res) => {
 
 router.get('/classes', async (req, res) => {
   await ensureClassesTable();
+  if (isProfessor(req)) {
+    await ensureClassExists(req, 'Turma A');
+  }
   const { rows } = await db.query(
     `SELECT id, name, created_at
      FROM classes
+     ${isProfessor(req) ? 'WHERE owner_user_id = $1' : ''}
      ORDER BY name`
+    , isProfessor(req) ? [req.user.id] : []
   );
   res.json(rows);
 });
@@ -867,13 +981,14 @@ router.post('/classes', async (req, res) => {
   if (!name) {
     return res.status(400).json({ message: 'Informe o nome da turma.' });
   }
-  const id = uuidv4();
+  const id = crypto.randomUUID();
+  const ownerUserId = isProfessor(req) ? req.user.id : null;
   const { rows } = await db.query(
-    `INSERT INTO classes (id, name)
-     VALUES ($1, $2)
-     ON CONFLICT (name) DO NOTHING
+    `INSERT INTO classes (id, name, owner_user_id)
+     VALUES ($1, $2, $3)
+     ON CONFLICT DO NOTHING
      RETURNING id, name, created_at`,
-    [id, name]
+    [id, name, ownerUserId]
   );
   if (!rows.length) {
     return res.status(409).json({ message: 'Esta turma jÃ¡ existe.' });
@@ -887,7 +1002,10 @@ router.delete('/classes/:classId', async (req, res) => {
   if (!isUuid(classId)) {
     return res.status(400).json({ message: 'Turma invÃ¡lida.' });
   }
-  const { rows } = await db.query('SELECT id, name FROM classes WHERE id = $1', [classId]);
+  const { rows } = await db.query(
+    `SELECT id, name, owner_user_id FROM classes WHERE id = $1${isProfessor(req) ? ' AND owner_user_id = $2' : ''}`,
+    isProfessor(req) ? [classId, req.user.id] : [classId]
+  );
   const classRow = rows[0];
   if (!classRow) {
     return res.status(404).json({ message: 'Turma nÃ£o encontrada.' });
@@ -895,8 +1013,8 @@ router.delete('/classes/:classId', async (req, res) => {
   const usage = await db.query(
     `SELECT COUNT(*)::int AS total
      FROM users
-     WHERE role = 'student' AND class_name = $1`,
-    [classRow.name]
+     WHERE role = 'student' AND class_name = $1${isProfessor(req) ? ' AND owner_user_id = $2' : ''}`,
+    isProfessor(req) ? [classRow.name, req.user.id] : [classRow.name]
   );
   if (Number(usage.rows[0]?.total || 0) > 0) {
     return res.status(409).json({ message: 'Esta turma possui alunos vinculados.' });
@@ -952,8 +1070,10 @@ router.post('/professors', async (req, res) => {
   if (!fullName || !email || !password) {
     return res.status(400).json({ message: 'Nome, email e senha s\u00e3o obrigat\u00f3rios.' });
   }
+  const passwordError = getPasswordValidationError(password);
+  if (passwordError) return res.status(400).json({ message: passwordError });
   const hashedPassword = await bcrypt.hash(password, 10);
-  const id = uuidv4();
+  const id = crypto.randomUUID();
   try {
     await db.query(
       `INSERT INTO users (
@@ -996,6 +1116,47 @@ router.put('/professors/:id/status', async (req, res) => {
     return res.status(404).json({ message: 'Professor n\u00e3o encontrado.' });
   }
   res.status(204).send();
+});
+
+router.delete('/professors/:id', async (req, res) => {
+  if (!ensureGlobalAdmin(req, res)) {
+    return;
+  }
+  const { id } = req.params;
+  if (!isUuid(id)) {
+    return res.status(400).json({ message: 'Professor invalido.' });
+  }
+
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: professorRows } = await client.query(
+      `SELECT id
+         FROM users
+        WHERE id = $1
+          AND role = 'professor'`,
+      [id]
+    );
+    if (!professorRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Professor nao encontrado.' });
+    }
+
+    await client.query('DELETE FROM notifications WHERE created_by = $1 OR owner_user_id = $1', [id]);
+    await client.query('DELETE FROM users WHERE owner_user_id = $1 AND role = \'student\'', [id]);
+    await client.query('DELETE FROM courses WHERE owner_user_id = $1', [id]);
+    await client.query('UPDATE modules SET created_by = NULL WHERE created_by = $1', [id]);
+    await client.query('DELETE FROM users WHERE id = $1 AND role = \'professor\'', [id]);
+
+    await client.query('COMMIT');
+    res.status(204).send();
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 });
 
 router.post('/professors/:id/credits', async (req, res) => {
@@ -1101,7 +1262,9 @@ router.get('/me/professor-credits', async (req, res) => {
     })
   };
   if (isGlobalAdmin(req)) {
-    payload.aiCreditCostPerCall = await getAiCreditCostPerCall(req.user.id);
+    payload.aiCreditCostPerCall = await getAiCreditCostPerCall(req.user.id, 'text');
+    payload.aiTextCreditCostPerCall = payload.aiCreditCostPerCall;
+    payload.aiImageCreditCostPerCall = await getAiCreditCostPerCall(req.user.id, 'image');
   }
   res.json(payload);
 });
@@ -1144,11 +1307,13 @@ router.post('/students', async (req, res) => {
   const email = sanitizeEmail(req.body?.email || '');
   const phone = sanitizePhone(req.body?.phone || '');
   const password = sanitizeText(req.body?.password || '', 256, { trim: false });
-  const className = await ensureClassExists(req.body?.className || 'Turma A');
+  const className = await ensureClassExists(req, req.body?.className || 'Turma A');
   const isActive = req.body?.isActive;
   if (!fullName || !email || !password) {
     return res.status(400).json({ message: 'Nome, email e senha sÃ£o obrigatÃ³rios' });
   }
+  const passwordError = getPasswordValidationError(password);
+  if (passwordError) return res.status(400).json({ message: passwordError });
   try {
     await assertProfessorStudentLimit(req);
   } catch (error) {
@@ -1160,7 +1325,7 @@ router.post('/students', async (req, res) => {
   }
 
   const hashedPassword = await bcrypt.hash(password, 10);
-  const id = uuidv4();
+  const id = crypto.randomUUID();
   await db.query(
     `INSERT INTO users (id, full_name, email, phone, password_hash, role, class_name, is_active, owner_user_id)
      VALUES ($1, $2, $3, $4, $5, 'student', $6, $7, $8)`,
@@ -1215,7 +1380,7 @@ router.put('/students/:id', async (req, res) => {
   }
   const fullName = sanitizeText(req.body?.fullName || '', 160);
   const hasClassName = Object.prototype.hasOwnProperty.call(req.body || {}, 'className');
-  const className = hasClassName ? await ensureClassExists(req.body?.className || 'Turma A') : '';
+  const className = hasClassName ? await ensureClassExists(req, req.body?.className || 'Turma A') : '';
   const isActive = req.body?.isActive;
   const phone = sanitizePhone(req.body?.phone || '');
   const updates = [];
@@ -1619,7 +1784,7 @@ router.post('/courses', async (req, res) => {
       quotaStatus: error.quotaStatus || null
     });
   }
-  const id = uuidv4();
+  const id = crypto.randomUUID();
   await db.query(
     'INSERT INTO courses (id, title, description, slug, cover_image, show_in_store, owner_user_id) VALUES ($1, $2, $3, $4, $5, $6, $7)',
     [id, title, description || '', slug, coverImage, showInStore, isProfessor(req) ? req.user.id : null]
@@ -1773,7 +1938,7 @@ router.get('/template-store/:templateKey', async (req, res) => {
   }
 });
 
-router.post('/images/remove-background', async (req, res) => {
+router.post('/images/remove-background', mediaHeavyRateLimiter, async (req, res) => {
   await ensureAdminAiImageColumns();
   const src = sanitizeMediaUrl(req.body?.src || '');
   if (!src) {
@@ -1781,7 +1946,7 @@ router.post('/images/remove-background', async (req, res) => {
   }
   let creditCharge = null;
   try {
-    creditCharge = await consumeProfessorAiCredit(req, 'a remoção de fundo com IA');
+    creditCharge = await consumeProfessorAiCredit(req, 'a remocao de fundo com IA', { creditType: 'image' });
     const { rows } = await db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
     const settingsRow = rows[0];
     if (!settingsRow?.image_encrypted_api_key || settingsRow.image_is_enabled === false) {
@@ -1819,13 +1984,13 @@ router.post('/images/remove-background', async (req, res) => {
   }
 });
 
-router.post('/input/compare-image', async (req, res) => {
+router.post('/input/compare-image', mediaHeavyRateLimiter, async (req, res) => {
   await ensureAdminAiImageColumns();
   const referenceImage = sanitizeMediaUrl(req.body?.referenceImage || '');
   const submittedImage = sanitizeMediaUrl(req.body?.submittedImage || '');
   let creditCharge = null;
   try {
-    creditCharge = await consumeProfessorAiCredit(req, 'a comparação de imagens com IA');
+    creditCharge = await consumeProfessorAiCredit(req, 'a comparacao de imagens com IA', { creditType: 'image' });
     const referenceAttachment = await mediaUrlToImageAttachment(referenceImage, 'referencia');
     const submittedAttachment = await mediaUrlToImageAttachment(submittedImage, 'resposta');
     if (!referenceAttachment || !submittedAttachment) {
@@ -1860,7 +2025,7 @@ router.post('/input/compare-image', async (req, res) => {
   }
 });
 
-router.post('/media/extract-audio', async (req, res) => {
+router.post('/media/extract-audio', mediaHeavyRateLimiter, async (req, res) => {
   const src = sanitizeMediaUrl(req.body?.src || '');
   if (!src) {
     return res.status(400).json({ message: 'Informe o video para extrair o audio.' });
@@ -1879,7 +2044,7 @@ router.post('/media/extract-audio', async (req, res) => {
   }
 });
 
-router.post('/media/transcribe', async (req, res) => {
+router.post('/media/transcribe', mediaHeavyRateLimiter, async (req, res) => {
   const sourceType = String(req.body?.sourceType || 'audio').trim().toLowerCase() === 'video' ? 'video' : 'audio';
   const src = sanitizeMediaUrl(req.body?.src || '');
   if (!src) {
@@ -1941,7 +2106,7 @@ router.post('/courses/:courseId/modules', async (req, res) => {
     });
   }
   const moduleSlugCandidate = cleanSlug || slugify(cleanTitle);
-  const id = uuidv4();
+  const id = crypto.randomUUID();
   const moduleSlug = moduleSlugCandidate || id;
   await db.query(
     `INSERT INTO modules (id, course_id, title, slug, description, builder_data, created_by)
@@ -2053,7 +2218,7 @@ router.post('/notifications', async (req, res) => {
   if (!['student', 'class', 'all'].includes(targetType)) {
     return res.status(400).json({ message: 'targetType deve ser student, class ou all' });
   }
-  const id = uuidv4();
+  const id = crypto.randomUUID();
   await db.query(
     `INSERT INTO notifications (id, message, target_type, target_value, created_by, owner_user_id)
      VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -2067,7 +2232,11 @@ router.delete('/notifications/:notificationId', async (req, res) => {
   if (!isUuid(notificationId)) {
     return res.status(400).json({ message: 'NotificaÃ§Ã£o invÃ¡lida' });
   }
-  const { rowCount } = await db.query('DELETE FROM notifications WHERE id = $1', [notificationId]);
+  const { rowCount } = await db.query(
+    `DELETE FROM notifications
+      WHERE id = $1${isProfessor(req) ? ' AND owner_user_id = $2' : ''}`,
+    isProfessor(req) ? [notificationId, req.user.id] : [notificationId]
+  );
   if (!rowCount) {
     return res.status(404).json({ message: 'NotificaÃ§Ã£o nÃ£o encontrada' });
   }
@@ -2097,7 +2266,9 @@ router.put('/ai-settings', async (req, res) => {
     imageModel,
     imageApiKey,
     imageEnabled,
-    aiCreditCostPerCall
+    aiCreditCostPerCall,
+    aiTextCreditCostPerCall,
+    aiImageCreditCostPerCall
   } = req.body || {};
   if (!baseUrl || !model) {
     return res.status(400).json({ message: 'baseUrl e model sÃ£o obrigatÃ³rios.' });
@@ -2107,14 +2278,18 @@ router.put('/ai-settings', async (req, res) => {
   }
 
   const cleanBaseUrl = sanitizeMediaUrl(baseUrl, { allowData: false }).replace(/\/+$/, '');
-  const cleanModel = String(model).trim();
+  const cleanModel =
+    String(providerKey || '').trim().toLowerCase() === 'deepseek' && String(model || '').trim() === 'deepseek-chat'
+      ? DEFAULT_DEEPSEEK_MODEL
+      : String(model).trim();
   const cleanProviderKey = String(providerKey || 'custom-compatible').trim() || 'custom-compatible';
   const cleanProviderLabel = String(providerLabel || 'Provedor compatÃ­vel').trim() || 'Provedor compatÃ­vel';
   const cleanImageBaseUrl = sanitizeMediaUrl(imageBaseUrl, { allowData: false }).replace(/\/+$/, '');
   const cleanImageModel = String(imageModel || 'gemini-2.5-flash-image').trim() || 'gemini-2.5-flash-image';
   const cleanImageProviderKey = String(imageProviderKey || 'google-gemini-image').trim() || 'google-gemini-image';
   const cleanImageProviderLabel = String(imageProviderLabel || 'Nano Banana').trim() || 'Nano Banana';
-  const cleanAiCreditCostPerCall = parseAiCreditCostInput(aiCreditCostPerCall) ?? 0.5;
+  const cleanAiCreditCostPerCall = parseAiCreditCostInput(aiTextCreditCostPerCall ?? aiCreditCostPerCall) ?? 0.5;
+  const cleanImageAiCreditCostPerCall = parseAiCreditCostInput(aiImageCreditCostPerCall) ?? 1.0;
 
   const { rows: existingRows } = await db.query(
     'SELECT encrypted_api_key, image_encrypted_api_key FROM admin_ai_settings WHERE admin_user_id = $1',
@@ -2137,18 +2312,19 @@ router.put('/ai-settings', async (req, res) => {
   await db.query(
     `INSERT INTO admin_ai_settings (
        admin_user_id, provider_key, provider_label, base_url, model, encrypted_api_key,
-       ai_credit_cost_per_call, system_prompt, require_confirmation, is_enabled, updated_at,
+       ai_credit_cost_per_call, image_ai_credit_cost_per_call, system_prompt, require_confirmation, is_enabled, updated_at,
        image_provider_key, image_provider_label, image_base_url, image_model, image_encrypted_api_key, image_is_enabled
-     )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), $11, $12, $13, $14, $15, $16)
-     ON CONFLICT (admin_user_id)
-     DO UPDATE SET
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), $12, $13, $14, $15, $16, $17)
+      ON CONFLICT (admin_user_id)
+      DO UPDATE SET
        provider_key = EXCLUDED.provider_key,
        provider_label = EXCLUDED.provider_label,
        base_url = EXCLUDED.base_url,
        model = EXCLUDED.model,
        encrypted_api_key = EXCLUDED.encrypted_api_key,
        ai_credit_cost_per_call = EXCLUDED.ai_credit_cost_per_call,
+       image_ai_credit_cost_per_call = EXCLUDED.image_ai_credit_cost_per_call,
        system_prompt = EXCLUDED.system_prompt,
        require_confirmation = EXCLUDED.require_confirmation,
        is_enabled = EXCLUDED.is_enabled,
@@ -2167,6 +2343,7 @@ router.put('/ai-settings', async (req, res) => {
       cleanModel,
       encryptedApiKey,
       cleanAiCreditCostPerCall,
+      cleanImageAiCreditCostPerCall,
       systemPrompt ? sanitizeText(systemPrompt, 8000, { trim: false }) : null,
       requireConfirmation !== false,
       isEnabled !== false,
@@ -2183,7 +2360,7 @@ router.put('/ai-settings', async (req, res) => {
   res.json(buildPublicAiSettings(rows[0], { includeCreditCost: isGlobalAdmin(req) }));
 });
 
-router.post('/ai-settings/test', async (req, res) => {
+router.post('/ai-settings/test', aiRequestRateLimiter, async (req, res) => {
   await ensureAdminAiImageColumns();
   const { rows } = await db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
   const settingsRow = rows[0];
@@ -2191,14 +2368,18 @@ router.post('/ai-settings/test', async (req, res) => {
     return res.status(400).json({ message: 'Configure e ative a integraÃ§Ã£o antes de testar.' });
   }
   try {
+    creditCharge = await consumeProfessorAiCredit(req, 'o teste da integracao de IA');
     const reply = await testAiConnection(settingsRow);
-    res.json({ ok: true, reply });
+    res.json({ ok: true, reply, professorCreditsRemaining: creditCharge?.remainingCredits ?? null });
   } catch (error) {
-    res.status(400).json({ message: error.message || 'NÃ£o foi possÃ­vel validar a integraÃ§Ã£o.' });
+    if (creditCharge?.charged) {
+      await creditCharge.refund();
+    }
+    res.status(error?.statusCode || 400).json({ message: error.message || 'Nao foi possivel validar a integracao.', code: error?.code || null, professorCreditsRemaining: error?.creditStatus?.aiCredits ?? null });
   }
 });
 
-router.post('/ai/slide-actions', async (req, res) => {
+router.post('/ai/slide-actions', aiRequestRateLimiter, async (req, res) => {
   await ensureAdminAiImageColumns();
   const request = sanitizeText(req.body?.request || '', 1800, { trim: true });
   const slides = sanitizeBuilderData({ slides: Array.isArray(req.body?.slides) ? req.body.slides : [] }).slides || [];
@@ -2211,6 +2392,7 @@ router.post('/ai/slide-actions', async (req, res) => {
     return res.status(400).json({ message: 'Descreva o que a IA deve fazer.' });
   }
   let creditCharge = null;
+  let imageCreditCharge = null;
   const { rows } = await db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
   const settingsRow = rows[0];
   if (!settingsRow?.is_enabled) {
@@ -2229,13 +2411,23 @@ router.post('/ai/slide-actions', async (req, res) => {
       executionPlan,
       currentPlanItem
     });
+    const generatedImageCount = countGeneratedImageCharges(actions);
+    if (generatedImageCount > 0) {
+      imageCreditCharge = await consumeProfessorAiCredit(req, 'a geracao de imagem com IA', {
+        creditType: 'image',
+        units: generatedImageCount
+      });
+    }
     res.json({
       actions,
       requireConfirmation: settingsRow.require_confirmation !== false,
       providerLabel: settingsRow.provider_label,
-      professorCreditsRemaining: creditCharge?.remainingCredits ?? null
+      professorCreditsRemaining: imageCreditCharge?.remainingCredits ?? creditCharge?.remainingCredits ?? null
     });
   } catch (error) {
+    if (imageCreditCharge?.charged) {
+      await imageCreditCharge.refund();
+    }
     if (creditCharge?.charged) {
       await creditCharge.refund();
     }
@@ -2247,7 +2439,7 @@ router.post('/ai/slide-actions', async (req, res) => {
   }
 });
 
-router.post('/ai/slide-actions/plan', async (req, res) => {
+router.post('/ai/slide-actions/plan', aiRequestRateLimiter, async (req, res) => {
   await ensureAdminAiImageColumns();
   const request = sanitizeText(req.body?.request || '', 1800, { trim: true });
   const slides = sanitizeBuilderData({ slides: Array.isArray(req.body?.slides) ? req.body.slides : [] }).slides || [];
@@ -2292,7 +2484,7 @@ router.post('/ai/slide-actions/plan', async (req, res) => {
   }
 });
 
-router.post('/ai/slide-actions/step', async (req, res) => {
+router.post('/ai/slide-actions/step', aiRequestRateLimiter, async (req, res) => {
   await ensureAdminAiImageColumns();
   const request = sanitizeText(req.body?.request || '', 1800, { trim: true });
   const slides = sanitizeBuilderData({ slides: Array.isArray(req.body?.slides) ? req.body.slides : [] }).slides || [];
@@ -2308,6 +2500,7 @@ router.post('/ai/slide-actions/step', async (req, res) => {
     return res.status(400).json({ message: 'Descreva o que a IA deve fazer.' });
   }
   let creditCharge = null;
+  let imageCreditCharge = null;
   const { rows } = await db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
   const settingsRow = rows[0];
   if (!settingsRow?.is_enabled) {
@@ -2329,13 +2522,23 @@ router.post('/ai/slide-actions/step', async (req, res) => {
       executionPlan,
       currentPlanItem
     });
+    const generatedImageCount = countGeneratedImageCharges(result?.action ? [result.action] : []);
+    if (generatedImageCount > 0) {
+      imageCreditCharge = await consumeProfessorAiCredit(req, 'a geracao de imagem com IA', {
+        creditType: 'image',
+        units: generatedImageCount
+      });
+    }
     res.json({
       ...result,
       requireConfirmation: settingsRow.require_confirmation !== false,
       providerLabel: settingsRow.provider_label,
-      professorCreditsRemaining: creditCharge?.remainingCredits ?? null
+      professorCreditsRemaining: imageCreditCharge?.remainingCredits ?? creditCharge?.remainingCredits ?? null
     });
   } catch (error) {
+    if (imageCreditCharge?.charged) {
+      await imageCreditCharge.refund();
+    }
     if (creditCharge?.charged) {
       await creditCharge.refund();
     }
@@ -2347,7 +2550,7 @@ router.post('/ai/slide-actions/step', async (req, res) => {
   }
 });
 
-router.post('/ai/magic-pen', async (req, res) => {
+router.post('/ai/magic-pen', aiRequestRateLimiter, async (req, res) => {
   await ensureAdminAiImageColumns();
   const request = sanitizeText(req.body?.request || '', 1800, { trim: true });
   const slides = sanitizeBuilderData({ slides: Array.isArray(req.body?.slides) ? req.body.slides : [] }).slides || [];
@@ -2359,6 +2562,7 @@ router.post('/ai/magic-pen', async (req, res) => {
     return res.status(400).json({ message: 'Descreva o que o pincel magico deve criar.' });
   }
   let creditCharge = null;
+  let imageCreditCharge = null;
   const { rows } = await db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
   const settingsRow = rows[0];
   if (!settingsRow?.is_enabled) {
@@ -2376,13 +2580,23 @@ router.post('/ai/magic-pen', async (req, res) => {
       attachments,
       sourceBounds
     });
+    const generatedImageCount = countGeneratedImageCharges(result);
+    if (generatedImageCount > 0) {
+      imageCreditCharge = await consumeProfessorAiCredit(req, 'a geracao de imagem com IA no pincel magico', {
+        creditType: 'image',
+        units: generatedImageCount
+      });
+    }
     res.json({
       ...result,
       requireConfirmation: settingsRow.require_confirmation !== false,
       providerLabel: settingsRow.provider_label,
-      professorCreditsRemaining: creditCharge?.remainingCredits ?? null
+      professorCreditsRemaining: imageCreditCharge?.remainingCredits ?? creditCharge?.remainingCredits ?? null
     });
   } catch (error) {
+    if (imageCreditCharge?.charged) {
+      await imageCreditCharge.refund();
+    }
     if (creditCharge?.charged) {
       await creditCharge.refund();
     }
@@ -2396,18 +2610,8 @@ router.post('/ai/magic-pen', async (req, res) => {
 
 router.get('/smtp-settings', async (req, res) => {
   await ensureAdminSmtpSettingsTable();
-  await ensureProfessorSmtpSettingsTable();
-  if (isProfessor(req)) {
-    const { rows } = await db.query(
-      'SELECT host, port, secure, user_email, user_pass, from_email FROM professor_smtp_settings WHERE professor_user_id = $1',
-      [req.user.id]
-    );
-    return res.json(
-      sanitizeSmtpSettingsResponse(rows[0] || null, {
-        usingFallback: !isSmtpConfigUsable(rows[0]),
-        scope: 'professor'
-      })
-    );
+  if (!isGlobalAdmin(req)) {
+    return res.status(403).json({ message: 'Somente o admin principal pode visualizar o SMTP.' });
   }
   const { rows } = await db.query('SELECT host, port, secure, user_email, user_pass, from_email FROM admin_smtp_settings WHERE id = 1');
   res.json(sanitizeSmtpSettingsResponse(rows[0] || null, { usingFallback: false, scope: 'admin' }));
@@ -2415,53 +2619,37 @@ router.get('/smtp-settings', async (req, res) => {
 
 router.put('/smtp-settings', async (req, res) => {
   await ensureAdminSmtpSettingsTable();
-  await ensureProfessorSmtpSettingsTable();
+  if (!isGlobalAdmin(req)) {
+    return res.status(403).json({ message: 'Somente o admin principal pode configurar o SMTP.' });
+  }
   const { host, port, secure, user_email, user_pass, from_email } = req.body || {};
   const cleanHost = sanitizeText(host || '', 255);
   const cleanUserEmail = sanitizeEmail(user_email || '');
   const cleanFromEmail = sanitizeEmail(from_email || '');
   const cleanPassword = sanitizeText(user_pass || '', 512, { trim: false });
+  const encryptedPassword = cleanPassword ? encryptSecret(cleanPassword) : '';
   const cleanPort = Number.isFinite(Number(port)) ? Number(port) : null;
   const cleanSecure = secure !== false;
 
-  if (isProfessor(req)) {
-    const { rows } = await db.query(
-      'SELECT user_pass FROM professor_smtp_settings WHERE professor_user_id = $1',
-      [req.user.id]
-    );
-    const nextPassword = cleanPassword || rows[0]?.user_pass || '';
-    const shouldFallback = !cleanHost && !cleanUserEmail && !cleanFromEmail && !nextPassword;
-    if (shouldFallback) {
-      await db.query('DELETE FROM professor_smtp_settings WHERE professor_user_id = $1', [req.user.id]);
-      return res.status(204).send();
+  if (cleanPort !== null && (!Number.isInteger(cleanPort) || cleanPort < 1 || cleanPort > 65535)) {
+    return res.status(400).json({ message: 'Porta SMTP invalida.' });
+  }
+  if (cleanHost) {
+    try {
+      await assertSafeRemoteUrl(`https://${cleanHost}`);
+    } catch (error) {
+      return res.status(400).json({ message: 'O servidor SMTP informado nao e permitido.' });
     }
-    await db.query(
-      `INSERT INTO professor_smtp_settings (
-         professor_user_id, host, port, secure, user_email, user_pass, from_email, updated_at
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-       ON CONFLICT (professor_user_id)
-       DO UPDATE SET
-         host = EXCLUDED.host,
-         port = EXCLUDED.port,
-         secure = EXCLUDED.secure,
-         user_email = EXCLUDED.user_email,
-         user_pass = EXCLUDED.user_pass,
-         from_email = EXCLUDED.from_email,
-         updated_at = NOW()`,
-      [req.user.id, cleanHost, cleanPort, cleanSecure, cleanUserEmail, nextPassword, cleanFromEmail]
-    );
-    return res.status(204).send();
   }
 
   const { rows } = await db.query('SELECT user_pass FROM admin_smtp_settings WHERE id = 1');
   if (rows.length === 0) {
     await db.query(
       'INSERT INTO admin_smtp_settings (id, host, port, secure, user_email, user_pass, from_email) VALUES (1, $1, $2, $3, $4, $5, $6)',
-      [cleanHost, cleanPort, cleanSecure, cleanUserEmail, cleanPassword, cleanFromEmail]
+      [cleanHost, cleanPort, cleanSecure, cleanUserEmail, encryptedPassword, cleanFromEmail]
     );
   } else {
-    const nextPassword = cleanPassword || rows[0]?.user_pass || '';
+    const nextPassword = encryptedPassword || rows[0]?.user_pass || '';
     await db.query(
       'UPDATE admin_smtp_settings SET host = $1, port = $2, secure = $3, user_email = $4, user_pass = $5, from_email = $6, updated_at = NOW() WHERE id = 1',
       [cleanHost, cleanPort, cleanSecure, cleanUserEmail, nextPassword, cleanFromEmail]

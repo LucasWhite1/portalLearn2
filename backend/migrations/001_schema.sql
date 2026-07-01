@@ -51,14 +51,14 @@ CREATE TABLE IF NOT EXISTS modules (
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE (course_id, slug)
- );
+);
 
 CREATE TABLE IF NOT EXISTS enrollments (
   user_id UUID REFERENCES users(id) ON DELETE CASCADE,
   course_id UUID REFERENCES courses(id) ON DELETE CASCADE,
   video_position NUMERIC DEFAULT 0,
   interactive_step TEXT DEFAULT '0',
-  current_module TEXT DEFAULT 'Módulo 1',
+  current_module TEXT DEFAULT 'Modulo 1',
   grade NUMERIC DEFAULT 0,
   updated_at TIMESTAMPTZ DEFAULT NOW(),
   PRIMARY KEY (user_id, course_id)
@@ -73,6 +73,16 @@ CREATE TABLE IF NOT EXISTS notifications (
   owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS classes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  owner_user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS classes_owner_name_unique
+ON classes (COALESCE(owner_user_id, '00000000-0000-0000-0000-000000000000'::uuid), name);
 
 CREATE TABLE IF NOT EXISTS admin_ai_settings (
   admin_user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -95,66 +105,5 @@ CREATE TABLE IF NOT EXISTS admin_ai_settings (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-WITH admin AS (
-  INSERT INTO users (full_name, email, phone, password_hash, role, class_name)
-  VALUES (
-    'Admin do Curso',
-    'admin@curso.com',
-    '+55 11 0000-0000',
-    crypt('AdminPass2026!', gen_salt('bf')),
-    'admin',
-    'Administração'
-  )
-  RETURNING id
-)
-INSERT INTO notifications (message, target_type, target_value, created_by)
-VALUES ('Bem-vindo ao portal do curso. Confira todas as aulas disponíveis na aba Conteúdos.', 'all', NULL, (SELECT id FROM admin));
-
-INSERT INTO courses (title, description, slug)
-VALUES
-  ('Fundamentos da Experiência', 'Uma trilha guiada com vídeos e quizzes interativos para dominar as práticas essenciais.', 'fundamentos-da-experiencia'),
-  ('Laboratório de Projetos', 'Simule situações reais com atividades interativas e protótipos.', 'laboratorio-de-projetos');
-
-INSERT INTO users (full_name, email, phone, password_hash, role, class_name)
-VALUES (
-  'Aluno Exemplo',
-  'aluno@curso.com',
-  '+55 11 99999-0000',
-  crypt('AlunoLeva10!', gen_salt('bf')),
-  'student',
-  'Turma Master'
-);
-
-INSERT INTO users (full_name, email, phone, password_hash, role, class_name)
-VALUES (
-  'Professor Exemplo',
-  'professor@curso.com',
-  '+55 11 11111-1111',
-  crypt('ProfessorPass2026!', gen_salt('bf')),
-  'professor',
-  'Professor'
-)
-ON CONFLICT (email) DO NOTHING;
-
-WITH student AS (
-  SELECT id FROM users WHERE email = 'aluno@curso.com'
-),
-course_ids AS (
-  SELECT id FROM courses ORDER BY title
-)
-INSERT INTO enrollments (user_id, course_id, video_position, interactive_step, current_module, grade)
-SELECT (SELECT id FROM student), id, 120, '3.2', 'Módulo 02 · Laboratório', 88
-FROM course_ids
-LIMIT 1;
-
-WITH admin_id AS (
-  SELECT id FROM users WHERE email = 'admin@curso.com'
-)
-INSERT INTO notifications (message, target_type, target_value, created_by)
-SELECT message, target_type, target_value, admin_id.id
-FROM admin_id,
-LATERAL (
-  VALUES
-    ('Não esqueça de atualizar sua planilha de atividades até sexta.', 'class', 'Turma Master'),
-    ('Turma Master: nova aula prática liberada no laboratório de projetos.', 'class', 'Turma Master')
-) AS msgs(message, target_type, target_value);
+-- Create the first administrator through a one-time deployment procedure.
+-- Production credentials must never be embedded in a migration.

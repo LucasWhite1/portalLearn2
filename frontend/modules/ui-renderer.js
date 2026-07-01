@@ -296,6 +296,7 @@ export const renderStageBackgroundMedia = (stageNode, slide, options = {}) => {
       muted: false
     });
     mediaNode.title = 'Vídeo de fundo';
+    mediaNode.sandbox = 'allow-scripts allow-same-origin allow-presentation';
     mediaNode.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
     mediaNode.referrerPolicy = 'strict-origin-when-cross-origin';
   } else {

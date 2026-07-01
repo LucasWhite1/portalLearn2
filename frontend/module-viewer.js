@@ -5,7 +5,7 @@ const resolveApiBase = () => {
   if (window.location.protocol === 'file:') {
     return 'http://localhost:4000';
   }
-  if (['localhost', '127.0.0.1'].includes(window.location.hostname) && window.location.port !== '4000') {
+  if (['localhost', '127.0.0.1'].includes(window.location.hostname) && /^55\d{2}$/.test(window.location.port)) {
     return `${window.location.protocol}//${window.location.hostname}:4000`;
   }
   return window.location.origin;
@@ -51,10 +51,10 @@ const authorizedFetch = async (path, options = {}) => {
   }
   const headers = {
     'Content-Type': 'application/json',
-    Authorization: `Bearer ${token}`,
     ...(options.headers || {})
   };
-  const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  if (/^[0-9a-f]{48}$/i.test(token)) headers.Authorization = `Bearer ${token}`;
+  const response = await fetch(`${API_BASE}${path}`, { ...options, headers, credentials: 'include' });
   if (response.status === 401) {
     localStorage.removeItem(STORAGE_KEY);
     localStorage.removeItem(USER_ROLE_KEY);
@@ -2353,6 +2353,7 @@ const renderViewerBackgroundMedia = (stageNode, slide) => {
     mediaNode = document.createElement('iframe');
     mediaNode.src = buildAutoplayBackgroundEmbedUrl(slide.backgroundVideoEmbedSrc);
     mediaNode.title = 'Vídeo de fundo';
+    mediaNode.sandbox = 'allow-scripts allow-same-origin allow-presentation';
     mediaNode.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
     mediaNode.referrerPolicy = 'strict-origin-when-cross-origin';
   } else {
@@ -5565,6 +5566,9 @@ let studentCameraPeerId = null;
 let studentCameraLocalStream = null;
 let studentCameraAudioMuted = false;
 let studentCameraVideoMuted = false;
+let studentCameraRequestUiState = 'idle';
+let studentCameraApprovalRetryKey = '';
+let studentCameraApprovalRetryTimer = null;
 const STUDENT_CAMERA_REQUEST_PREFIX = 'liveStudentCameraRequested:';
 const viewerStudentStreams = new Map();
 const studentPeerRefs = new Map();
@@ -5690,8 +5694,35 @@ const applyLiveStageModule = (module) => {
   const wasDisconnectedByTeacher =
     (currentUserId && disconnectedStudentIds.includes(currentUserId)) ||
     (currentUserName && disconnectedStudentNames.includes(currentUserName));
-  if (wasDisconnectedByTeacher && studentCameraLocalStream) {
+  if (
+    wasDisconnectedByTeacher &&
+    studentCameraLocalStream &&
+    module?.liveShare?.cameraRequestState !== 'pending'
+  ) {
     stopStudentCameraCall({ statusMessage: 'O professor encerrou sua chamada.' });
+  }
+  if (module?.liveShare?.cameraRequestState === 'rejected' && shouldRestoreStudentCameraRequest()) {
+    stopStudentCameraCall({ statusMessage: 'O professor recusou sua solicitacao de camera.' });
+    syncStudentCameraRequestUi({ state: 'rejected', message: 'O professor recusou sua solicitação. Você pode tentar novamente.' });
+  } else if (module?.liveShare?.cameraRequestState === 'pending' && shouldRestoreStudentCameraRequest()) {
+    clearStudentCameraApprovalRetry();
+    syncStudentCameraRequestUi({ state: 'pending' });
+  } else if (
+    module?.liveShare?.cameraRequestState === 'none' &&
+    shouldRestoreStudentCameraRequest() &&
+    studentCameraLocalStream &&
+    studentCameraRequestUiState !== 'connected'
+  ) {
+    syncStudentCameraRequestUi({ state: 'approved' });
+    const retryKey = `${viewerState.liveShareId || ''}:${studentCameraPeerId || ''}`;
+    if (retryKey && studentCameraApprovalRetryKey !== retryKey) {
+      clearStudentCameraApprovalRetry();
+      studentCameraApprovalRetryKey = retryKey;
+      studentCameraApprovalRetryTimer = setTimeout(() => {
+        studentCameraApprovalRetryTimer = null;
+        void silentlyResendCurrentStudentCameraRequest().catch(() => {});
+      }, 900);
+    }
   }
   
   syncViewerToLiveShareSlide(module);
@@ -5749,6 +5780,9 @@ const startLiveStagePolling = () => {
   const liveControls = document.getElementById('liveStudentControls');
   if (liveControls) {
     liveControls.classList.remove('hidden');
+  }
+  if (!shouldRestoreStudentCameraRequest()) {
+    syncStudentCameraRequestUi({ state: 'idle', message: '' });
   }
 };
 
@@ -5812,6 +5846,7 @@ const createViewerCameraCallButton = ({ icon, title, active = false, danger = fa
 };
 
 const stopStudentCameraCall = ({ statusMessage = 'Chamada encerrada.' } = {}) => {
+  clearStudentCameraApprovalRetry();
   if (studentCameraLocalStream) {
     studentCameraLocalStream.getTracks().forEach((track) => track.stop());
     studentCameraLocalStream = null;
@@ -5824,15 +5859,7 @@ const stopStudentCameraCall = ({ statusMessage = 'Chamada encerrada.' } = {}) =>
   studentCameraAudioMuted = false;
   studentCameraVideoMuted = false;
   forgetStudentCameraRequest();
-  const btn = document.getElementById('requestCameraBtn');
-  const status = document.getElementById('requestCameraStatus');
-  if (btn) {
-    btn.style.display = '';
-    btn.disabled = false;
-  }
-  if (status) {
-    status.textContent = statusMessage;
-  }
+  syncStudentCameraRequestUi({ state: 'idle', message: statusMessage });
   if (viewerModules?.length > 0) {
     renderSlide(getCurrentSlide());
   }
@@ -5916,6 +5943,90 @@ const connectToStudentPeer = (peerId) => {
 const getStudentCameraRequestStorageKey = () =>
   viewerState.liveShareId ? `${STUDENT_CAMERA_REQUEST_PREFIX}${viewerState.liveShareId}` : '';
 
+const syncStudentCameraRequestUi = ({ state = 'idle', message = '' } = {}) => {
+  const btn = document.getElementById('requestCameraBtn');
+  const status = document.getElementById('requestCameraStatus');
+  if (!btn || !status) return;
+
+  studentCameraRequestUiState = state;
+  btn.classList.remove('primary-btn', 'secondary-btn');
+  btn.style.display = '';
+
+  switch (state) {
+    case 'starting':
+      btn.classList.add('secondary-btn');
+      btn.textContent = 'Preparando câmera...';
+      btn.disabled = true;
+      status.textContent = message || 'Estamos iniciando sua câmera para enviar a solicitação.';
+      break;
+    case 'sending':
+      btn.classList.add('secondary-btn');
+      btn.textContent = 'Enviando solicitação...';
+      btn.disabled = true;
+      status.textContent = message || 'Sua solicitação está sendo enviada para o professor.';
+      break;
+    case 'pending':
+      btn.classList.add('secondary-btn');
+      btn.textContent = 'Solicitação pendente';
+      btn.disabled = true;
+      status.textContent = message || 'Aguarde o professor aprovar ou recusar sua solicitação.';
+      break;
+    case 'approved':
+      btn.classList.add('secondary-btn');
+      btn.textContent = 'Solicitação aprovada';
+      btn.disabled = true;
+      status.textContent = message || 'O professor aprovou. Conectando sua câmera na aula...';
+      break;
+    case 'connected':
+      btn.classList.add('secondary-btn');
+      btn.textContent = 'Em chamada ao vivo';
+      btn.disabled = true;
+      status.textContent = message || 'Sua câmera já está conectada com o professor.';
+      break;
+    case 'rejected':
+      btn.classList.add('primary-btn');
+      btn.textContent = 'Solicitar novamente';
+      btn.disabled = false;
+      status.textContent = message || 'O professor recusou sua solicitação. Você pode tentar novamente.';
+      break;
+    case 'error':
+      btn.classList.add('primary-btn');
+      btn.textContent = 'Tentar novamente';
+      btn.disabled = false;
+      status.textContent = message || 'Não foi possível enviar sua solicitação agora.';
+      break;
+    default:
+      btn.classList.add('primary-btn');
+      btn.textContent = 'Solicitar transmissão de câmera';
+      btn.disabled = false;
+      status.textContent = message || '';
+      break;
+  }
+};
+
+const clearStudentCameraApprovalRetry = () => {
+  if (studentCameraApprovalRetryTimer) {
+    clearTimeout(studentCameraApprovalRetryTimer);
+    studentCameraApprovalRetryTimer = null;
+  }
+  studentCameraApprovalRetryKey = '';
+};
+
+const silentlyResendCurrentStudentCameraRequest = async () => {
+  if (!viewerState.liveShareId || !studentCameraPeerId) {
+    return false;
+  }
+  const response = await authorizedFetch(`/api/student/live-stage/${encodeURIComponent(viewerState.liveShareId)}/request-camera`, {
+    method: 'POST',
+    body: JSON.stringify({ peerId: studentCameraPeerId })
+  });
+  if (!response.ok) {
+    return false;
+  }
+  rememberStudentCameraRequest();
+  return true;
+};
+
 const rememberStudentCameraRequest = () => {
   const key = getStudentCameraRequestStorageKey();
   if (key) {
@@ -5936,9 +6047,11 @@ const shouldRestoreStudentCameraRequest = () => {
 };
 
 const handleLiveSessionEnded = () => {
+  clearStudentCameraApprovalRetry();
   stopLiveStagePolling();
   stopViewerLiveCursorSync();
   forgetStudentCameraRequest();
+  syncStudentCameraRequestUi({ state: 'idle', message: '' });
   
   if (studentCameraLocalStream) {
     studentCameraLocalStream.getTracks().forEach(track => track.stop());
@@ -6043,6 +6156,74 @@ const initStudentCameraRequest = async () => {
     console.error('Erro ao acessar câmera:', err);
     status.textContent = 'Erro ao acessar câmera.';
     btn.disabled = false;
+  }
+};
+
+const requestStudentCameraWithStatus = async () => {
+  const btn = document.getElementById('requestCameraBtn');
+  if (!btn || !viewerState.liveShareId) return;
+
+  syncStudentCameraRequestUi({ state: 'starting' });
+
+  try {
+    if (!studentCameraLocalStream) {
+      studentCameraLocalStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      applyStudentCameraTrackState();
+    }
+
+    if (!studentCameraPeer) {
+      studentCameraPeer = new Peer();
+      studentCameraPeer.on('open', async (id) => {
+        studentCameraPeerId = id;
+        syncStudentCameraRequestUi({ state: 'sending' });
+
+        try {
+          const response = await authorizedFetch(`/api/student/live-stage/${encodeURIComponent(viewerState.liveShareId)}/request-camera`, {
+            method: 'POST',
+            body: JSON.stringify({ peerId: id })
+          });
+
+          if (response.ok) {
+            rememberStudentCameraRequest();
+            syncStudentCameraRequestUi({ state: 'pending' });
+          } else {
+            syncStudentCameraRequestUi({ state: 'error', message: 'Falha ao enviar a solicitação para o professor.' });
+          }
+        } catch (e) {
+          syncStudentCameraRequestUi({ state: 'error', message: 'Erro de conexão ao solicitar sua câmera.' });
+        }
+      });
+
+      studentCameraPeer.on('connection', (conn) => {
+        conn.on('open', () => {
+          clearStudentCameraApprovalRetry();
+          syncStudentCameraRequestUi({ state: 'connected' });
+          if (studentCameraLocalStream) {
+            studentCameraPeer.call(conn.peer, studentCameraLocalStream);
+          }
+        });
+      });
+
+      studentCameraPeer.on('error', (err) => {
+        console.warn('Student Peer error:', err);
+        syncStudentCameraRequestUi({ state: 'error', message: 'Erro na conexão da câmera ao vivo.' });
+      });
+    } else if (studentCameraPeerId) {
+      syncStudentCameraRequestUi({ state: 'sending' });
+      const response = await authorizedFetch(`/api/student/live-stage/${encodeURIComponent(viewerState.liveShareId)}/request-camera`, {
+        method: 'POST',
+        body: JSON.stringify({ peerId: studentCameraPeerId })
+      });
+      if (response.ok) {
+        rememberStudentCameraRequest();
+        syncStudentCameraRequestUi({ state: 'pending', message: 'Solicitação reenviada. Aguarde o professor.' });
+      } else {
+        syncStudentCameraRequestUi({ state: 'error', message: 'Falha ao reenviar sua solicitação.' });
+      }
+    }
+  } catch (err) {
+    console.error('Erro ao acessar cÃ¢mera:', err);
+    syncStudentCameraRequestUi({ state: 'error', message: 'Erro ao acessar câmera e microfone.' });
   }
 };
 
@@ -6284,6 +6465,7 @@ const createRendererNode = (element, slide) => {
         frame.className = 'builder-media-element';
         frame.src = element.embedSrc;
         frame.title = 'Vídeo do YouTube';
+        frame.sandbox = 'allow-scripts allow-same-origin allow-presentation';
         frame.allow =
           'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
         frame.allowFullscreen = true;
@@ -6376,7 +6558,7 @@ const createRendererNode = (element, slide) => {
       node = document.createElement('div');
       node.className = 'animated-arrow-element';
       node.style.setProperty('--arrow-head-color', element.textColor || '#1f1d2a');
-      node.innerHTML = `<span>${element.label || '➜'}</span>`;
+      node.innerHTML = `<span>${escapeHtml(element.label || '➜')}</span>`;
       applyElementBackground(node, element);
       break;
     default:
@@ -6896,7 +7078,7 @@ const initModuleViewerPage = async () => {
       startLiveStagePolling();
       if (shouldRestoreStudentCameraRequest()) {
         setTimeout(() => {
-          void initStudentCameraRequest().catch(() => {});
+          void requestStudentCameraWithStatus().catch(() => {});
         }, 300);
       }
       return;
@@ -7045,7 +7227,7 @@ const openViewerChat = async () => {
 };
 
 document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('requestCameraBtn')?.addEventListener('click', initStudentCameraRequest);
+  document.getElementById('requestCameraBtn')?.addEventListener('click', requestStudentCameraWithStatus);
   document.getElementById('viewerChatBtn')?.addEventListener('click', openViewerChat);
   document.getElementById('chatModalClose')?.addEventListener('click', closeCourseChat);
   document.getElementById('chatModalBackdrop')?.addEventListener('click', closeCourseChat);

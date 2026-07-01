@@ -2,19 +2,20 @@ const express = require('express');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
-const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
+const { decryptStoredSecret } = require('../aiConfigCrypto');
 const {
   sanitizeText,
   sanitizeEmail,
-  createRateLimiter
+  createRateLimiter,
+  assertSafeRemoteUrl
 } = require('../security');
 
 const router = express.Router();
 
 const checkoutRateLimiter = createRateLimiter({
   windowMs: 60 * 1000,
-  max: 20,
+  max: 6,
   keyFn: (req) => sanitizeText(req.ip || req.headers['x-forwarded-for'] || 'anonymous', 160)
 });
 
@@ -44,6 +45,7 @@ const DEACTIVATION_EVENTS = new Set([
 ]);
 
 let billingTablesEnsured = false;
+let billingTablesEnsurePromise = null;
 let adminSmtpSettingsEnsured = false;
 let professorQuotaColumnsEnsured = false;
 let professorCreditColumnsEnsured = false;
@@ -137,15 +139,13 @@ const buildCheckoutUrl = (checkoutResponse) => {
 const normalizePlanCodeFromExternalReference = (externalReference = '') => {
   const normalized = sanitizeText(externalReference, 160);
   const match = normalized.match(/^checkout:(pro|trial-30-dias):/i);
-  return match ? match[1].toLowerCase() : 'pro';
+  return match ? match[1].toLowerCase() : '';
 };
 
 const buildRandomPassword = () => crypto.randomBytes(9).toString('base64url') + 'Aa1!';
-const isProductionEnvironment = () => ASAAS_ENV === 'production';
-
 const buildWebhookTokenIsValid = (req) => {
   if (!ASAAS_WEBHOOK_AUTH_TOKEN) {
-    return !isProductionEnvironment();
+    return false;
   }
   if (ASAAS_WEBHOOK_AUTH_TOKEN === 'coloque-um-token-forte-do-webhook-aqui') {
     return false;
@@ -154,7 +154,26 @@ const buildWebhookTokenIsValid = (req) => {
     return false;
   }
   const headerToken = sanitizeText(req.headers['asaas-access-token'] || '', 255, { trim: false });
-  return Boolean(headerToken) && headerToken === ASAAS_WEBHOOK_AUTH_TOKEN;
+  if (!headerToken) return false;
+  const expected = Buffer.from(ASAAS_WEBHOOK_AUTH_TOKEN);
+  const received = Buffer.from(headerToken);
+  return expected.length === received.length && crypto.timingSafeEqual(expected, received);
+};
+
+const fetchAsaasPayment = async (paymentId) => {
+  const normalizedPaymentId = sanitizeText(paymentId || '', 80);
+  if (!normalizedPaymentId || !ASAAS_API_KEY) return null;
+  const response = await fetch(`${ASAAS_BASE_URL}/payments/${encodeURIComponent(normalizedPaymentId)}`, {
+    method: 'GET',
+    headers: {
+      accept: 'application/json',
+      'content-type': 'application/json',
+      'user-agent': APP_NAME,
+      access_token: ASAAS_API_KEY
+    }
+  });
+  if (!response.ok) return null;
+  return response.json().catch(() => null);
 };
 
 const fetchAsaasCustomer = async (customerId) => {
@@ -179,11 +198,6 @@ const fetchAsaasCustomer = async (customerId) => {
 
 const ensureRoleAndOwnershipSetup = async () => {
   if (roleAndOwnershipEnsured) return;
-  await db.query('ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check');
-  await db.query(`
-    ALTER TABLE users
-    ADD CONSTRAINT users_role_check CHECK (role IN ('student', 'admin', 'professor'))
-  `);
   await db.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL');
   await db.query('ALTER TABLE courses ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL');
   await db.query('ALTER TABLE notifications ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL');
@@ -225,6 +239,8 @@ const ensureAdminSmtpSettingsTable = async () => {
 
 const ensureBillingTables = async () => {
   if (billingTablesEnsured) return;
+  if (!billingTablesEnsurePromise) {
+    billingTablesEnsurePromise = (async () => {
   await ensureRoleAndOwnershipSetup();
   await ensureProfessorCreditColumns();
   await ensureProfessorQuotaColumns();
@@ -269,6 +285,12 @@ const ensureBillingTables = async () => {
     )
   `);
   billingTablesEnsured = true;
+    })().catch((error) => {
+      billingTablesEnsurePromise = null;
+      throw error;
+    });
+  }
+  await billingTablesEnsurePromise;
 };
 
 const isSmtpConfigUsable = (settings) =>
@@ -285,9 +307,10 @@ const loadAdminSmtpSettings = async () => {
 const sendProfessorAccessEmail = async ({ fullName, email, temporaryPassword, planCode }) => {
   const smtp = await loadAdminSmtpSettings();
   if (!isSmtpConfigUsable(smtp)) {
-    console.log(`SMTP nao configurado. Acesso do professor ${email} gerado com senha temporaria: ${temporaryPassword}`);
+    console.error(`SMTP nao configurado. Nao foi possivel enviar o acesso para ${email}.`);
     return false;
   }
+  await assertSafeRemoteUrl(`https://${smtp.host}`);
 
   const transporter = nodemailer.createTransport({
     host: smtp.host,
@@ -295,11 +318,11 @@ const sendProfessorAccessEmail = async ({ fullName, email, temporaryPassword, pl
     secure: smtp.secure !== false,
     auth: {
       user: smtp.user_email,
-      pass: smtp.user_pass
+      pass: decryptStoredSecret(smtp.user_pass)
     },
-    tls: {
-      rejectUnauthorized: false
-    },
+    tls: { rejectUnauthorized: true },
+    disableFileAccess: true,
+    disableUrlAccess: true,
     family: 4
   });
 
@@ -329,16 +352,116 @@ const sendProfessorAccessEmail = async ({ fullName, email, temporaryPassword, pl
   return true;
 };
 
+const persistCheckoutLead = async ({ externalReference, planCode, payerName, payerEmail, amount, checkoutResponse }) => {
+  await ensureBillingTables();
+  await db.query(
+    `
+      INSERT INTO billing_subscriptions (
+        provider,
+        checkout_external_reference,
+        plan_code,
+        payer_name,
+        payer_email,
+        amount,
+        status,
+        raw_payload,
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, 'CHECKOUT_CREATED', $7, NOW())
+    `,
+    [
+      'asaas',
+      sanitizeText(externalReference || '', 160) || null,
+      sanitizeText(planCode || '', 40) || 'pro',
+      sanitizeText(payerName || '', 160) || null,
+      sanitizeEmail(payerEmail || '') || null,
+      Number.isFinite(Number(amount)) ? Number(amount) : null,
+      checkoutResponse || null
+    ]
+  );
+};
+
 const upsertBillingSubscriptionRecord = async (client, eventType, payment, customerDetails) => {
   const planCode = normalizePlanCodeFromExternalReference(payment?.externalReference || '');
+  if (!planCode || !PLANS[planCode]) {
+    throw new Error('A cobranca nao pertence a um checkout valido da Criatyve.');
+  }
   const plan = getPlanConfig(planCode);
   const providerPaymentId = sanitizeText(payment?.id || '', 80);
   const providerSubscriptionId = sanitizeText(payment?.subscription || '', 80) || null;
   const providerCustomerId = sanitizeText(payment?.customer || '', 80) || null;
-  const payerEmail = sanitizeEmail(customerDetails?.email || payment?.customerEmail || '');
-  const payerName = sanitizeText(customerDetails?.name || payment?.customerName || 'Professor Criatyve', 160) || 'Professor Criatyve';
   const amount = Number.isFinite(Number(payment?.value)) ? Number(payment.value) : plan.price;
+  if (Math.abs(amount - plan.price) > 0.009) {
+    throw new Error('O valor confirmado pelo Asaas nao corresponde ao plano contratado.');
+  }
   const status = sanitizeText(payment?.status || eventType || 'PENDING', 80) || 'PENDING';
+  const checkoutExternalReference = sanitizeText(payment?.externalReference || '', 160) || null;
+
+  const { rows: existingRows } = await client.query(
+    `
+      SELECT *
+        FROM billing_subscriptions
+       WHERE provider = 'asaas'
+         AND (
+           provider_payment_id = $1
+           OR checkout_external_reference = $2
+         )
+       ORDER BY CASE WHEN provider_payment_id = $1 THEN 0 ELSE 1 END
+       LIMIT 1
+    `,
+    [providerPaymentId, checkoutExternalReference]
+  );
+  const existingSubscription = existingRows[0] || null;
+  const payerEmail = sanitizeEmail(
+    customerDetails?.email ||
+    payment?.customerEmail ||
+    existingSubscription?.payer_email ||
+    ''
+  );
+  const payerName = sanitizeText(
+    customerDetails?.name ||
+    payment?.customerName ||
+    existingSubscription?.payer_name ||
+    'Professor Criatyve',
+    160
+  ) || 'Professor Criatyve';
+
+  if (existingSubscription) {
+    const { rows } = await client.query(
+      `
+        UPDATE billing_subscriptions
+           SET provider_customer_id = $2,
+               provider_subscription_id = $3,
+               provider_payment_id = $4,
+               checkout_external_reference = $5,
+               plan_code = $6,
+               payer_name = $7,
+               payer_email = $8,
+               amount = $9,
+               status = $10,
+               last_event_type = $11,
+               raw_payload = $12,
+               updated_at = NOW()
+         WHERE id = $1
+         RETURNING *
+      `,
+      [
+        existingSubscription.id,
+        providerCustomerId,
+        providerSubscriptionId,
+        providerPaymentId,
+        checkoutExternalReference,
+        planCode,
+        payerName,
+        payerEmail || null,
+        amount,
+        status,
+        eventType,
+        payment
+      ]
+    );
+    return rows[0];
+  }
 
   const { rows } = await client.query(
     `
@@ -358,19 +481,6 @@ const upsertBillingSubscriptionRecord = async (client, eventType, payment, custo
         updated_at
       )
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
-      ON CONFLICT (provider_payment_id)
-      DO UPDATE SET
-        provider_customer_id = EXCLUDED.provider_customer_id,
-        provider_subscription_id = EXCLUDED.provider_subscription_id,
-        checkout_external_reference = EXCLUDED.checkout_external_reference,
-        plan_code = EXCLUDED.plan_code,
-        payer_name = EXCLUDED.payer_name,
-        payer_email = EXCLUDED.payer_email,
-        amount = EXCLUDED.amount,
-        status = EXCLUDED.status,
-        last_event_type = EXCLUDED.last_event_type,
-        raw_payload = EXCLUDED.raw_payload,
-        updated_at = NOW()
       RETURNING *
     `,
     [
@@ -378,7 +488,7 @@ const upsertBillingSubscriptionRecord = async (client, eventType, payment, custo
       providerCustomerId,
       providerSubscriptionId,
       providerPaymentId,
-      sanitizeText(payment?.externalReference || '', 160) || null,
+      checkoutExternalReference,
       planCode,
       payerName,
       payerEmail || null,
@@ -409,7 +519,7 @@ const activateProfessorFromSubscription = async (client, subscription) => {
   if (!professor) {
     temporaryPassword = buildRandomPassword();
     const passwordHash = await bcrypt.hash(temporaryPassword, 10);
-    const professorId = uuidv4();
+    const professorId = crypto.randomUUID();
     await client.query(
       `
         INSERT INTO users (
@@ -497,10 +607,26 @@ const processAsaasWebhookEvent = async (eventPayload) => {
   await ensureBillingTables();
   const eventId = sanitizeText(eventPayload?.id || '', 120);
   const eventType = sanitizeText(eventPayload?.event || '', 80);
-  const payment = eventPayload?.payment && typeof eventPayload.payment === 'object' ? eventPayload.payment : null;
+  let payment = eventPayload?.payment && typeof eventPayload.payment === 'object' ? { ...eventPayload.payment } : null;
 
   if (!eventId || !eventType || !payment?.id) {
     return { ignored: true, reason: 'invalid-payload' };
+  }
+  let eventPlanCode = normalizePlanCodeFromExternalReference(payment.externalReference || '');
+  if (!eventPlanCode) {
+    const { rows } = await db.query(
+      `SELECT checkout_external_reference, plan_code
+         FROM billing_subscriptions
+        WHERE provider = 'asaas' AND provider_payment_id = $1
+        LIMIT 1`,
+      [sanitizeText(payment.id, 80)]
+    );
+    const existingSubscription = rows[0];
+    if (!existingSubscription) {
+      return { ignored: true, reason: 'unrelated-payment' };
+    }
+    eventPlanCode = existingSubscription.plan_code;
+    payment.externalReference = existingSubscription.checkout_external_reference;
   }
 
   try {
@@ -513,17 +639,45 @@ const processAsaasWebhookEvent = async (eventPayload) => {
     );
   } catch (error) {
     if (error?.code === '23505') {
-      return { duplicate: true };
+      const { rows } = await db.query(
+        'SELECT processing_status FROM asaas_webhook_events WHERE asaas_event_id = $1',
+        [eventId]
+      );
+      if (rows[0]?.processing_status !== 'ERROR') {
+        return { duplicate: true };
+      }
+      await db.query(
+        `UPDATE asaas_webhook_events
+            SET processing_status = 'PENDING', payload = $2, error_message = NULL, processed_at = NULL
+          WHERE asaas_event_id = $1`,
+        [eventId, eventPayload]
+      );
+    } else {
+      throw error;
     }
-    throw error;
   }
 
   const client = await db.getClient();
   try {
     await client.query('BEGIN');
 
-    const customerDetails = await fetchAsaasCustomer(payment.customer);
-    const subscription = await upsertBillingSubscriptionRecord(client, eventType, payment, customerDetails);
+    const isActivationEvent = shouldActivateAccountForEvent(eventType, eventPlanCode);
+    let verifiedPayment = payment;
+    if (isActivationEvent) {
+      verifiedPayment = await fetchAsaasPayment(payment.id);
+      if (!verifiedPayment || verifiedPayment.id !== payment.id) {
+        throw new Error('Nao foi possivel confirmar a cobranca diretamente no Asaas.');
+      }
+      const verifiedPlanCode = normalizePlanCodeFromExternalReference(verifiedPayment.externalReference || '');
+      if (verifiedPlanCode !== eventPlanCode) {
+        throw new Error('A referencia da cobranca confirmada pelo Asaas e invalida.');
+      }
+      if (ACTIVE_PAYMENT_EVENTS.has(eventType) && !['CONFIRMED', 'RECEIVED'].includes(String(verifiedPayment.status || '').toUpperCase())) {
+        throw new Error('A cobranca ainda nao esta confirmada no Asaas.');
+      }
+    }
+    const customerDetails = await fetchAsaasCustomer(verifiedPayment.customer);
+    const subscription = await upsertBillingSubscriptionRecord(client, eventType, verifiedPayment, customerDetails);
     let activationResult = null;
 
     if (shouldActivateAccountForEvent(eventType, subscription.plan_code)) {
@@ -642,8 +796,7 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
       const firstError = Array.isArray(responseBody?.errors) ? responseBody.errors[0] : null;
       const errorPayload = {
         message: firstError?.description || 'Nao foi possivel iniciar o checkout no Asaas.',
-        provider: 'asaas',
-        details: responseBody
+        provider: 'asaas'
       };
       return redirect ? res.status(response.status).send(errorPayload.message) : res.status(response.status).json(errorPayload);
     }
@@ -652,11 +805,19 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
     if (!checkoutUrl) {
       const errorPayload = {
         message: 'O Asaas respondeu sem link de checkout utilizavel.',
-        provider: 'asaas',
-        details: responseBody
+        provider: 'asaas'
       };
       return redirect ? res.status(502).send(errorPayload.message) : res.status(502).json(errorPayload);
     }
+
+    await persistCheckoutLead({
+      externalReference,
+      planCode: plan.id,
+      payerName: name,
+      payerEmail: email,
+      amount: plan.price,
+      checkoutResponse: responseBody
+    });
 
     if (redirect) {
       return res.redirect(303, checkoutUrl);
@@ -664,7 +825,6 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
 
     return res.json({
       provider: 'asaas',
-      environment: ASAAS_ENV,
       plan: plan.id,
       trialDays: plan.trialDays,
       checkoutId: responseBody.id || null,
@@ -697,7 +857,7 @@ router.post('/webhook/asaas', async (req, res) => {
     });
   } catch (error) {
     console.error('Erro ao processar webhook do Asaas:', error);
-    return res.status(200).json({ received: true, processingError: true });
+    return res.status(500).json({ received: false, processingError: true });
   }
 });
 

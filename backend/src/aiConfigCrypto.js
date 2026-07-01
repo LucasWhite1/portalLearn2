@@ -29,7 +29,17 @@ function decryptApiKey(payload) {
   return decrypted.toString('utf8');
 }
 
+function decryptStoredSecret(payload) {
+  if (!payload) return '';
+  if (String(payload).split(':').length !== 3) {
+    return String(payload);
+  }
+  return decryptApiKey(payload);
+}
+
 module.exports = {
   encryptApiKey,
-  decryptApiKey
+  decryptApiKey,
+  encryptSecret: encryptApiKey,
+  decryptStoredSecret
 };

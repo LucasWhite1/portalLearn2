@@ -7,10 +7,10 @@ export const authorizedFetch = async (path, options = {}) => {
   }
   const headers = {
     'Content-Type': 'application/json',
-    Authorization: `Bearer ${token}`,
     ...(options.headers || {})
   };
-  const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  if (/^[0-9a-f]{48}$/i.test(token)) headers.Authorization = `Bearer ${token}`;
+  const response = await fetch(`${API_BASE}${path}`, { ...options, headers, credentials: 'include' });
   if (response.status === 401) {
     localStorage.removeItem(STORAGE_KEY);
     localStorage.removeItem(USER_ROLE_KEY);

@@ -1,4 +1,7 @@
 const PIXIAN_API_URL = 'https://api.pixian.ai/api/v2/remove-background';
+const { safeFetch, readResponseBuffer } = require('./security');
+const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
+const allowHttpRemoteSources = !['production', 'prod'].includes(String(process.env.NODE_ENV || process.env.APP_ENV || '').toLowerCase());
 
 const getPixianCredentials = () => {
   const username = process.env.PIXIAN_USERNAME || '';
@@ -29,6 +32,9 @@ const parseDataUrl = (dataUrl = '') => {
   const buffer = isBase64
     ? Buffer.from(payload, 'base64')
     : Buffer.from(decodeURIComponent(payload), 'utf8');
+  if (!String(mimeType).toLowerCase().startsWith('image/') || buffer.length > MAX_IMAGE_BYTES) {
+    throw new Error('A imagem enviada e invalida ou excede o limite de 15 MB.');
+  }
   const extension = mimeType.split('/')[1] || 'bin';
   return {
     mimeType,
@@ -38,16 +44,23 @@ const parseDataUrl = (dataUrl = '') => {
 };
 
 const fetchRemoteImage = async (sourceUrl) => {
-  const response = await fetch(sourceUrl);
+  const response = await safeFetch(sourceUrl, {}, {
+    allowHttp: allowHttpRemoteSources,
+    allowCrossOriginRedirects: true,
+    timeoutMs: 20000
+  });
   if (!response.ok) {
     throw new Error('Não foi possível baixar a imagem selecionada.');
   }
-  const arrayBuffer = await response.arrayBuffer();
-  const mimeType = response.headers.get('content-type') || 'image/png';
+  const mimeType = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  if (!mimeType.startsWith('image/')) {
+    throw new Error('A URL informada nao retornou uma imagem valida.');
+  }
+  const buffer = await readResponseBuffer(response, MAX_IMAGE_BYTES);
   const extension = mimeType.split('/')[1] || 'png';
   return {
     mimeType,
-    buffer: Buffer.from(arrayBuffer),
+    buffer,
     filename: `remote.${extension}`
   };
 };

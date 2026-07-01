@@ -57,6 +57,7 @@ const createShare = ({ ownerUserId, ownerRole = null, payload }) => {
     updatedAt: now,
     revision: 1,
     cameraRequests: [],
+    rejectedCameraRequests: [],
     drawingStrokes: [],
     cursorPositions: [],
     payload: clonePayload(payload)
@@ -89,20 +90,92 @@ const addCameraRequest = (shareId, request) => {
   cleanupExpiredShares();
   const current = liveStageShares.get(shareId);
   if (!current) return false;
-  
-  // Remove request from same peerId or same userId if already exists to avoid duplicates
+
   current.cameraRequests = current.cameraRequests.filter(r => r.peerId !== request.peerId && r.userId !== request.userId);
+  current.rejectedCameraRequests = Array.isArray(current.rejectedCameraRequests)
+    ? current.rejectedCameraRequests.filter((entry) => entry.peerId !== request.peerId && entry.userId !== request.userId)
+    : [];
   current.cameraRequests.push({
     ...request,
     requestedAt: Date.now()
   });
-  
-  // Keep only the last 20 requests
+
   if (current.cameraRequests.length > 20) {
     current.cameraRequests.shift();
   }
-  
+  current.updatedAt = Date.now();
+  current.revision += 1;
   return true;
+};
+
+const removeCameraRequest = (shareId, request = {}, { markRejected = false } = {}) => {
+  cleanupExpiredShares();
+  const current = liveStageShares.get(shareId);
+  if (!current) return false;
+
+  const userId = String(request?.userId || '').trim();
+  const peerId = String(request?.peerId || '').trim();
+  const fullName = String(request?.fullName || '').trim();
+  if (!userId && !peerId) {
+    return false;
+  }
+
+  const beforeCount = Array.isArray(current.cameraRequests) ? current.cameraRequests.length : 0;
+  current.cameraRequests = Array.isArray(current.cameraRequests)
+    ? current.cameraRequests.filter((entry) => {
+        const sameUser = userId && String(entry?.userId || '').trim() === userId;
+        const samePeer = peerId && String(entry?.peerId || '').trim() === peerId;
+        return !(sameUser || samePeer);
+      })
+    : [];
+
+  if (markRejected) {
+    current.rejectedCameraRequests = Array.isArray(current.rejectedCameraRequests) ? current.rejectedCameraRequests : [];
+    current.rejectedCameraRequests = current.rejectedCameraRequests.filter((entry) => {
+      const sameUser = userId && String(entry?.userId || '').trim() === userId;
+      const samePeer = peerId && String(entry?.peerId || '').trim() === peerId;
+      return !(sameUser || samePeer);
+    });
+    current.rejectedCameraRequests.push({
+      userId: userId || null,
+      peerId: peerId || null,
+      fullName: fullName || null,
+      rejectedAt: Date.now()
+    });
+    if (current.rejectedCameraRequests.length > 50) {
+      current.rejectedCameraRequests.shift();
+    }
+  }
+
+  const changed = current.cameraRequests.length !== beforeCount || markRejected;
+  if (changed) {
+    current.updatedAt = Date.now();
+    current.revision += 1;
+  }
+  return changed;
+};
+
+const getCameraRequestState = (shareId, request = {}) => {
+  cleanupExpiredShares();
+  const current = liveStageShares.get(shareId);
+  if (!current) return null;
+
+  const userId = String(request?.userId || '').trim();
+  const peerId = String(request?.peerId || '').trim();
+  const hasPending = Array.isArray(current.cameraRequests) && current.cameraRequests.some((entry) => {
+    const sameUser = userId && String(entry?.userId || '').trim() === userId;
+    const samePeer = peerId && String(entry?.peerId || '').trim() === peerId;
+    return sameUser || samePeer;
+  });
+  if (hasPending) {
+    return 'pending';
+  }
+  const hasRejected = Array.isArray(current.rejectedCameraRequests) && current.rejectedCameraRequests.some((entry) => {
+    const sameUser = userId && String(entry?.userId || '').trim() === userId;
+    const samePeer = peerId && String(entry?.peerId || '').trim() === peerId;
+    return sameUser || samePeer;
+  });
+  return hasRejected ? 'rejected' : 'none';
 };
 
 const addDrawingStroke = (shareId, stroke) => {
@@ -189,6 +262,17 @@ const clearDrawingStrokes = (shareId) => {
   return true;
 };
 
+const clearDrawingStrokesByUser = (shareId, userId) => {
+  cleanupExpiredShares();
+  const current = liveStageShares.get(shareId);
+  if (!current) return false;
+  const normalizedUserId = String(userId || '').trim();
+  current.drawingStrokes = current.drawingStrokes.filter(
+    (stroke) => String(stroke?.userId || '').trim() !== normalizedUserId
+  );
+  return true;
+};
+
 const deleteShare = (shareId, ownerUserId) => {
   cleanupExpiredShares();
   const current = liveStageShares.get(shareId);
@@ -205,10 +289,13 @@ module.exports = {
   listShares,
   updateShare,
   addCameraRequest,
+  removeCameraRequest,
+  getCameraRequestState,
   addDrawingStroke,
   updateCursorPosition,
   listCursorPositions,
   removeDrawingStroke,
   clearDrawingStrokes,
+  clearDrawingStrokesByUser,
   deleteShare
 };

@@ -1,11 +1,12 @@
 const express = require('express');
+const crypto = require('crypto');
 const db = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const { compareImagesWithNanoBanana } = require('../aiProvider');
 const { readImageSource } = require('../pixian');
-const { getShare, listShares, addCameraRequest, addDrawingStroke, updateCursorPosition, listCursorPositions, clearDrawingStrokes } = require('../liveStageShareStore');
+const { getShare, listShares, addCameraRequest, addDrawingStroke, updateCursorPosition, listCursorPositions, clearDrawingStrokesByUser, getCameraRequestState } = require('../liveStageShareStore');
 
-const { sanitizeText, sanitizeMediaUrl, isUuid } = require('../security');
+const { sanitizeText, sanitizeMediaUrl, sanitizeColor, isUuid, createRateLimiter } = require('../security');
 
 const router = express.Router();
 let quizAttemptsColumnEnsured = false;
@@ -20,6 +21,26 @@ let ownershipColumnsEnsured = false;
 let courseColumnsEnsurePromise = null;
 let enrollmentProgressColumnsEnsurePromise = null;
 const LIVE_STAGE_SHARE_ID_REGEX = /^[0-9a-f]{32}$/i;
+const liveCameraRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 10,
+  keyFn: (req) => `live-camera:${req.user?.id || req.ip}`
+});
+const liveDrawingRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 60,
+  keyFn: (req) => `live-drawing:${req.user?.id || req.ip}`
+});
+const liveCursorRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 180,
+  keyFn: (req) => `live-cursor:${req.user?.id || req.ip}`
+});
+const studentAiRateLimiter = createRateLimiter({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  keyFn: (req) => `student-ai:${req.user?.id || req.ip}`
+});
 
 const ensureCourseCoverColumn = async () => {
   if (courseCoverColumnEnsured) {
@@ -84,6 +105,57 @@ const ensureOwnershipColumns = async () => {
   ownershipColumnsEnsured = true;
 };
 
+const ensureStudentLiveShareAccess = async (req, res, share) => {
+  await ensureOwnershipColumns();
+  if (req.user?.role !== 'student') {
+    res.status(403).json({ message: 'Somente alunos autenticados podem acessar esta aula ao vivo.' });
+    return false;
+  }
+  const payload = share?.payload || {};
+  if (isUuid(payload.courseId)) {
+    const { rows } = await db.query(
+      `SELECT c.owner_user_id
+         FROM enrollments e
+         JOIN courses c ON c.id = e.course_id
+        WHERE e.user_id = $1
+          AND e.course_id = $2
+        LIMIT 1`,
+      [req.user.id, payload.courseId]
+    );
+    const course = rows[0];
+    const ownerMatches = share.ownerRole === 'admin' || (
+      course && String(course.owner_user_id || '') === String(share.ownerUserId || '')
+    );
+    if (!course || !ownerMatches) {
+      res.status(403).json({ message: 'Voce nao esta matriculado neste curso ao vivo.' });
+      return false;
+    }
+    return true;
+  }
+  const hasOwnerAccess = Boolean(share.ownerUserId && req.user.ownerUserId === share.ownerUserId);
+  if (!hasOwnerAccess && share.ownerRole !== 'admin') {
+    res.status(403).json({ message: 'Esta aula ao vivo esta disponivel apenas para alunos deste professor.' });
+    return false;
+  }
+  return true;
+};
+
+const sanitizeLiveStroke = (stroke) => {
+  if (!stroke || !Array.isArray(stroke.points)) return null;
+  const points = stroke.points
+    .slice(0, 3000)
+    .map((point) => ({ x: Number(point?.x), y: Number(point?.y) }))
+    .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+  if (!points.length) return null;
+  return {
+    id: sanitizeText(stroke.id || '', 120),
+    slideId: sanitizeText(stroke.slideId || '', 120),
+    color: sanitizeColor(stroke.color, '#111111'),
+    width: Math.min(40, Math.max(1, Number(stroke.width) || 3)),
+    points
+  };
+};
+
 router.get('/public/modules/:moduleId', async (req, res) => {
   const { moduleId } = req.params;
   if (!isUuid(moduleId)) {
@@ -124,6 +196,7 @@ router.get('/live-stage/:shareId', requireAuth, async (req, res) => {
   if (!share) {
     return res.status(404).json({ message: 'Compartilhamento ao vivo não encontrado.' });
   }
+  if (!(await ensureStudentLiveShareAccess(req, res, share))) return;
   const payload = share.payload || {};
   if (req.user?.role !== 'student') {
     return res.status(403).json({ message: 'Somente alunos autenticados podem acessar a aula ao vivo.' });
@@ -162,12 +235,13 @@ router.get('/live-stage/:shareId', requireAuth, async (req, res) => {
       activeSlideId: payload.activeSlideId || null,
       revision: share.revision,
       updatedAt: new Date(share.updatedAt).toISOString(),
-      drawingStrokes: share.drawingStrokes || []
+      drawingStrokes: share.drawingStrokes || [],
+      cameraRequestState: getCameraRequestState(share.shareId, { userId: req.user.id })
     }
   });
 });
 
-router.post('/live-stage/:shareId/request-camera', requireAuth, async (req, res) => {
+router.post('/live-stage/:shareId/request-camera', requireAuth, liveCameraRateLimiter, async (req, res) => {
   const shareId = sanitizeText(req.params?.shareId || '', 64);
   if (!LIVE_STAGE_SHARE_ID_REGEX.test(shareId)) {
     return res.status(400).json({ message: 'Compartilhamento ao vivo inválido.' });
@@ -177,6 +251,7 @@ router.post('/live-stage/:shareId/request-camera', requireAuth, async (req, res)
     return res.status(404).json({ message: 'Compartilhamento ao vivo não encontrado.' });
   }
 
+  if (!(await ensureStudentLiveShareAccess(req, res, share))) return;
   const { peerId } = req.body;
   if (!peerId) {
     return res.status(400).json({ message: 'PeerID é necessário.' });
@@ -196,7 +271,7 @@ router.post('/live-stage/:shareId/request-camera', requireAuth, async (req, res)
   res.json({ success: true });
 });
 
-router.post('/live-stage/:shareId/drawing', requireAuth, async (req, res) => {
+router.post('/live-stage/:shareId/drawing', requireAuth, liveDrawingRateLimiter, async (req, res) => {
   const shareId = sanitizeText(req.params?.shareId || '', 64);
   if (!LIVE_STAGE_SHARE_ID_REGEX.test(shareId)) {
     return res.status(400).json({ message: 'Compartilhamento ao vivo inválido.' });
@@ -206,8 +281,12 @@ router.post('/live-stage/:shareId/drawing', requireAuth, async (req, res) => {
     return res.status(404).json({ message: 'Compartilhamento ao vivo não encontrado.' });
   }
 
-  const { stroke } = req.body;
-  if (!stroke || !Array.isArray(stroke.points)) {
+  if (!(await ensureStudentLiveShareAccess(req, res, share))) return;
+  if (share.payload?.builderData?.moduleSettings?.allowStudentPen !== true) {
+    return res.status(403).json({ message: 'O professor nao permitiu rabiscos nesta aula.' });
+  }
+  const stroke = sanitizeLiveStroke(req.body?.stroke);
+  if (!stroke) {
     return res.status(400).json({ message: 'Dados do traço inválidos.' });
   }
 
@@ -235,10 +314,14 @@ router.get('/live-stage/:shareId/cursors', requireAuth, async (req, res) => {
   if (!share) {
     return res.status(404).json({ message: 'Compartilhamento ao vivo não encontrado.' });
   }
+  if (!(await ensureStudentLiveShareAccess(req, res, share))) return;
+  if (share.payload?.builderData?.moduleSettings?.allowLiveCursors === false) {
+    return res.json({ cursors: [] });
+  }
   res.json({ cursors: listCursorPositions(shareId) || [] });
 });
 
-router.post('/live-stage/:shareId/cursor', requireAuth, async (req, res) => {
+router.post('/live-stage/:shareId/cursor', requireAuth, liveCursorRateLimiter, async (req, res) => {
   const shareId = sanitizeText(req.params?.shareId || '', 64);
   if (!LIVE_STAGE_SHARE_ID_REGEX.test(shareId)) {
     return res.status(400).json({ message: 'Compartilhamento ao vivo inválido.' });
@@ -248,6 +331,10 @@ router.post('/live-stage/:shareId/cursor', requireAuth, async (req, res) => {
     return res.status(404).json({ message: 'Compartilhamento ao vivo não encontrado.' });
   }
 
+  if (!(await ensureStudentLiveShareAccess(req, res, share))) return;
+  if (share.payload?.builderData?.moduleSettings?.allowLiveCursors === false) {
+    return res.status(403).json({ message: 'O professor desativou os cursores nesta aula.' });
+  }
   const active = req.body?.active !== false;
   const success = updateCursorPosition(shareId, {
     userId: req.user.id,
@@ -265,12 +352,16 @@ router.post('/live-stage/:shareId/cursor', requireAuth, async (req, res) => {
 });
 
 router.delete('/live-stage/:shareId/drawing', requireAuth, async (req, res) => {
-  const { shareId } = req.params;
-  if (!isUuid(shareId)) {
+  const shareId = sanitizeText(req.params?.shareId || '', 64);
+  if (!LIVE_STAGE_SHARE_ID_REGEX.test(shareId)) {
     return res.status(400).json({ message: 'ID de compartilhamento inválido.' });
   }
-
-  const success = clearDrawingStrokes(shareId);
+  const share = getShare(shareId);
+  if (!share) {
+    return res.status(404).json({ message: 'Compartilhamento ao vivo não encontrado.' });
+  }
+  if (!(await ensureStudentLiveShareAccess(req, res, share))) return;
+  const success = clearDrawingStrokesByUser(shareId, req.user.id);
   res.json({ success });
 });
 
@@ -281,14 +372,17 @@ router.get('/live-stage', requireAuth, async (req, res) => {
   }
 
   const { rows } = await db.query(
-    `SELECT e.course_id, c.title
+    `SELECT e.course_id, c.title, c.owner_user_id
        FROM enrollments e
        JOIN courses c ON c.id = e.course_id
       WHERE e.user_id = $1`,
     [req.user.id]
   );
   const enrolledCourseMap = rows.reduce((acc, course) => {
-    acc[course.course_id] = course.title || 'Curso ao vivo';
+    acc[course.course_id] = {
+      title: course.title || 'Curso ao vivo',
+      ownerUserId: course.owner_user_id || null
+    };
     return acc;
   }, {});
 
@@ -296,7 +390,8 @@ router.get('/live-stage', requireAuth, async (req, res) => {
     .filter((share) => {
       const payload = share?.payload || {};
       if (isUuid(payload.courseId) && enrolledCourseMap[payload.courseId]) {
-        return true;
+        const course = enrolledCourseMap[payload.courseId];
+        return share.ownerRole === 'admin' || String(course.ownerUserId || '') === String(share.ownerUserId || '');
       }
       if (share.ownerRole === 'admin') {
         return true;
@@ -309,7 +404,7 @@ router.get('/live-stage', requireAuth, async (req, res) => {
       return {
         shareId: share.shareId,
         courseId: payload.courseId || null,
-        courseTitle: isUuid(payload.courseId) ? enrolledCourseMap[payload.courseId] || 'Curso ao vivo' : 'Aula ao vivo',
+        courseTitle: isUuid(payload.courseId) ? enrolledCourseMap[payload.courseId]?.title || 'Curso ao vivo' : 'Aula ao vivo',
         title: payload.title || 'Palco ao vivo',
         description: payload.description || null,
         activeSlideId: payload.activeSlideId || null,
@@ -639,7 +734,10 @@ router.get('/store-courses', async (req, res) => {
   res.json(rows);
 });
 
-router.post('/input/compare-image', async (req, res) => {
+router.post('/input/compare-image', studentAiRateLimiter, async (req, res) => {
+  if (req.user?.role !== 'student' || !req.user.ownerUserId) {
+    return res.status(403).json({ message: 'Comparacao de imagem indisponivel para esta conta.' });
+  }
   const referenceImage = sanitizeMediaUrl(req.body?.referenceImage || '');
   const submittedImage = sanitizeMediaUrl(req.body?.submittedImage || '');
   try {
@@ -649,12 +747,13 @@ router.post('/input/compare-image', async (req, res) => {
       return res.status(400).json({ message: 'Envie duas imagens validas em formato suportado.' });
     }
     const { rows } = await db.query(
-      `SELECT *
-         FROM admin_ai_settings
-        WHERE image_is_enabled = TRUE
+      `SELECT settings.*
+         FROM admin_ai_settings settings
+        WHERE settings.admin_user_id = $1
+          AND settings.image_is_enabled = TRUE
           AND image_encrypted_api_key IS NOT NULL
-        ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
-        LIMIT 1`
+        LIMIT 1`,
+      [req.user.ownerUserId]
     );
     const settingsRow = rows[0];
     if (!settingsRow) {
@@ -707,7 +806,7 @@ router.post('/store-courses/:courseId/request-access', async (req, res) => {
      VALUES ($1, $2, $3, 'pending', NOW(), NOW())
      ON CONFLICT (user_id, course_id)
      DO UPDATE SET status = 'pending', updated_at = NOW()`,
-    [require('uuid').v4(), req.user.id, courseId]
+    [crypto.randomUUID(), req.user.id, courseId]
   );
   res.status(201).json({ success: true, status: 'pending' });
 });

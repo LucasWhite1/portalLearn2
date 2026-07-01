@@ -5,7 +5,7 @@ export const resolveApiBase = () => {
   if (window.location.protocol === 'file:') {
     return 'http://localhost:4000';
   }
-  if (['localhost', '127.0.0.1'].includes(window.location.hostname) && window.location.port !== '4000') {
+  if (['localhost', '127.0.0.1'].includes(window.location.hostname) && /^55\d{2}$/.test(window.location.port)) {
     return `${window.location.protocol}//${window.location.hostname}:4000`;
   }
   return window.location.origin;

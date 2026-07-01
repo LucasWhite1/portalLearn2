@@ -4,7 +4,9 @@ const {
   sanitizeBuilderData,
   sanitizeNotificationMessage,
   sanitizeSlug,
-  isSessionToken
+  isSessionToken,
+  isPrivateIpAddress,
+  getPasswordValidationError
 } = require('../src/security');
 
 const tests = [
@@ -112,6 +114,23 @@ const tests = [
     run() {
       const message = sanitizeNotificationMessage('a'.repeat(2000));
       assert.ok(message.length <= 1200);
+    }
+  },
+  {
+    name: 'block private and loopback network targets',
+    run() {
+      assert.strictEqual(isPrivateIpAddress('127.0.0.1'), true);
+      assert.strictEqual(isPrivateIpAddress('10.10.0.5'), true);
+      assert.strictEqual(isPrivateIpAddress('169.254.169.254'), true);
+      assert.strictEqual(isPrivateIpAddress('8.8.8.8'), false);
+    }
+  },
+  {
+    name: 'require non-trivial 12 character passwords',
+    run() {
+      assert.ok(getPasswordValidationError('curta123'));
+      assert.ok(getPasswordValidationError('123456789012'));
+      assert.strictEqual(getPasswordValidationError('uma-frase-segura-2026'), '');
     }
   }
 ];

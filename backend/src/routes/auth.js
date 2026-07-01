@@ -1,19 +1,21 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
-const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
-const { createSession, invalidateSession } = require('../sessionStore');
+const { createSession, invalidateSession, invalidateUserSessions } = require('../sessionStore');
 const { requireAuth } = require('../middleware/auth');
-const { sanitizeEmail, sanitizePhone, sanitizeText, createRateLimiter, isSessionToken } = require('../security');
+const { sanitizeEmail, sanitizePhone, sanitizeText, createRateLimiter, isSessionToken, getPasswordValidationError, assertSafeRemoteUrl } = require('../security');
 const nodemailer = require('nodemailer');
+const { decryptStoredSecret } = require('../aiConfigCrypto');
 
 let resetTokenColumnsEnsured = false;
 let roleAndOwnershipEnsured = false;
+let roleAndOwnershipEnsurePromise = null;
 let professorCreditColumnsEnsured = false;
+let professorCreditColumnsEnsurePromise = null;
 let professorQuotaColumnsEnsured = false;
+let professorQuotaColumnsEnsurePromise = null;
 let adminSmtpSettingsEnsured = false;
-let professorSmtpSettingsEnsured = false;
 let classesTableEnsured = false;
 let studentSignupLinksTableEnsured = false;
 const SIGNUP_LINK_TOKEN_REGEX = /^[a-f0-9]{64}$/i;
@@ -25,40 +27,40 @@ const resetPasswordRateLimiter = createRateLimiter({
 
 const ensureRoleAndOwnershipSetup = async () => {
   if (roleAndOwnershipEnsured) return;
-  await db.query(`
-    ALTER TABLE users
-    DROP CONSTRAINT IF EXISTS users_role_check
-  `);
-  await db.query(`
-    ALTER TABLE users
-    ADD CONSTRAINT users_role_check CHECK (role IN ('student', 'admin', 'professor'))
-  `);
-  await db.query(`
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL
-  `);
-  await db.query(`
-    ALTER TABLE courses
-    ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL
-  `);
-  await db.query(`
-    ALTER TABLE notifications
-    ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL
-  `);
+  if (!roleAndOwnershipEnsurePromise) {
+    roleAndOwnershipEnsurePromise = (async () => {
+      await db.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL`);
+      await db.query(`ALTER TABLE courses ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL`);
+      await db.query(`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL`);
 
-  await db.query(
-    `UPDATE users
-        SET is_active = FALSE
-      WHERE email = $1
-        AND full_name = $2
-        AND role = 'professor'`,
-    ['professor@curso.com', 'Professor Exemplo']
-  );
-  roleAndOwnershipEnsured = true;
+      const demoCredentials = [
+        { email: 'admin@curso.com', password: 'AdminPass2026!' },
+        { email: 'aluno@curso.com', password: 'AlunoLeva10!' },
+        { email: 'professor@curso.com', password: 'ProfessorPass2026!' }
+      ];
+      const { rows: demoUsers } = await db.query(
+        'SELECT id, email, password_hash FROM users WHERE email = ANY($1::text[])',
+        [demoCredentials.map((entry) => entry.email)]
+      );
+      for (const demoUser of demoUsers) {
+        const credential = demoCredentials.find((entry) => entry.email === demoUser.email);
+        if (credential && await bcrypt.compare(credential.password, demoUser.password_hash)) {
+          await db.query('UPDATE users SET is_active = FALSE WHERE id = $1', [demoUser.id]);
+        }
+      }
+      roleAndOwnershipEnsured = true;
+    })().catch((error) => {
+      roleAndOwnershipEnsurePromise = null;
+      throw error;
+    });
+  }
+  await roleAndOwnershipEnsurePromise;
 };
 
 const ensureProfessorCreditColumns = async () => {
   if (professorCreditColumnsEnsured) return;
+  if (!professorCreditColumnsEnsurePromise) {
+    professorCreditColumnsEnsurePromise = (async () => {
   await db.query(`
     ALTER TABLE users
     ADD COLUMN IF NOT EXISTS ai_credits NUMERIC(12,2) NOT NULL DEFAULT 0
@@ -73,10 +75,18 @@ const ensureProfessorCreditColumns = async () => {
     ADD COLUMN IF NOT EXISTS ai_credits_updated_at TIMESTAMPTZ DEFAULT NOW()
   `);
   professorCreditColumnsEnsured = true;
+    })().catch((error) => {
+      professorCreditColumnsEnsurePromise = null;
+      throw error;
+    });
+  }
+  await professorCreditColumnsEnsurePromise;
 };
 
 const ensureProfessorQuotaColumns = async () => {
   if (professorQuotaColumnsEnsured) return;
+  if (!professorQuotaColumnsEnsurePromise) {
+    professorQuotaColumnsEnsurePromise = (async () => {
   await db.query(`
     ALTER TABLE users
     ADD COLUMN IF NOT EXISTS student_limit INT
@@ -86,6 +96,12 @@ const ensureProfessorQuotaColumns = async () => {
     ADD COLUMN IF NOT EXISTS storage_limit_bytes BIGINT
   `);
   professorQuotaColumnsEnsured = true;
+    })().catch((error) => {
+      professorQuotaColumnsEnsurePromise = null;
+      throw error;
+    });
+  }
+  await professorQuotaColumnsEnsurePromise;
 };
 
 const ensureAdminSmtpSettingsTable = async () => {
@@ -106,37 +122,27 @@ const ensureAdminSmtpSettingsTable = async () => {
   adminSmtpSettingsEnsured = true;
 };
 
-const ensureProfessorSmtpSettingsTable = async () => {
-  if (professorSmtpSettingsEnsured) return;
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS professor_smtp_settings (
-      professor_user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-      host TEXT,
-      port INT,
-      secure BOOLEAN,
-      user_email TEXT,
-      user_pass TEXT,
-      from_email TEXT,
-      updated_at TIMESTAMPTZ DEFAULT NOW()
-    )
-  `);
-  professorSmtpSettingsEnsured = true;
-};
-
 const ensureClassesTable = async () => {
   if (classesTableEnsured) return;
   await db.query(`
     CREATE TABLE IF NOT EXISTS classes (
       id UUID PRIMARY KEY,
-      name TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      owner_user_id UUID REFERENCES users(id) ON DELETE CASCADE,
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
+  `);
+  await db.query('ALTER TABLE classes ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE CASCADE');
+  await db.query('ALTER TABLE classes DROP CONSTRAINT IF EXISTS classes_name_key');
+  await db.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS classes_owner_name_unique
+    ON classes (COALESCE(owner_user_id, '00000000-0000-0000-0000-000000000000'::uuid), name)
   `);
   await db.query(
     `INSERT INTO classes (id, name)
      VALUES ($1, 'Turma A')
-     ON CONFLICT (name) DO NOTHING`,
-    [uuidv4()]
+     ON CONFLICT DO NOTHING`,
+    [crypto.randomUUID()]
   );
   classesTableEnsured = true;
 };
@@ -163,7 +169,27 @@ const normalizeSignupLinkToken = (value = '') => {
 const hashSignupLinkToken = (token) => crypto.createHash('sha256').update(String(token || '')).digest('hex');
 const hashResetPasswordToken = (token) => crypto.createHash('sha256').update(String(token || '')).digest('hex');
 
-const buildSessionPayload = (user) => {
+const setSessionCookie = (res, token) => {
+  const isProduction = ['production', 'prod'].includes(String(process.env.NODE_ENV || process.env.APP_ENV || '').toLowerCase());
+  const parts = [
+    `criatyve_session=${encodeURIComponent(token)}`,
+    'HttpOnly',
+    'SameSite=Strict',
+    'Path=/',
+    'Max-Age=86400'
+  ];
+  if (isProduction) parts.push('Secure');
+  res.setHeader('Set-Cookie', parts.join('; '));
+};
+
+const clearSessionCookie = (res) => {
+  const isProduction = ['production', 'prod'].includes(String(process.env.NODE_ENV || process.env.APP_ENV || '').toLowerCase());
+  const parts = ['criatyve_session=', 'HttpOnly', 'SameSite=Strict', 'Path=/', 'Max-Age=0'];
+  if (isProduction) parts.push('Secure');
+  res.setHeader('Set-Cookie', parts.join('; '));
+};
+
+const buildSessionPayload = (user, res) => {
   const sessionToken = createSession({
     id: user.id,
     role: user.role,
@@ -175,8 +201,9 @@ const buildSessionPayload = (user) => {
     studentLimit: Number.isFinite(Number(user.student_limit)) ? Number(user.student_limit) : null,
     storageLimitBytes: Number.isFinite(Number(user.storage_limit_bytes)) ? Number(user.storage_limit_bytes) : null
   });
+  setSessionCookie(res, sessionToken);
   return {
-    token: sessionToken,
+    token: 'cookie-session',
     user: {
       id: user.id,
       email: user.email,
@@ -227,18 +254,8 @@ const getProfessorSignupAvailability = async (professorId, client = db) => {
 const isSmtpConfigUsable = (settings) =>
   Boolean(settings?.host && settings?.user_email && settings?.user_pass);
 
-const resolveSmtpSettingsForStudent = async (studentOwnerUserId) => {
+const resolveSmtpSettingsForStudent = async () => {
   await ensureAdminSmtpSettingsTable();
-  await ensureProfessorSmtpSettingsTable();
-  if (studentOwnerUserId) {
-    const { rows } = await db.query(
-      'SELECT host, port, secure, user_email, user_pass, from_email FROM professor_smtp_settings WHERE professor_user_id = $1',
-      [studentOwnerUserId]
-    );
-    if (isSmtpConfigUsable(rows[0])) {
-      return rows[0];
-    }
-  }
   const { rows } = await db.query(
     'SELECT host, port, secure, user_email, user_pass, from_email FROM admin_smtp_settings WHERE id = 1'
   );
@@ -268,6 +285,11 @@ const loginRateLimiter = createRateLimiter({
   max: 12,
   keyFn: (req) => `${req.ip}:${sanitizeEmail(req.body?.email || '')}`
 });
+const authIpRateLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 120,
+  keyFn: (req) => `${req.ip}:auth-ip`
+});
 const signupLinkLookupRateLimiter = createRateLimiter({
   windowMs: 15 * 60 * 1000,
   max: 60,
@@ -283,8 +305,13 @@ const selfSignupRateLimiter = createRateLimiter({
   max: 8,
   keyFn: (req) => `${req.ip}:${sanitizeEmail(req.body?.email || '')}:self-signup`
 });
+const signupIpRateLimiter = createRateLimiter({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  keyFn: (req) => `${req.ip}:signup-ip`
+});
 
-router.post('/login', loginRateLimiter, async (req, res) => {
+router.post('/login', authIpRateLimiter, loginRateLimiter, async (req, res) => {
   await ensureRoleAndOwnershipSetup();
   await ensureProfessorCreditColumns();
   await ensureProfessorQuotaColumns();
@@ -309,10 +336,10 @@ router.post('/login', loginRateLimiter, async (req, res) => {
     return res.status(403).json({ message: 'Conta bloqueada. Verifique o pagamento.' });
   }
 
-  res.json(buildSessionPayload(user));
+  res.json(buildSessionPayload(user, res));
 });
 
-router.post('/signup', selfSignupRateLimiter, async (req, res) => {
+router.post('/signup', signupIpRateLimiter, selfSignupRateLimiter, async (req, res) => {
   await ensureRoleAndOwnershipSetup();
   await ensureProfessorCreditColumns();
   await ensureProfessorQuotaColumns();
@@ -333,9 +360,8 @@ router.post('/signup', selfSignupRateLimiter, async (req, res) => {
       message: 'O cadastro de professor nao pode ser feito por esta rota. Use o checkout da assinatura ou o painel administrativo.'
     });
   }
-  if (password.length < 8) {
-    return res.status(400).json({ message: 'A senha precisa ter pelo menos 8 caracteres.' });
-  }
+  const passwordError = getPasswordValidationError(password);
+  if (passwordError) return res.status(400).json({ message: passwordError });
 
   const { rows: existingRows } = await db.query('SELECT id FROM users WHERE email = $1', [email]);
   if (existingRows.length) {
@@ -343,7 +369,7 @@ router.post('/signup', selfSignupRateLimiter, async (req, res) => {
   }
 
   const passwordHash = await bcrypt.hash(password, 10);
-  const userId = uuidv4();
+  const userId = crypto.randomUUID();
   const isProfessor = role === 'professor';
   const className = isProfessor ? 'Professor' : 'Turma A';
   const aiCredits = 0;
@@ -379,7 +405,7 @@ router.post('/signup', selfSignupRateLimiter, async (req, res) => {
   }
 
   const { rows: createdRows } = await db.query('SELECT * FROM users WHERE id = $1', [userId]);
-  return res.status(201).json(buildSessionPayload(createdRows[0]));
+  return res.status(201).json(buildSessionPayload(createdRows[0], res));
 });
 
 router.post('/logout', requireAuth, (req, res) => {
@@ -388,14 +414,17 @@ router.post('/logout', requireAuth, (req, res) => {
   if (isSessionToken(token)) {
     invalidateSession(token);
   }
+  if (isSessionToken(req.sessionToken)) {
+    invalidateSession(req.sessionToken);
+  }
+  clearSessionCookie(res);
   res.status(204).send();
 });
 
-router.post('/forgot-password', loginRateLimiter, async (req, res) => {
+router.post('/forgot-password', authIpRateLimiter, loginRateLimiter, async (req, res) => {
   await ensureRoleAndOwnershipSetup();
   await ensureResetTokenColumns();
   await ensureAdminSmtpSettingsTable();
-  await ensureProfessorSmtpSettingsTable();
   const email = sanitizeEmail(req.body?.email || '');
   if (!email) {
     return res.status(400).json({ message: 'Email é obrigatório' });
@@ -420,12 +449,13 @@ router.post('/forgot-password', loginRateLimiter, async (req, res) => {
   );
 
   try {
-    const smtp = await resolveSmtpSettingsForStudent(user.owner_user_id || null);
+    const smtp = await resolveSmtpSettingsForStudent();
     
     if (!isSmtpConfigUsable(smtp)) {
-      console.error('SMTP não configurado. Token não enviado:', token);
+      console.error('SMTP nao configurado. O token de recuperacao nao foi enviado.');
       return;
     }
+    await assertSafeRemoteUrl(`https://${smtp.host}`);
 
     const transporter = nodemailer.createTransport({
       host: smtp.host,
@@ -433,11 +463,11 @@ router.post('/forgot-password', loginRateLimiter, async (req, res) => {
       secure: smtp.secure !== false,
       auth: {
         user: smtp.user_email,
-        pass: smtp.user_pass
+        pass: decryptStoredSecret(smtp.user_pass)
       },
-      tls: {
-        rejectUnauthorized: false
-      },
+      tls: { rejectUnauthorized: true },
+      disableFileAccess: true,
+      disableUrlAccess: true,
       family: 4 // Força o uso de IPv4 para evitar erros ENETUNREACH
     });
 
@@ -453,7 +483,7 @@ router.post('/forgot-password', loginRateLimiter, async (req, res) => {
   }
 });
 
-router.post('/reset-password', resetPasswordRateLimiter, async (req, res) => {
+router.post('/reset-password', authIpRateLimiter, resetPasswordRateLimiter, async (req, res) => {
   await ensureRoleAndOwnershipSetup();
   await ensureResetTokenColumns();
   const email = sanitizeEmail(req.body?.email || '');
@@ -463,9 +493,8 @@ router.post('/reset-password', resetPasswordRateLimiter, async (req, res) => {
   if (!email || !token || !newPassword) {
     return res.status(400).json({ message: 'Email, token e nova senha são obrigatórios' });
   }
-  if (newPassword.length < 8) {
-    return res.status(400).json({ message: 'A senha precisa ter pelo menos 8 caracteres.' });
-  }
+  const passwordError = getPasswordValidationError(newPassword);
+  if (passwordError) return res.status(400).json({ message: passwordError });
 
   const tokenHash = hashResetPasswordToken(token);
 
@@ -484,10 +513,17 @@ router.post('/reset-password', resetPasswordRateLimiter, async (req, res) => {
   }
 
   const hashedPassword = await bcrypt.hash(newPassword, 10);
-  await db.query(
-    'UPDATE users SET password_hash = $1, reset_password_token = NULL, reset_password_expires = NULL WHERE id = $2',
-    [hashedPassword, user.id]
+  const { rows: updatedRows } = await db.query(
+    `UPDATE users
+        SET password_hash = $1, reset_password_token = NULL, reset_password_expires = NULL
+      WHERE id = $2 AND reset_password_token = $3
+    RETURNING id`,
+    [hashedPassword, user.id, tokenHash]
   );
+  if (!updatedRows.length) {
+    return res.status(400).json({ message: 'Token invalido ou ja utilizado' });
+  }
+  invalidateUserSessions(user.id);
 
   res.json({ message: 'Senha atualizada com sucesso' });
 });
@@ -541,7 +577,7 @@ router.get('/student-signup-link/:token', signupLinkLookupRateLimiter, async (re
   });
 });
 
-router.post('/student-signup-link/:token/register', signupLinkRegisterRateLimiter, async (req, res) => {
+router.post('/student-signup-link/:token/register', signupIpRateLimiter, signupLinkRegisterRateLimiter, async (req, res) => {
   await ensureRoleAndOwnershipSetup();
   await ensureProfessorQuotaColumns();
   await ensureStudentSignupLinksTable();
@@ -557,9 +593,8 @@ router.post('/student-signup-link/:token/register', signupLinkRegisterRateLimite
   if (!fullName || !email || !password) {
     return res.status(400).json({ message: 'Nome, email e senha são obrigatórios.' });
   }
-  if (password.length < 8) {
-    return res.status(400).json({ message: 'A senha precisa ter pelo menos 8 caracteres.' });
-  }
+  const passwordError = getPasswordValidationError(password);
+  if (passwordError) return res.status(400).json({ message: passwordError });
   const tokenHash = hashSignupLinkToken(inviteToken);
   const client = await db.getClient();
   try {
@@ -570,7 +605,7 @@ router.post('/student-signup-link/:token/register', signupLinkRegisterRateLimite
          JOIN users u ON u.id = l.professor_user_id
         WHERE l.token_hash = $1
           AND l.revoked_at IS NULL
-          AND u.role = 'professor'
+          AND u.role IN ('professor', 'admin')
         FOR UPDATE OF u`,
       [tokenHash]
     );
@@ -601,7 +636,13 @@ router.post('/student-signup-link/:token/register', signupLinkRegisterRateLimite
       return res.status(409).json({ message: 'Já existe um usuário cadastrado com este email.' });
     }
     const passwordHash = await bcrypt.hash(password, 10);
-    const userId = uuidv4();
+    const userId = crypto.randomUUID();
+    await client.query(
+      `INSERT INTO classes (id, name, owner_user_id)
+       VALUES ($1, 'Turma A', $2)
+       ON CONFLICT DO NOTHING`,
+      [crypto.randomUUID(), invite.professor_user_id]
+    );
     await client.query(
       `INSERT INTO users (id, full_name, email, phone, password_hash, role, class_name, is_active, owner_user_id)
        VALUES ($1, $2, $3, $4, $5, 'student', $6, TRUE, $7)`,
@@ -609,7 +650,7 @@ router.post('/student-signup-link/:token/register', signupLinkRegisterRateLimite
     );
     const { rows: createdRows } = await client.query('SELECT * FROM users WHERE id = $1', [userId]);
     await client.query('COMMIT');
-    return res.status(201).json(buildSessionPayload(createdRows[0]));
+    return res.status(201).json(buildSessionPayload(createdRows[0], res));
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
     if (error?.code === '23505') {

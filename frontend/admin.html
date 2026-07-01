@@ -55,7 +55,7 @@
             </div>
             <div class="field-group">
               <label for="adminStudentPassword">Senha temporaria</label>
-              <input id="adminStudentPassword" type="password" required placeholder="Ataque123" />
+              <input id="adminStudentPassword" type="password" required minlength="12" placeholder="Minimo de 12 caracteres" />
             </div>
             <div class="field-group">
               <label for="adminStudentClass">Turma</label>
@@ -152,7 +152,7 @@
             </div>
             <div class="field-group">
               <label for="adminProfessorPassword">Senha temporaria</label>
-              <input id="adminProfessorPassword" type="password" required placeholder="Professor123" />
+              <input id="adminProfessorPassword" type="password" required minlength="12" placeholder="Minimo de 12 caracteres" />
             </div>
             <div class="field-group">
               <label for="adminProfessorCredits">Créditos iniciais de IA</label>
@@ -280,9 +280,14 @@
               <input id="aiProviderLabel" value="DeepSeek" placeholder="Ex: DeepSeek" />
             </div>
             <div class="field-group">
-              <label for="aiCreditCostPerCall">Custo por chamada de IA</label>
-              <input id="aiCreditCostPerCall" type="number" min="0.1" step="0.1" value="0.5" />
-              <small style="color:#8b92b1;">Padrão recomendado: 0,5 crédito por chamada.</small>
+              <label for="aiTextCreditCostPerCall">Custo por chamada de IA de texto</label>
+              <input id="aiTextCreditCostPerCall" type="number" min="0.1" step="0.1" value="0.5" />
+              <small style="color:#8b92b1;">Usado em planejamento, geração de slides, transcrição e comandos de texto.</small>
+            </div>
+            <div class="field-group">
+              <label for="aiImageCreditCostPerCall">Custo por chamada de IA de imagem</label>
+              <input id="aiImageCreditCostPerCall" type="number" min="0.1" step="0.1" value="1.0" />
+              <small style="color:#8b92b1;">Usado em Nano Banana, remover fundo, comparar imagens e imagens geradas nos slides.</small>
             </div>
             <div class="field-group">
               <label for="aiProviderKey">Identificador do provedor</label>
@@ -294,7 +299,7 @@
             </div>
             <div class="field-group">
               <label for="aiModel">Modelo</label>
-              <input id="aiModel" value="deepseek-chat" placeholder="Ex: deepseek-chat" />
+              <input id="aiModel" value="deepseek-v4-pro" placeholder="Ex: deepseek-v4-pro" />
             </div>
             <div class="field-group">
               <label for="aiApiKey">API key</label>

@@ -707,9 +707,9 @@ export const createBuilderCameraModule = (deps) => {
         onClick: () => {
           const currentSlide = getActiveSlide();
           if (currentSlide) {
-            onDisconnectStudentCamera?.(element);
             currentSlide.elements = currentSlide.elements.filter((item) => item.id !== element.id);
             builderStudentCameraCallState.delete(String(element.id || ''));
+            onDisconnectStudentCamera?.(element);
             renderSlide();
             scheduleBuilderAutosave();
           }
