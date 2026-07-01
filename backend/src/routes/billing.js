@@ -34,9 +34,22 @@ const ASAAS_BASE_URL = sanitizeText(
   255
 );
 const PUBLIC_APP_URL = sanitizeText(process.env.PUBLIC_APP_URL || '', 255).replace(/\/+$/, '');
+const ASAAS_WEBHOOK_ENFORCE_SOURCE_IP = String(process.env.ASAAS_WEBHOOK_ENFORCE_SOURCE_IP || '')
+  .toLowerCase() === 'true';
+const ASAAS_WEBHOOK_ALLOWED_IPS = new Set(
+  String(process.env.ASAAS_WEBHOOK_ALLOWED_IPS || '')
+    .split(',')
+    .map((entry) => sanitizeText(entry, 64))
+    .filter(Boolean)
+);
+const ASAAS_PRODUCTION_WEBHOOK_IPS = new Set([
+  '52.67.12.206',
+  '18.230.8.159',
+  '54.94.136.112',
+  '54.94.183.101'
+]);
 
 const ACTIVE_PAYMENT_EVENTS = new Set(['PAYMENT_CONFIRMED', 'PAYMENT_RECEIVED']);
-const TRIAL_ACTIVATION_EVENTS = new Set(['PAYMENT_CREATED', 'PAYMENT_CONFIRMED', 'PAYMENT_RECEIVED']);
 const DEACTIVATION_EVENTS = new Set([
   'PAYMENT_OVERDUE',
   'PAYMENT_DELETED',
@@ -143,6 +156,33 @@ const normalizePlanCodeFromExternalReference = (externalReference = '') => {
 };
 
 const buildRandomPassword = () => crypto.randomBytes(9).toString('base64url') + 'Aa1!';
+
+const normalizeIpAddress = (value = '') => {
+  const normalized = sanitizeText(value, 120).split(',')[0].trim().toLowerCase();
+  if (!normalized) return '';
+  return normalized.startsWith('::ffff:') ? normalized.slice(7) : normalized;
+};
+
+const extractWebhookSourceIp = (req) =>
+  normalizeIpAddress(req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || '');
+
+const isWebhookSourceIpAllowed = (req) => {
+  const sourceIp = extractWebhookSourceIp(req);
+  if (!ASAAS_WEBHOOK_ENFORCE_SOURCE_IP) {
+    return true;
+  }
+  if (!sourceIp) {
+    return false;
+  }
+  if (ASAAS_WEBHOOK_ALLOWED_IPS.size) {
+    return ASAAS_WEBHOOK_ALLOWED_IPS.has(sourceIp);
+  }
+  if (ASAAS_ENV === 'production') {
+    return ASAAS_PRODUCTION_WEBHOOK_IPS.has(sourceIp);
+  }
+  return true;
+};
+
 const buildWebhookTokenIsValid = (req) => {
   if (!ASAAS_WEBHOOK_AUTH_TOKEN) {
     return false;
@@ -279,11 +319,13 @@ const ensureBillingTables = async () => {
       event_type TEXT NOT NULL,
       processing_status TEXT NOT NULL DEFAULT 'PENDING',
       payload JSONB NOT NULL,
+      source_ip TEXT,
       error_message TEXT,
       processed_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  await db.query('ALTER TABLE asaas_webhook_events ADD COLUMN IF NOT EXISTS source_ip TEXT');
   billingTablesEnsured = true;
     })().catch((error) => {
       billingTablesEnsurePromise = null;
@@ -508,39 +550,42 @@ const activateProfessorFromSubscription = async (client, subscription) => {
   }
   const fullName = sanitizeText(subscription?.payer_name || 'Professor Criatyve', 160) || 'Professor Criatyve';
   const plan = getPlanConfig(subscription?.plan_code || 'pro');
-
-  const { rows: existingUsers } = await client.query(
-    'SELECT * FROM users WHERE email = $1 LIMIT 1',
-    [email]
-  );
-  let professor = existingUsers[0] || null;
   let temporaryPassword = null;
+  temporaryPassword = buildRandomPassword();
+  const passwordHash = await bcrypt.hash(temporaryPassword, 10);
+  const professorId = crypto.randomUUID();
+  const insertResult = await client.query(
+    `
+      INSERT INTO users (
+        id, full_name, email, phone, password_hash, role, class_name, is_active, owner_user_id,
+        ai_credits, ai_credits_updated_at, student_limit, storage_limit_bytes
+      )
+      VALUES ($1, $2, $3, NULL, $4, 'professor', 'Professor', TRUE, NULL, $5, NOW(), $6, $7)
+      ON CONFLICT (email) DO NOTHING
+      RETURNING *
+    `,
+    [
+      professorId,
+      fullName,
+      email,
+      passwordHash,
+      plan.aiCredits,
+      plan.studentLimit,
+      plan.storageLimitBytes
+    ]
+  );
+  let professor = insertResult.rows[0] || null;
 
   if (!professor) {
-    temporaryPassword = buildRandomPassword();
-    const passwordHash = await bcrypt.hash(temporaryPassword, 10);
-    const professorId = crypto.randomUUID();
-    await client.query(
-      `
-        INSERT INTO users (
-          id, full_name, email, phone, password_hash, role, class_name, is_active, owner_user_id,
-          ai_credits, ai_credits_updated_at, student_limit, storage_limit_bytes
-        )
-        VALUES ($1, $2, $3, NULL, $4, 'professor', 'Professor', TRUE, NULL, $5, NOW(), $6, $7)
-      `,
-      [
-        professorId,
-        fullName,
-        email,
-        passwordHash,
-        plan.aiCredits,
-        plan.studentLimit,
-        plan.storageLimitBytes
-      ]
+    temporaryPassword = null;
+    const { rows: existingUsers } = await client.query(
+      'SELECT * FROM users WHERE email = $1 LIMIT 1',
+      [email]
     );
-    const { rows: createdUsers } = await client.query('SELECT * FROM users WHERE id = $1', [professorId]);
-    professor = createdUsers[0];
-  } else {
+    professor = existingUsers[0] || null;
+    if (!professor) {
+      throw new Error('Nao foi possivel localizar o professor apos confirmar o pagamento.');
+    }
     if (!['professor', 'admin'].includes(professor.role)) {
       throw new Error('Ja existe uma conta com este email em outro perfil. Ajuste manualmente antes de ativar a assinatura.');
     }
@@ -549,13 +594,13 @@ const activateProfessorFromSubscription = async (client, subscription) => {
         UPDATE users
            SET full_name = COALESCE(NULLIF($1, ''), full_name),
                is_active = TRUE,
-               ai_credits = COALESCE(ai_credits, 0),
+               ai_credits = GREATEST(COALESCE(ai_credits, 0), $2),
                ai_credits_updated_at = NOW(),
-               student_limit = COALESCE($2, student_limit),
-               storage_limit_bytes = COALESCE($3, storage_limit_bytes)
-         WHERE id = $4
+               student_limit = GREATEST(COALESCE(student_limit, 0), $3),
+               storage_limit_bytes = GREATEST(COALESCE(storage_limit_bytes, 0), $4)
+         WHERE id = $5
       `,
-      [fullName, plan.studentLimit, plan.storageLimitBytes, professor.id]
+      [fullName, plan.aiCredits, plan.studentLimit, plan.storageLimitBytes, professor.id]
     );
     const { rows: refreshedUsers } = await client.query('SELECT * FROM users WHERE id = $1', [professor.id]);
     professor = refreshedUsers[0];
@@ -597,17 +642,15 @@ const deactivateProfessorFromSubscription = async (client, subscription, nextSta
 };
 
 const shouldActivateAccountForEvent = (eventType, planCode) => {
-  if (planCode === 'trial-30-dias') {
-    return TRIAL_ACTIVATION_EVENTS.has(eventType);
-  }
   return ACTIVE_PAYMENT_EVENTS.has(eventType);
 };
 
-const processAsaasWebhookEvent = async (eventPayload) => {
+const processAsaasWebhookEvent = async (eventPayload, requestMeta = {}) => {
   await ensureBillingTables();
   const eventId = sanitizeText(eventPayload?.id || '', 120);
   const eventType = sanitizeText(eventPayload?.event || '', 80);
   let payment = eventPayload?.payment && typeof eventPayload.payment === 'object' ? { ...eventPayload.payment } : null;
+  const sourceIp = sanitizeText(requestMeta.sourceIp || '', 120) || null;
 
   if (!eventId || !eventType || !payment?.id) {
     return { ignored: true, reason: 'invalid-payload' };
@@ -632,10 +675,10 @@ const processAsaasWebhookEvent = async (eventPayload) => {
   try {
     await db.query(
       `
-        INSERT INTO asaas_webhook_events (asaas_event_id, event_type, processing_status, payload)
-        VALUES ($1, $2, 'PENDING', $3)
+        INSERT INTO asaas_webhook_events (asaas_event_id, event_type, processing_status, payload, source_ip)
+        VALUES ($1, $2, 'PENDING', $3, $4)
       `,
-      [eventId, eventType, eventPayload]
+      [eventId, eventType, eventPayload, sourceIp]
     );
   } catch (error) {
     if (error?.code === '23505') {
@@ -648,9 +691,9 @@ const processAsaasWebhookEvent = async (eventPayload) => {
       }
       await db.query(
         `UPDATE asaas_webhook_events
-            SET processing_status = 'PENDING', payload = $2, error_message = NULL, processed_at = NULL
+            SET processing_status = 'PENDING', payload = $2, source_ip = $3, error_message = NULL, processed_at = NULL
           WHERE asaas_event_id = $1`,
-        [eventId, eventPayload]
+        [eventId, eventPayload, sourceIp]
       );
     } else {
       throw error;
@@ -851,9 +894,14 @@ router.post('/webhook/asaas', async (req, res) => {
   if (!buildWebhookTokenIsValid(req)) {
     return res.status(401).json({ received: false, message: 'Token do webhook invalido.' });
   }
+  if (!isWebhookSourceIpAllowed(req)) {
+    return res.status(403).json({ received: false, message: 'Origem do webhook nao autorizada.' });
+  }
 
   try {
-    const result = await processAsaasWebhookEvent(req.body || {});
+    const result = await processAsaasWebhookEvent(req.body || {}, {
+      sourceIp: extractWebhookSourceIp(req)
+    });
     return res.status(200).json({
       received: true,
       duplicate: Boolean(result?.duplicate),

@@ -46,6 +46,11 @@ function validateSecurityConfiguration() {
     if (!Number.parseInt(process.env.TRUST_PROXY_HOPS || '0', 10)) {
       warnings.push('Defina TRUST_PROXY_HOPS=1 no EasyPanel para IP real, rate limit e HSTS funcionarem corretamente.');
     }
+    const enforceWebhookIp = String(process.env.ASAAS_WEBHOOK_ENFORCE_SOURCE_IP || '').toLowerCase() === 'true';
+    const webhookAllowedIps = String(process.env.ASAAS_WEBHOOK_ALLOWED_IPS || '').trim();
+    if (enforceWebhookIp && !webhookAllowedIps) {
+      warnings.push('ASAAS_WEBHOOK_ENFORCE_SOURCE_IP=true sem ASAAS_WEBHOOK_ALLOWED_IPS pode bloquear webhooks legitimos atras de proxy.');
+    }
   }
 
   warnings.forEach((warning) => console.warn(`[security] ${warning}`));
