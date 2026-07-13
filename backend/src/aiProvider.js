@@ -576,7 +576,7 @@ function createAiCapabilityCatalog() {
       text: ['content', 'x', 'y', 'width', 'height', 'fontSize', 'fontFamily', 'fontWeight', 'textColor', 'textAlign', 'backgroundColor', 'hasTextBackground', 'hasTextBorder', 'hasTextBlock', 'studentCanDrag', 'initiallyHidden', 'opacity', 'animationType', 'animationDuration', 'animationDelay', 'animationLoop', 'motionFrames'],
       block: ['content', 'x', 'y', 'width', 'height', 'shape', 'backgroundColor', 'solidColor', 'useGradient', 'gradientStart', 'gradientEnd', 'textColor', 'fontSize', 'fontFamily', 'fontWeight', 'textAlign', 'textureImage', 'textureFit', 'studentCanDrag', 'initiallyHidden', 'opacity', 'animationType', 'motionFrames'],
       image: ['src', 'generationPrompt', 'x', 'y', 'width', 'height', 'objectFit', 'studentCanDrag', 'initiallyHidden', 'opacity', 'animationType', 'motionFrames'],
-      audio: ['src', 'x', 'y', 'width', 'height', 'audioVisible', 'audioLoop', 'opacity'],
+      audio: ['src', 'x', 'y', 'width', 'height', 'audioVisible', 'audioLoop', 'collectStudentAudio', 'opacity'],
       video: ['src', 'provider', 'embedSrc', 'x', 'y', 'width', 'height', 'opacity', 'videoTriggers'],
       camera: ['x', 'y', 'width', 'height', 'opacity'],
       quiz: ['question', 'options', 'correctOption', 'successMessage', 'errorMessage', 'actionLabel', 'quizBackgroundColor', 'quizQuestionColor', 'quizOptionBackgroundColor', 'quizOptionTextColor', 'quizButtonBackgroundColor', 'points', 'lockOnWrong', 'x', 'y', 'width', 'height'],
@@ -589,7 +589,7 @@ function createAiCapabilityCatalog() {
     triggerSchemas: {
       interactionTrigger: ['id', 'name', 'enabled', 'time', 'keys', 'visibleKey', 'actionConfig'],
       videoTrigger: ['id', 'name', 'enabled', 'time', 'actionConfig'],
-      actionConfig: ['type', 'targetSlideId', 'targetElementId', 'text', 'url', 'generationPrompt', 'insertX', 'insertY', 'insertWidth', 'insertHeight', 'moveByX', 'moveByY', 'moveDuration', 'videoTime', 'replaceMode', 'replaceText', 'replaceCounterStart', 'replaceCounterStep', 'quizQuestion', 'quizOptions', 'quizCorrectOption', 'successMessage', 'errorMessage', 'actionLabel', 'quizBackgroundColor', 'quizQuestionColor', 'quizOptionBackgroundColor', 'quizOptionTextColor', 'quizButtonBackgroundColor', 'points', 'lockOnWrong', 'audioVisible', 'audioLoop', 'playSourceVideoOnValidate', 'detectorAcceptedDrag', 'detectorMinMatchCount', 'detectorTriggerOnce', 'requireAllButtonsInGroup', 'ruleGroup', 'textColor', 'backgroundColor', 'textAlign', 'fontFamily', 'fontWeight', 'fontSize', 'hasTextBackground', 'hasTextBorder', 'hasTextBlock']
+      actionConfig: ['type', 'targetSlideId', 'targetElementId', 'text', 'url', 'generationPrompt', 'insertX', 'insertY', 'insertWidth', 'insertHeight', 'moveByX', 'moveByY', 'moveDuration', 'videoTime', 'replaceMode', 'replaceText', 'replaceCounterStart', 'replaceCounterStep', 'quizQuestion', 'quizOptions', 'quizCorrectOption', 'successMessage', 'errorMessage', 'actionLabel', 'quizBackgroundColor', 'quizQuestionColor', 'quizOptionBackgroundColor', 'quizOptionTextColor', 'quizButtonBackgroundColor', 'points', 'lockOnWrong', 'audioVisible', 'audioLoop', 'collectStudentAudio', 'playSourceVideoOnValidate', 'detectorAcceptedDrag', 'detectorMinMatchCount', 'detectorTriggerOnce', 'requireAllButtonsInGroup', 'ruleGroup', 'textColor', 'backgroundColor', 'textAlign', 'fontFamily', 'fontWeight', 'fontSize', 'hasTextBackground', 'hasTextBorder', 'hasTextBlock']
     }
   };
 }
@@ -747,7 +747,7 @@ function collectTopLevelElementPatch(entry = {}) {
     'quizOptionBackgroundColor', 'quizOptionTextColor', 'quizButtonBackgroundColor', 'lockOnWrong',
     'animationLoop', 'initiallyHidden', 'motionFrames', 'x', 'y', 'width', 'height', 'rotation', 'zIndex', 'fontSize',
     'correctOption', 'animationDuration', 'animationDelay', 'points', 'options', 'actionConfig',
-    'textAlign', 'opacity', 'objectFit', 'textureImage', 'textureFit', 'audioVisible', 'audioLoop',
+    'textAlign', 'opacity', 'objectFit', 'textureImage', 'textureFit', 'audioVisible', 'audioLoop', 'collectStudentAudio',
     'interactionTriggers', 'videoTriggers', 'placeholder', 'submitLabel', 'compareText', 'compareCaseSensitive',
     'compareImageEnabled', 'compareImageReference', 'allowImage', 'allowAudio', 'labelColor', 'inputTextColor',
     'submitButtonColor', 'submitButtonTextColor'
@@ -883,6 +883,7 @@ function normalizeElementPatch(element) {
   if (typeof element.textureFit === 'string') normalized.textureFit = element.textureFit.trim();
   if (typeof element.audioVisible === 'boolean') normalized.audioVisible = element.audioVisible;
   if (typeof element.audioLoop === 'boolean') normalized.audioLoop = element.audioLoop;
+  if (typeof element.collectStudentAudio === 'boolean') normalized.collectStudentAudio = element.collectStudentAudio;
   if (typeof element.hasTextBackground === 'boolean') normalized.hasTextBackground = element.hasTextBackground;
   if (typeof element.hasTextBorder === 'boolean') normalized.hasTextBorder = element.hasTextBorder;
   if (typeof element.hasTextBlock === 'boolean') normalized.hasTextBlock = element.hasTextBlock;
@@ -1025,6 +1026,9 @@ function normalizeActionConfig(config) {
   }
   if (typeof config.audioLoop === 'boolean') {
     normalized.audioLoop = config.audioLoop;
+  }
+  if (typeof config.collectStudentAudio === 'boolean') {
+    normalized.collectStudentAudio = config.collectStudentAudio;
   }
   if (typeof config.playSourceVideoOnValidate === 'boolean') {
     normalized.playSourceVideoOnValidate = config.playSourceVideoOnValidate;
@@ -5027,6 +5031,33 @@ async function proposeMagicPenActions({
   };
 }
 
+async function editImageElementWithNanoBanana({
+  settingsRow,
+  request,
+  attachments = [],
+  sourceBounds = null,
+  stageSize = null
+}) {
+  const normalizedAttachments = normalizeImageAttachments(attachments);
+  const resolvedStageSize = stageSize?.width && stageSize?.height ? stageSize : DEFAULT_STAGE_SIZE;
+  const normalizedBounds = normalizeMagicPenSourceBounds(sourceBounds, resolvedStageSize);
+  const attachmentInsights = await describeAttachmentsWithNanoBanana({
+    imageSettings: settingsRow,
+    attachments: normalizedAttachments,
+    request
+  });
+  return generateImageWithNanoBanana({
+    imageSettings: settingsRow,
+    prompt: buildMagicPenImagePrompt({
+      request,
+      attachmentInsights,
+      sourceBounds: normalizedBounds,
+      stageSize: resolvedStageSize
+    }),
+    attachments: normalizedAttachments
+  });
+}
+
 async function enrichActionsWithGeneratedImages(actions, settingsRow, attachments = [], context = {}) {
   if (context?.imagePolicy === 'none') {
     return applyImagePolicyToActions(actions, context?.request || '', context?.currentPlanItem || { imageIntent: 'none' });
@@ -5761,6 +5792,7 @@ async function proposeNextSlideAction({
 module.exports = {
   buildPublicAiSettings,
   normalizeActionList,
+  editImageElementWithNanoBanana,
   proposeMagicPenActions,
   proposeNextSlideAction,
   proposeSlideExecutionPlan,

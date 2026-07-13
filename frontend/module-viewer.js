@@ -1207,6 +1207,7 @@ const formatProgressEventType = (type = '') => {
     quiz_answer: 'Respondeu quiz',
     drag_end: 'Arrastou elemento',
     text_input: 'Preencheu campo',
+    audio_input: 'Enviou audio',
     drawing: 'Rabiscou no quadro'
   };
   return labels[type] || type || 'Evento';
@@ -1494,6 +1495,33 @@ const formatCameraAccessError = (error) => {
   }
   const fallback = String(error?.message || '').trim();
   return fallback || 'Nao foi possivel acessar a webcam.';
+};
+
+const formatAudioAccessError = (error) => {
+  const errorName = String(error?.name || '').trim();
+  if (errorName === 'NotAllowedError' || errorName === 'SecurityError') {
+    return 'O navegador ou o sistema bloqueou o microfone para este site. Libere a permissao do microfone e tente novamente.';
+  }
+  if (errorName === 'NotReadableError' || errorName === 'TrackStartError') {
+    return 'O microfone parece estar ocupado por outro programa ou bloqueado pelo sistema.';
+  }
+  if (errorName === 'NotFoundError' || errorName === 'DevicesNotFoundError') {
+    return 'Nenhum microfone foi encontrado neste dispositivo. Conecte um microfone ou envie um arquivo de audio.';
+  }
+  if (errorName === 'OverconstrainedError' || errorName === 'ConstraintNotSatisfiedError') {
+    return 'O microfone deste dispositivo nao aceitou a configuracao solicitada.';
+  }
+  if (errorName === 'AbortError') {
+    return 'O navegador interrompeu a inicializacao do microfone. Tente novamente.';
+  }
+  const fallback = String(error?.message || '').trim();
+  return fallback || 'Nao foi possivel acessar o microfone.';
+};
+
+const isMissingAudioInputDeviceError = (error) => {
+  const errorName = String(error?.name || '').trim();
+  const message = String(error?.message || '').toLowerCase();
+  return errorName === 'NotFoundError' || errorName === 'DevicesNotFoundError' || message.includes('device not found');
 };
 
 const chooseCameraRecordingMimeType = () => {
@@ -2247,6 +2275,7 @@ const normalizeAudioElement = (element) => {
   normalizeMediaCaptionConfig(element, 'audio');
   element.audioVisible = typeof element.audioVisible === 'boolean' ? element.audioVisible : true;
   element.audioLoop = Boolean(element.audioLoop);
+  element.collectStudentAudio = Boolean(element.collectStudentAudio);
   element.width = Math.max(180, Number(element.width) || 260);
   element.height = Math.max(54, Number(element.height) || 70);
 };
@@ -3885,11 +3914,12 @@ const persistQuizAttemptToBackend = async ({ module, slideKey, quizKey, attempt 
   }
 };
 
-const persistInputResponseToBackend = async ({ module, slide, element, response, matched }) => {
+const persistInputResponseToBackendLegacy = async ({ module, slide, element, response, matched }) => {
   if (viewerState.isPublic || isReplayMode() || !module?.courseId || !element?.id || !slide || !response) {
     return { ok: false };
   }
   const inputKey = getInputResponseKey(module.id, getStableSlideKey(slide, viewerState.slideIndex), element.id);
+  const isAudioCapture = element?.type === 'audio';
   const payload = {
     key: inputKey,
     moduleId: module.id,
@@ -3897,7 +3927,7 @@ const persistInputResponseToBackend = async ({ module, slide, element, response,
     slideId: getStableSlideKey(slide, viewerState.slideIndex),
     slideTitle: slide?.title || '',
     elementId: element.id,
-    elementType: 'input',
+    elementType: isAudioCapture ? 'audio' : 'input',
     text: response.text || '',
     image: response.image || '',
     audio: response.audio || '',
@@ -3914,19 +3944,21 @@ const persistInputResponseToBackend = async ({ module, slide, element, response,
         interactiveProgress: getModuleInteractiveProgress(module),
         inputResponse: payload,
         progressEvent: {
-          type: 'text_input',
+          type: isAudioCapture ? 'audio_input' : 'text_input',
           slideId: payload.slideId,
           slideTitle: payload.slideTitle,
           elementId: element.id,
-          elementType: 'input',
-          summary: matched
+          elementType: isAudioCapture ? 'audio' : 'input',
+          summary: isAudioCapture
             ? `Enviou uma resposta válida em "${slide?.title || payload.slideId}".`
             : `Enviou uma resposta que ainda não corresponde ao esperado em "${slide?.title || payload.slideId}".`,
           details: {
             submittedText: response.text || '',
             matched,
             hasImage: Boolean(response.image),
-            hasAudio: Boolean(response.audio)
+            hasAudio: Boolean(response.audio),
+            mediaType: response.audio ? 'audio' : null,
+            mediaUrl: response.audio || null
           }
         }
       })
@@ -3946,6 +3978,73 @@ const persistInputResponseToBackend = async ({ module, slide, element, response,
   return { ok: false };
 };
 
+const persistInputResponseToBackend = async ({ module, slide, element, response, matched }) => {
+  if (viewerState.isPublic || isReplayMode() || !module?.courseId || !element?.id || !slide || !response) {
+    return { ok: false };
+  }
+  const inputKey = getInputResponseKey(module.id, getStableSlideKey(slide, viewerState.slideIndex), element.id);
+  const isAudioCapture = element?.type === 'audio';
+  const payload = {
+    key: inputKey,
+    moduleId: module.id,
+    moduleTitle: module.title,
+    slideId: getStableSlideKey(slide, viewerState.slideIndex),
+    slideTitle: slide?.title || '',
+    elementId: element.id,
+    elementType: isAudioCapture ? 'audio' : 'input',
+    text: response.text || '',
+    image: response.image || '',
+    audio: response.audio || '',
+    matched
+  };
+  const progressSummary = isAudioCapture
+    ? `Enviou um audio em "${slide?.title || payload.slideId}".`
+    : matched
+      ? `Enviou uma resposta valida em "${slide?.title || payload.slideId}".`
+      : `Enviou uma resposta que ainda nao corresponde ao esperado em "${slide?.title || payload.slideId}".`;
+  try {
+    const progressResponse = await authorizedFetch('/api/student/progress', {
+      method: 'POST',
+      body: JSON.stringify({
+        courseId: module.courseId,
+        type: 'interactive',
+        currentModule: module.title,
+        grade: getModuleQuizMetrics(module).gradePercent,
+        interactiveProgress: getModuleInteractiveProgress(module),
+        inputResponse: payload,
+        progressEvent: {
+          type: isAudioCapture ? 'audio_input' : 'text_input',
+          slideId: payload.slideId,
+          slideTitle: payload.slideTitle,
+          elementId: element.id,
+          elementType: isAudioCapture ? 'audio' : 'input',
+          summary: progressSummary,
+          details: {
+            submittedText: response.text || '',
+            matched,
+            hasImage: Boolean(response.image),
+            hasAudio: Boolean(response.audio),
+            mediaType: response.audio ? 'audio' : null,
+            mediaUrl: response.audio || null
+          }
+        }
+      })
+    });
+    const result = await progressResponse.json().catch(() => null);
+    if (progressResponse.ok) {
+      syncCourseProgressState(module.courseId, {
+        interactive_progress: result?.interactiveProgress || getCourseProgressState(module).interactive_progress,
+        interactive_step: result?.interactiveStep || getCourseProgressState(module).interactive_step,
+        input_responses: result?.inputResponses || getCourseProgressState(module).input_responses
+      });
+      return { ok: true, result };
+    }
+  } catch (error) {
+    console.error('Nao foi possivel salvar a resposta do input.', error);
+  }
+  return { ok: false };
+};
+
 const readLocalFileAsDataUrl = (file) =>
   new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -3953,6 +4052,256 @@ const readLocalFileAsDataUrl = (file) =>
     reader.onerror = () => reject(new Error('Nao foi possivel ler o arquivo selecionado.'));
     reader.readAsDataURL(file);
   });
+
+const getStudioMicIconMarkup = () => `
+  <svg viewBox="0 0 64 64" aria-hidden="true" focusable="false">
+    <path d="M32 7c-6.1 0-11 4.9-11 11v15c0 6.1 4.9 11 11 11s11-4.9 11-11V18c0-6.1-4.9-11-11-11Z" fill="currentColor"/>
+    <path d="M15 29a3 3 0 0 1 6 0v4c0 6.1 4.9 11 11 11s11-4.9 11-11v-4a3 3 0 0 1 6 0v4c0 8.3-6 15.2-14 16.7V55h7a3 3 0 1 1 0 6H22a3 3 0 1 1 0-6h7v-5.3c-8-1.5-14-8.4-14-16.7v-4Z" fill="currentColor"/>
+    <path d="M27 18a2 2 0 0 1 2-2h6a2 2 0 1 1 0 4h-6a2 2 0 0 1-2-2Zm0 8a2 2 0 0 1 2-2h6a2 2 0 1 1 0 4h-6a2 2 0 0 1-2-2Zm0 8a2 2 0 0 1 2-2h6a2 2 0 1 1 0 4h-6a2 2 0 0 1-2-2Z" fill="#fff" opacity=".9"/>
+  </svg>
+`;
+
+const createAudioCaptureElementNode = (element, slide) => {
+  normalizeAudioElement(element);
+  const module = getCurrentModule();
+  const slideKey = getStableSlideKey(slide, viewerState.slideIndex);
+  const savedResponse = module?.id ? getInputResponseState(module.id, slideKey, element.id, module) : null;
+  const isStaticMode = isReplayMode();
+  const node = document.createElement('div');
+  node.className = 'builder-input-element builder-audio-capture-element';
+  node.innerHTML = `
+    <button type="button" class="builder-audio-capture-btn" aria-label="Gravar audio" title="Gravar audio">
+      ${getStudioMicIconMarkup()}
+    </button>
+    <input class="builder-input-audio-file hidden" type="file" accept="audio/*" />
+    <div class="builder-input-preview hidden"></div>
+    <div class="builder-input-feedback" aria-live="polite"></div>
+  `;
+  const mainButton = node.querySelector('.builder-audio-capture-btn');
+  const audioInput = node.querySelector('.builder-input-audio-file');
+  const previewNode = node.querySelector('.builder-input-preview');
+  const feedbackNode = node.querySelector('.builder-input-feedback');
+  const state = {
+    audio: savedResponse?.audio || ''
+  };
+  const audioCaptureState = {
+    recorder: null,
+    stream: null,
+    chunks: [],
+    stopPromise: null,
+    preferFileFallback: false
+  };
+  const setFileInputValue = (control, value = '') => {
+    if (control instanceof HTMLInputElement) {
+      control.value = value;
+    }
+  };
+  const setFeedback = (message = '', tone = '') => {
+    if (!feedbackNode) {
+      return;
+    }
+    feedbackNode.textContent = message;
+    feedbackNode.className = tone ? `builder-input-feedback ${tone}` : 'builder-input-feedback';
+  };
+  const refreshPreview = () => {
+    if (!previewNode) {
+      return;
+    }
+    const hasAudio = Boolean(state.audio);
+    previewNode.innerHTML = hasAudio
+      ? `<audio controls src="${state.audio}" class="builder-input-preview-audio"></audio>`
+      : '';
+    previewNode.classList.toggle('hidden', !hasAudio);
+    if (mainButton instanceof HTMLButtonElement) {
+      mainButton.classList.toggle('is-ready', hasAudio);
+      mainButton.title = hasAudio
+        ? (isStaticMode ? 'Ouvir audio enviado' : 'Gravar novamente')
+        : 'Gravar audio';
+      mainButton.setAttribute('aria-label', mainButton.title);
+      mainButton.disabled = isStaticMode ? !hasAudio : false;
+    }
+  };
+  const stopAudioStream = () => {
+    if (audioCaptureState.stream instanceof MediaStream) {
+      audioCaptureState.stream.getTracks().forEach((track) => track.stop());
+    }
+    audioCaptureState.stream = null;
+  };
+  const resetAudioCaptureState = () => {
+    audioCaptureState.recorder = null;
+    audioCaptureState.chunks = [];
+    audioCaptureState.stopPromise = null;
+    stopAudioStream();
+  };
+  const updateAudioButtonState = () => {
+    if (!(mainButton instanceof HTMLButtonElement)) {
+      return;
+    }
+    const isRecording = Boolean(audioCaptureState.recorder && audioCaptureState.recorder.state === 'recording');
+    mainButton.classList.toggle('is-recording', isRecording);
+    mainButton.disabled = isStaticMode && !state.audio;
+    mainButton.title = isRecording ? 'Parar gravacao' : state.audio ? 'Gravar novamente' : 'Gravar audio';
+    mainButton.setAttribute('aria-label', mainButton.title);
+  };
+  const getAudioRecorderMimeType = () => {
+    if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') {
+      return '';
+    }
+    return (
+      ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'].find((candidate) =>
+        MediaRecorder.isTypeSupported(candidate)
+      ) || ''
+    );
+  };
+  const stopAudioRecording = async () => {
+    const recorder = audioCaptureState.recorder;
+    const stopPromise = audioCaptureState.stopPromise;
+    if (!recorder || !stopPromise) {
+      return;
+    }
+    if (recorder.state !== 'inactive') {
+      recorder.stop();
+    }
+    await stopPromise;
+    const audioBlob = new Blob(audioCaptureState.chunks, { type: recorder.mimeType || 'audio/webm' });
+    resetAudioCaptureState();
+    updateAudioButtonState();
+    if (!audioBlob.size) {
+      setFeedback('Nao foi possivel preparar o audio gravado.', 'error');
+      return;
+    }
+    state.audio = await readBlobAsDataUrl(audioBlob).catch(() => '');
+    refreshPreview();
+    setFeedback(state.audio ? 'Audio gravado e pronto para enviar.' : 'Nao foi possivel preparar o audio gravado.', state.audio ? '' : 'error');
+    if (state.audio && !isStaticMode) {
+      await saveCapturedAudio();
+    }
+  };
+  const startAudioRecording = async () => {
+    if (
+      isStaticMode ||
+      audioCaptureState.preferFileFallback ||
+      typeof MediaRecorder === 'undefined' ||
+      !navigator.mediaDevices ||
+      typeof navigator.mediaDevices.getUserMedia !== 'function'
+    ) {
+      setFeedback(
+        audioCaptureState.preferFileFallback
+          ? 'Selecione um arquivo de audio para enviar.'
+          : 'Seu navegador nao liberou gravacao direta. Selecione um audio para enviar.',
+        audioCaptureState.preferFileFallback ? '' : 'error'
+      );
+      setFileInputValue(audioInput);
+      audioInput?.click();
+      return;
+    }
+    setFeedback('Solicitando permissao do microfone...');
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = getAudioRecorderMimeType();
+    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    audioCaptureState.stream = stream;
+    audioCaptureState.recorder = recorder;
+    audioCaptureState.chunks = [];
+    audioCaptureState.stopPromise = new Promise((resolve, reject) => {
+      recorder.addEventListener('stop', resolve, { once: true });
+      recorder.addEventListener('error', () => reject(new Error('Nao foi possivel gravar o audio.')), { once: true });
+    });
+    recorder.ondataavailable = (event) => {
+      if (event.data && event.data.size > 0) {
+        audioCaptureState.chunks.push(event.data);
+      }
+    };
+    recorder.start(200);
+    updateAudioButtonState();
+    setFeedback('Gravando audio. Clique novamente para parar.');
+  };
+  refreshPreview();
+  updateAudioButtonState();
+  if (savedResponse?.audio) {
+    setFeedback(isStaticMode ? 'Audio enviado pelo aluno.' : 'Ja existe um audio salvo para este elemento.');
+  } else if (isStaticMode) {
+    setFeedback('Nenhum audio registrado neste elemento.');
+  }
+  let lastAudioCaptureTapAt = 0;
+  const handleAudioCaptureTap = async (event) => {
+    const target = event?.target;
+    if (target instanceof Element && target.closest('audio')) {
+      return;
+    }
+    event?.stopPropagation?.();
+    const now = Date.now();
+    if (now - lastAudioCaptureTapAt < 250) {
+      return;
+    }
+    lastAudioCaptureTapAt = now;
+    if (isStaticMode) {
+      const previewAudio = previewNode?.querySelector('audio');
+      if (previewAudio instanceof HTMLAudioElement) {
+        previewAudio.play().catch(() => {});
+      }
+      return;
+    }
+    try {
+      if (audioCaptureState.recorder && audioCaptureState.recorder.state === 'recording') {
+        await stopAudioRecording();
+        return;
+      }
+      await startAudioRecording();
+    } catch (error) {
+      resetAudioCaptureState();
+      updateAudioButtonState();
+      if (isMissingAudioInputDeviceError(error)) {
+        audioCaptureState.preferFileFallback = true;
+        setFeedback(formatAudioAccessError(error), 'error');
+        setFileInputValue(audioInput);
+        audioInput?.click();
+        return;
+      }
+      setFeedback(formatAudioAccessError(error), 'error');
+    }
+  };
+  ['pointerdown', 'mousedown', 'touchend', 'click'].forEach((eventName) => {
+    node.addEventListener(eventName, handleAudioCaptureTap, { capture: true });
+    mainButton?.addEventListener(eventName, handleAudioCaptureTap, { capture: true });
+  });
+  audioInput?.addEventListener('change', async () => {
+    if (isStaticMode) return;
+    const file = audioInput.files?.[0];
+    if (!file) return;
+    state.audio = await readLocalFileAsDataUrl(file).catch(() => '');
+    setFileInputValue(audioInput);
+    refreshPreview();
+    setFeedback(state.audio ? 'Audio pronto para enviar.' : 'Nao foi possivel preparar o audio.', state.audio ? '' : 'error');
+    if (state.audio) {
+      await saveCapturedAudio();
+    }
+  });
+  if (isStaticMode) {
+    return node;
+  }
+  async function saveCapturedAudio() {
+    if (audioCaptureState.recorder && audioCaptureState.recorder.state === 'recording') {
+      setFeedback('Finalize a gravacao do audio antes de enviar.', 'error');
+      return;
+    }
+    if (!state.audio) {
+      setFeedback('Grave ou anexe um audio antes de enviar.', 'error');
+      return;
+    }
+    await persistInputResponseToBackend({
+      module,
+      slide,
+      element: { ...element, type: 'audio' },
+      response: {
+        text: '',
+        audio: state.audio
+      },
+      matched: true
+    });
+    setFeedback('Audio enviado com sucesso.', 'success');
+  }
+  return node;
+};
 
 const createInputElementNode = (element, slide, { runActions = null } = {}) => {
   normalizeInputElement(element);
@@ -4915,7 +5264,7 @@ const syncViewerElementVisibilityInDom = (slide, targetElementId, hidden) => {
   } else {
     wrapper.appendChild(node);
   }
-  if (['audio', 'video'].includes(element.type)) {
+  if (['audio', 'video'].includes(element.type) && !(element.type === 'audio' && element.collectStudentAudio)) {
     const mediaNode = node.querySelector?.('audio, video') || (node.matches?.('audio,video') ? node : null);
     const overlayNode = createMediaCaptionOverlayNode(element, mediaNode, wrapper);
     if (overlayNode) {
@@ -6338,7 +6687,7 @@ const renderSlide = (slide) => {
     .forEach((element) => {
       const node = createRendererNode(element, slide);
       wrapper.appendChild(node);
-      if (['audio', 'video'].includes(element.type)) {
+      if (['audio', 'video'].includes(element.type) && !(element.type === 'audio' && element.collectStudentAudio)) {
         const mediaNode = node instanceof Element ? node.querySelector?.('audio, video') || (node.matches?.('audio,video') ? node : null) : null;
         const overlayNode = createMediaCaptionOverlayNode(element, mediaNode, wrapper);
         if (overlayNode) {
@@ -6449,12 +6798,16 @@ const createRendererNode = (element, slide) => {
       break;
     case 'audio':
       {
-        const mediaNode = document.createElement('audio');
-        mediaNode.className = 'builder-media-element';
-        mediaNode.src = element.src || '';
-        applyViewerAudioPresentation(mediaNode, element);
-        node = wrapMediaNodeWithCaptions(mediaNode, element);
-        restoreViewerMediaState(slide, element, node);
+        if (element.collectStudentAudio) {
+          node = createAudioCaptureElementNode(element, slide);
+        } else {
+          const mediaNode = document.createElement('audio');
+          mediaNode.className = 'builder-media-element';
+          mediaNode.src = element.src || '';
+          applyViewerAudioPresentation(mediaNode, element);
+          node = wrapMediaNodeWithCaptions(mediaNode, element);
+          restoreViewerMediaState(slide, element, node);
+        }
       }
       break;
     case 'video':

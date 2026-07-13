@@ -8,6 +8,7 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const { encryptApiKey, encryptSecret } = require('../aiConfigCrypto');
 const {
   buildPublicAiSettings,
+  editImageElementWithNanoBanana,
   proposeMagicPenActions,
   proposeNextSlideAction,
   proposeSlideExecutionPlan,
@@ -2602,6 +2603,62 @@ router.post('/ai/magic-pen', aiRequestRateLimiter, async (req, res) => {
     }
     res.status(error?.statusCode || 400).json({
       message: error.message || 'A IA nao conseguiu executar o pincel magico.',
+      code: error?.code || null,
+      professorCreditsRemaining: error?.creditStatus?.aiCredits ?? null
+    });
+  }
+});
+
+router.post('/ai/edit-image-element', aiRequestRateLimiter, async (req, res) => {
+  await ensureAdminAiImageColumns();
+  const request = sanitizeText(req.body?.request || '', 1800, { trim: true });
+  const sourceImage = sanitizeMediaUrl(req.body?.src || '');
+  const stageSize = req.body?.stageSize && typeof req.body.stageSize === 'object' ? req.body.stageSize : null;
+  const sourceBounds = req.body?.sourceBounds && typeof req.body.sourceBounds === 'object' ? req.body.sourceBounds : null;
+  if (!request) {
+    return res.status(400).json({ message: 'Descreva como a IA deve editar a imagem base.' });
+  }
+  if (!sourceImage) {
+    return res.status(400).json({ message: 'Informe a imagem base para editar.' });
+  }
+  let creditCharge = null;
+  let imageCreditCharge = null;
+  const { rows } = await db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
+  const settingsRow = rows[0];
+  if (!settingsRow?.is_enabled) {
+    return res.status(400).json({ message: 'A integracao de IA deste admin nao esta configurada ou ativa.' });
+  }
+
+  try {
+    creditCharge = await consumeProfessorAiCredit(req, 'a edicao da imagem base com o pincel magico');
+    const attachment = await mediaUrlToImageAttachment(sourceImage, 'imagem-base');
+    if (!attachment) {
+      return res.status(400).json({ message: 'Nao foi possivel preparar a imagem base para a IA.' });
+    }
+    const src = await editImageElementWithNanoBanana({
+      settingsRow,
+      request,
+      attachments: [attachment],
+      sourceBounds,
+      stageSize
+    });
+    imageCreditCharge = await consumeProfessorAiCredit(req, 'a geracao de imagem com IA no editor de imagem', {
+      creditType: 'image'
+    });
+    res.json({
+      src,
+      providerLabel: settingsRow.provider_label,
+      professorCreditsRemaining: imageCreditCharge?.remainingCredits ?? creditCharge?.remainingCredits ?? null
+    });
+  } catch (error) {
+    if (imageCreditCharge?.charged) {
+      await imageCreditCharge.refund();
+    }
+    if (creditCharge?.charged) {
+      await creditCharge.refund();
+    }
+    res.status(error?.statusCode || 400).json({
+      message: error.message || 'A IA nao conseguiu editar a imagem base.',
       code: error?.code || null,
       professorCreditsRemaining: error?.creditStatus?.aiCredits ?? null
     });

@@ -266,6 +266,8 @@ let imageReplaceSourceBtn;
 let imageSourceModeSelect;
 let imageSourceUrlInput;
 let imageApplySourceBtn;
+let imageAiEditPromptInput;
+let imageAiEditBtn;
 let cameraElementWidthInput;
 let cameraElementHeightInput;
 let cameraElementRotationInput;
@@ -437,6 +439,7 @@ let audioElementHeightInput;
 let audioElementRotationInput;
 let audioElementVisibleToggle;
 let audioElementLoopToggle;
+let audioCollectStudentAudioToggle;
 let audioCaptionEnabledToggle;
 let audioCaptionPositionSelect;
 let audioCaptionWidthInput;
@@ -506,6 +509,7 @@ let stageEditorDock;
 let lastStageEditorOpenedAt = 0;
 let isRemovingImageBackground = false;
 let removingBackgroundElementId = null;
+let editingBaseImageElementId = null;
 const STAGE_EDITOR_DEFAULT_POSITIONS = {
   text: { x: 24, y: 108 },
   block: { x: 360, y: 116 },
@@ -3557,6 +3561,12 @@ const updateRemoveBackgroundButtonState = () => {
   if (!removeImageBackgroundBtn) return;
   removeImageBackgroundBtn.disabled = isRemovingImageBackground;
   removeImageBackgroundBtn.textContent = isRemovingImageBackground ? 'Removendo fundo...' : 'Remover fundo';
+};
+
+const updateImageAiEditButtonState = () => {
+  if (!imageAiEditBtn) return;
+  imageAiEditBtn.disabled = editingBaseImageElementId !== null;
+  imageAiEditBtn.textContent = editingBaseImageElementId ? 'Editando imagem...' : 'Editar imagem com IA';
 };
 
 const toggleCollapsibleCard = (card, forceExpanded = null) => {
@@ -6729,12 +6739,18 @@ const syncImageEditorControls = (element) => {
   const isImage = element?.type === 'image';
   if (imageSourceModeSelect) imageSourceModeSelect.value = 'local';
   if (imageSourceUrlInput) imageSourceUrlInput.value = isImage && element.src && !String(element.src).startsWith('data:') ? element.src : '';
+  if (imageAiEditPromptInput && !isImage) imageAiEditPromptInput.value = '';
   document.getElementById('imageSourceUrlField')?.classList.toggle('hidden', (imageSourceModeSelect?.value || 'local') !== 'url');
   if (imageElementWidthInput) imageElementWidthInput.value = isImage ? String(element.width || '') : '';
   if (imageElementHeightInput) imageElementHeightInput.value = isImage ? String(element.height || '') : '';
   if (imageElementRotationInput) imageElementRotationInput.value = isImage ? String(element.rotation || 0) : '0';
   if (imageElementObjectFitSelect) imageElementObjectFitSelect.value = isImage ? getElementMediaObjectFit(element) : 'cover';
   if (imageElementStudentDragToggle) imageElementStudentDragToggle.checked = isImage ? Boolean(element.studentCanDrag) : false;
+  if (imageAiEditBtn && !isImage) {
+    imageAiEditBtn.disabled = true;
+  } else {
+    updateImageAiEditButtonState();
+  }
 };
 
 const syncAudioEditorControls = (element) => {
@@ -6750,6 +6766,7 @@ const syncAudioEditorControls = (element) => {
   if (audioElementRotationInput) audioElementRotationInput.value = isAudio ? String(element.rotation || 0) : '0';
   if (audioElementVisibleToggle) audioElementVisibleToggle.checked = isAudio ? Boolean(element.audioVisible) : true;
   if (audioElementLoopToggle) audioElementLoopToggle.checked = isAudio ? Boolean(element.audioLoop) : false;
+  if (audioCollectStudentAudioToggle) audioCollectStudentAudioToggle.checked = isAudio ? Boolean(element.collectStudentAudio) : false;
   if (audioCaptionEnabledToggle) audioCaptionEnabledToggle.checked = isAudio ? Boolean(element.captionsEnabled) : false;
   if (audioCaptionPositionSelect) audioCaptionPositionSelect.value = isAudio ? element.captionStyle?.position || 'bottom' : 'bottom';
   if (audioCaptionWidthInput) audioCaptionWidthInput.value = isAudio && element.captionStyle?.width ? String(element.captionStyle.width) : '';
@@ -10072,6 +10089,62 @@ const removeBackgroundFromSelectedImage = async () => {
   }
 };
 
+const editSelectedBaseImageWithAi = async () => {
+  const slide = getActiveSlide();
+  const element = slide?.elements.find((child) => child.id === selectedElementId);
+  if (!element || element.type !== 'image' || !element.src) {
+    alert('Selecione uma imagem com fonte configurada.');
+    return;
+  }
+  const prompt = imageAiEditPromptInput?.value?.trim() || '';
+  if (!prompt) {
+    alert('Descreva como a IA deve editar a imagem base.');
+    imageAiEditPromptInput?.focus({ preventScroll: true });
+    return;
+  }
+  if (!aiAssistantState.settings?.connected || !aiAssistantState.settings?.isEnabled) {
+    alert('Configure a integraÃ§Ã£o de IA no painel admin antes de editar imagens com IA.');
+    return;
+  }
+  editingBaseImageElementId = element.id;
+  updateImageAiEditButtonState();
+  try {
+    const response = await authorizedFetch('/api/admin/ai/edit-image-element', {
+      method: 'POST',
+      body: JSON.stringify({
+        request: prompt,
+        src: element.src,
+        stageSize: builderState.stageSize.width && builderState.stageSize.height ? builderState.stageSize : DEFAULT_STAGE_SIZE,
+        sourceBounds: {
+          x: Number(element.x) || 0,
+          y: Number(element.y) || 0,
+          width: Math.max(MIN_ELEMENT_SIZE, Number(element.width) || 0),
+          height: Math.max(MIN_ELEMENT_SIZE, Number(element.height) || 0)
+        }
+      })
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(payload?.message || 'Nao foi possivel editar a imagem com IA.');
+    }
+    syncProfessorCreditsFromPayload(payload);
+    if (!payload?.src) {
+      throw new Error('A IA nao retornou uma nova imagem.');
+    }
+    element.src = payload.src;
+    updateImageEditorVisibility(element, { forceOpen: true });
+    renderSlide();
+    commitHistoryState();
+    pushAiAssistantFeedback('Imagem editada', 'A Nano Banana atualizou a imagem base usando o prompt informado.', 'success');
+  } catch (error) {
+    alert(error.message || 'Nao foi possivel editar a imagem com IA.');
+  } finally {
+    editingBaseImageElementId = null;
+    updateImageAiEditButtonState();
+    renderSlide();
+  }
+};
+
 const toggleAiReferenceCard = (forceExpanded = null) => {
   toggleCollapsibleCard(aiReferenceCard, forceExpanded);
 };
@@ -12022,6 +12095,7 @@ const syncAudioEditor = () => {
   }
   element.audioVisible = Boolean(audioElementVisibleToggle?.checked);
   element.audioLoop = Boolean(audioElementLoopToggle?.checked);
+  element.collectStudentAudio = Boolean(audioCollectStudentAudioToggle?.checked);
   element.captionsEnabled = Boolean(audioCaptionEnabledToggle?.checked);
   const nextPosition = audioCaptionPositionSelect?.value || 'bottom';
   element.captionStyle = normalizeCaptionStyle({
@@ -13682,7 +13756,7 @@ const handleElementCreation = async (type) => {
       break;
     case 'audio':
       currentStageEditor = 'audio';
-      config = { type: 'audio', src: '', width: 260, height: 70, audioVisible: true, audioLoop: false, initiallyHidden: false };
+      config = { type: 'audio', src: '', width: 260, height: 70, audioVisible: true, audioLoop: false, collectStudentAudio: false, initiallyHidden: false };
       break;
     case 'video':
       currentStageEditor = 'video';
@@ -14052,6 +14126,25 @@ const createInputElementNode = (element, { runActions = null, preview = false } 
   return node;
 };
 
+const getStudioMicIconMarkup = () => `
+  <svg viewBox="0 0 64 64" aria-hidden="true" focusable="false">
+    <path d="M32 7c-6.1 0-11 4.9-11 11v15c0 6.1 4.9 11 11 11s11-4.9 11-11V18c0-6.1-4.9-11-11-11Z" fill="currentColor"/>
+    <path d="M15 29a3 3 0 0 1 6 0v4c0 6.1 4.9 11 11 11s11-4.9 11-11v-4a3 3 0 0 1 6 0v4c0 8.3-6 15.2-14 16.7V55h7a3 3 0 1 1 0 6H22a3 3 0 1 1 0-6h7v-5.3c-8-1.5-14-8.4-14-16.7v-4Z" fill="currentColor"/>
+    <path d="M27 18a2 2 0 0 1 2-2h6a2 2 0 1 1 0 4h-6a2 2 0 0 1-2-2Zm0 8a2 2 0 0 1 2-2h6a2 2 0 1 1 0 4h-6a2 2 0 0 1-2-2Zm0 8a2 2 0 0 1 2-2h6a2 2 0 1 1 0 4h-6a2 2 0 0 1-2-2Z" fill="#fff" opacity=".9"/>
+  </svg>
+`;
+
+const createAudioCapturePreviewNode = () => {
+  const node = document.createElement('div');
+  node.className = 'builder-input-element builder-audio-capture-element';
+  node.innerHTML = `
+    <button type="button" class="builder-audio-capture-btn" aria-label="Gravar audio" title="Gravar audio" aria-disabled="true" tabindex="-1">
+      ${getStudioMicIconMarkup()}
+    </button>
+  `;
+  return node;
+};
+
 const getKeyTriggerButtonLabel = (trigger) => {
   const direction = getKeyTriggerDirection(trigger);
   if (direction === 'left') return 'ESQ';
@@ -14297,14 +14390,18 @@ const createPreviewElementNode = (element, slide, options = {}) => {
       break;
     case 'audio':
       {
-        const mediaNode = document.createElement('audio');
-        mediaNode.className = 'builder-media-element';
-        mediaNode.src = element.src || '';
-        mediaNode.controls = !forExport;
-        applyPreviewAudioPresentation(mediaNode, element);
-        node = wrapMediaNodeWithCaptions(mediaNode, element);
-        if (!forExport) {
-          restorePreviewMediaState(slide, element, node);
+        if (element.collectStudentAudio) {
+          node = createAudioCapturePreviewNode();
+        } else {
+          const mediaNode = document.createElement('audio');
+          mediaNode.className = 'builder-media-element';
+          mediaNode.src = element.src || '';
+          mediaNode.controls = !forExport;
+          applyPreviewAudioPresentation(mediaNode, element);
+          node = wrapMediaNodeWithCaptions(mediaNode, element);
+          if (!forExport) {
+            restorePreviewMediaState(slide, element, node);
+          }
         }
       }
       break;
@@ -14514,11 +14611,15 @@ const renderElementNode = (element) => {
       break;
     case 'audio':
       {
-        const mediaNode = document.createElement('audio');
-        mediaNode.className = 'builder-media-element';
-        mediaNode.src = element.src || '';
-        applyPreviewAudioPresentation(mediaNode, element, { authoring: true });
-        node = wrapMediaNodeWithCaptions(mediaNode, element);
+        if (element.collectStudentAudio) {
+          node = createAudioCapturePreviewNode();
+        } else {
+          const mediaNode = document.createElement('audio');
+          mediaNode.className = 'builder-media-element';
+          mediaNode.src = element.src || '';
+          applyPreviewAudioPresentation(mediaNode, element, { authoring: true });
+          node = wrapMediaNodeWithCaptions(mediaNode, element);
+        }
       }
       break;
     case 'video':
@@ -14865,12 +14966,15 @@ const enableDrag = (node, element) => {
     node.style.top = `${element.y}px`;
   };
   const startDrag = (event) => {
+    if (event.isPrimary === false) {
+      return;
+    }
     const target = event.target;
     if (
       target instanceof Element &&
       (
         target.closest('.resize-handle, .caption-resize-handle, .element-menu-trigger')
-        || (target !== node && target.closest('input, select, .builder-quiz-node'))
+        || (target !== node && target.closest('input, select, textarea, button, audio, video, .builder-quiz-node, .builder-audio-capture-btn'))
       )
     ) {
       return;
@@ -14886,9 +14990,11 @@ const enableDrag = (node, element) => {
     offsetX = pointer.x - (element.x || 0);
     offsetY = pointer.y - (element.y || 0);
     try {
-      node.setPointerCapture(pointerId);
+      if (node.isConnected && pointerId !== undefined) {
+        node.setPointerCapture(pointerId);
+      }
     } catch (e) {
-      console.warn('Falha ao capturar o ponteiro:', e);
+      // Pointer capture can fail if the click originated from a nested inert control in preview mode.
     }
     node.style.cursor = 'grabbing';
     document.addEventListener('pointermove', onMove);
@@ -15146,6 +15252,9 @@ document.addEventListener('DOMContentLoaded', () => {
   imageSourceModeSelect = document.getElementById('imageSourceModeSelect');
   imageSourceUrlInput = document.getElementById('imageSourceUrlInput');
   imageApplySourceBtn = document.getElementById('imageApplySourceBtn');
+  imageAiEditPromptInput = document.getElementById('imageAiEditPromptInput');
+  imageAiEditBtn = document.getElementById('imageAiEditBtn');
+  updateImageAiEditButtonState();
   cameraElementWidthInput = document.getElementById('cameraElementWidthInput');
   cameraElementHeightInput = document.getElementById('cameraElementHeightInput');
   cameraElementRotationInput = document.getElementById('cameraElementRotationInput');
@@ -15331,6 +15440,7 @@ document.addEventListener('DOMContentLoaded', () => {
   audioElementRotationInput = document.getElementById('audioElementRotationInput');
   audioElementVisibleToggle = document.getElementById('audioElementVisibleToggle');
   audioElementLoopToggle = document.getElementById('audioElementLoopToggle');
+  audioCollectStudentAudioToggle = document.getElementById('audioCollectStudentAudioToggle');
   audioCaptionEnabledToggle = document.getElementById('audioCaptionEnabledToggle');
   audioCaptionPositionSelect = document.getElementById('audioCaptionPositionSelect');
   audioCaptionWidthInput = document.getElementById('audioCaptionWidthInput');
@@ -15658,6 +15768,7 @@ document.addEventListener('DOMContentLoaded', () => {
   removeImageBackgroundBtn?.addEventListener('click', removeBackgroundFromSelectedImage);
   imageReplaceSourceBtn?.addEventListener('click', replaceSelectedImageSource);
   imageApplySourceBtn?.addEventListener('click', () => applySelectedImageSourceFromEditor(imageSourceModeSelect?.value || 'local'));
+  imageAiEditBtn?.addEventListener('click', editSelectedBaseImageWithAi);
   imageSourceModeSelect?.addEventListener('change', () => {
     document.getElementById('imageSourceUrlField')?.classList.toggle('hidden', (imageSourceModeSelect?.value || 'local') !== 'url');
   });
@@ -16150,7 +16261,7 @@ document.addEventListener('DOMContentLoaded', () => {
   cameraEditorTransmitBtn?.addEventListener('click', () => {
     alert('O modo transmitir será ligado em uma próxima atualização.');
   });
-  [audioElementWidthInput, audioElementHeightInput, audioElementRotationInput, audioElementVisibleToggle, audioElementLoopToggle, audioCaptionEnabledToggle, audioCaptionPositionSelect, audioCaptionWidthInput, audioCaptionFontSizeInput, audioCaptionTextColorInput, audioCaptionBackgroundColorInput, audioCaptionAccentColorInput, audioCaptionUppercaseToggle].forEach((control) => {
+  [audioElementWidthInput, audioElementHeightInput, audioElementRotationInput, audioElementVisibleToggle, audioElementLoopToggle, audioCollectStudentAudioToggle, audioCaptionEnabledToggle, audioCaptionPositionSelect, audioCaptionWidthInput, audioCaptionFontSizeInput, audioCaptionTextColorInput, audioCaptionBackgroundColorInput, audioCaptionAccentColorInput, audioCaptionUppercaseToggle].forEach((control) => {
     control?.addEventListener('input', syncAudioEditor);
     control?.addEventListener('change', syncAudioEditor);
   });

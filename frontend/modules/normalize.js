@@ -46,6 +46,7 @@ export const normalizeAudioElement = (element, normalizeMediaCaptionConfigFn) =>
   normalizeMediaCaptionConfigFn(element, 'audio');
   element.audioVisible = typeof element.audioVisible === 'boolean' ? element.audioVisible : true;
   element.audioLoop = Boolean(element.audioLoop);
+  element.collectStudentAudio = Boolean(element.collectStudentAudio);
   element.width = Math.max(180, Number(element.width) || 260);
   element.height = Math.max(54, Number(element.height) || 70);
 };

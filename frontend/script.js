@@ -2066,6 +2066,7 @@ const formatProgressEventType = (type = '') => {
     quiz_answer: 'Respondeu quiz',
     drag_end: 'Arrastou elemento',
     text_input: 'Preencheu campo',
+    audio_input: 'Enviou audio',
     drawing: 'Rabiscou no quadro',
     camera_capture: 'Capturou na camera'
   };
@@ -2126,7 +2127,9 @@ const renderProgressTimeline = (payload) => {
       const mediaPreview = event.details?.mediaUrl
         ? event.details.mediaType === 'video'
           ? `<video controls src="${escapeAttribute(event.details.mediaUrl)}" class="admin-report-event-media"></video>`
-          : `<img src="${escapeAttribute(event.details.mediaUrl)}" alt="Midia do aluno" class="admin-report-event-media" />`
+          : event.details.mediaType === 'audio'
+            ? `<audio controls src="${escapeAttribute(event.details.mediaUrl)}" class="admin-report-event-media"></audio>`
+            : `<img src="${escapeAttribute(event.details.mediaUrl)}" alt="Midia do aluno" class="admin-report-event-media" />`
         : '';
       return `
         <article class="admin-report-event">

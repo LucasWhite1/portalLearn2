@@ -11,6 +11,7 @@ const { requireAuth, requireRole } = require('./middleware/auth');
 const app = express();
 const ADMIN_JSON_BODY_LIMIT = process.env.ADMIN_JSON_BODY_LIMIT || process.env.JSON_BODY_LIMIT || '50mb';
 const STUDENT_JSON_BODY_LIMIT = process.env.STUDENT_JSON_BODY_LIMIT || process.env.JSON_BODY_LIMIT || '50mb';
+const studentJsonParser = express.json({ limit: STUDENT_JSON_BODY_LIMIT });
 const frontendDir = path.resolve(__dirname, '../../frontend');
 const isProductionEnvironment = ['production', 'prod'].includes(
   String(process.env.NODE_ENV || process.env.APP_ENV || '').toLowerCase()
@@ -94,8 +95,8 @@ app.use(
 );
 app.use(
   '/api/student',
+  studentJsonParser,
   requireStudentApiAuth,
-  express.json({ limit: STUDENT_JSON_BODY_LIMIT }),
   studentRoutes
 );
 app.use('/api/billing', express.json({ limit: '256kb' }), billingRoutes);
@@ -104,6 +105,9 @@ app.use('/api/chat', requireAuth, express.json({ limit: '64kb' }), chatRoutes);
 app.use((err, req, res, next) => {
   if (err?.type === 'entity.too.large') {
     return res.status(413).json({ message: 'O corpo da requisicao excede o tamanho permitido para esta rota.' });
+  }
+  if (err?.type === 'stream.not.readable') {
+    return res.status(400).json({ message: 'Nao foi possivel ler o corpo da requisicao. Tente enviar novamente.' });
   }
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
     return res.status(400).json({ message: 'JSON invalido.' });

@@ -876,6 +876,14 @@
                   <button id="removeImageBackgroundBtn" class="secondary-btn" type="button">Remover fundo</button>
                 </div>
               </div>
+              <div class="builder-field" style="grid-column:1 / -1;">
+                <label for="imageAiEditPromptInput">Prompt para editar a imagem base</label>
+                <textarea id="imageAiEditPromptInput" rows="3"
+                  placeholder="Ex: transforme esta imagem em uma ilustração infantil, preserve a composição e remova o fundo confuso"></textarea>
+              </div>
+              <div class="builder-field" style="grid-column:1 / -1;">
+                <button id="imageAiEditBtn" class="primary-btn" type="button">Editar imagem com IA</button>
+              </div>
             </div>
           </section>
           <section id="cameraEditorCard" class="quiz-editor-card hidden" data-stage-editor="camera"
@@ -1669,6 +1677,13 @@
                   <input id="audioElementLoopToggle" type="checkbox" />
                   Reproduzir em loop
                 </label>
+              </div>
+              <div class="builder-field">
+                <label class="toggle-inline">
+                  <input id="audioCollectStudentAudioToggle" type="checkbox" />
+                  Recolher Ã¡udio do aluno
+                </label>
+                <small class="muted">No viewer, esse elemento vira um botÃ£o para o aluno gravar a resposta em voz.</small>
               </div>
               <div class="builder-field">
                 <label class="toggle-inline">
