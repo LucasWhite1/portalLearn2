@@ -1049,6 +1049,70 @@ function createSafeId(prefix, value, index = 0) {
   return `${prefix}-${slug || index + 1}`;
 }
 
+function extractSimpleBlockTextRequest(request = '') {
+  const raw = String(request || '').replace(/\s+/g, ' ').trim();
+  const normalized = normalizeReferenceText(raw);
+  if (!/\b(bloco|block|card)\b/.test(normalized)) {
+    return null;
+  }
+  if (!/\b(crie|criar|adicione|adicionar|coloque|inserir|insira|fa[cç]a)\b/.test(normalized)) {
+    return null;
+  }
+  const patterns = [
+    /\b(?:escrito|escreva|com\s+texto|com\s+o\s+texto|dizendo|conteudo|conteúdo)\s+["'“”‘’]?(.+?)["'“”‘’]?\s*$/i,
+    /\b(?:bloco|block|card)\s+(?:com\s+)?["'“”‘’]?(.+?)["'“”‘’]?\s*$/i
+  ];
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    const text = match?.[1]?.replace(/^[:\-–\s]+/, '').replace(/["'“”‘’]+$/g, '').trim();
+    if (text && !/^(azul|vermelho|verde|amarelo|preto|branco|rosa|roxo|grande|pequeno)$/i.test(text)) {
+      return truncateText(text, 120);
+    }
+  }
+  return null;
+}
+
+function buildSimpleBlockTextActions({ request, slides = [], activeSlideId = null, stageSize = DEFAULT_STAGE_SIZE }) {
+  const content = extractSimpleBlockTextRequest(request);
+  if (!content) {
+    return null;
+  }
+  const targetSlide = slides.find((slide) => slide?.id === activeSlideId) || slides[0] || null;
+  const slideId = targetSlide?.id || activeSlideId || 'slide-atual';
+  const stageWidth = Math.max(320, Number(stageSize?.width) || DEFAULT_STAGE_SIZE.width);
+  const stageHeight = Math.max(180, Number(stageSize?.height) || DEFAULT_STAGE_SIZE.height);
+  const element = {
+    id: createSafeId('element', `bloco-${content}`, 0),
+    type: 'block',
+    content,
+    x: Math.round((stageWidth - 360) / 2),
+    y: Math.round((stageHeight - 180) / 2),
+    width: 360,
+    height: 180,
+    backgroundColor: '#f97316',
+    solidColor: '#f97316',
+    textColor: '#ffffff',
+    textAlign: 'center',
+    fontSize: 34,
+    fontWeight: '800',
+    hasTextBlock: true,
+    zIndex: ((targetSlide?.elements || []).reduce((max, element) => Math.max(max, Number(element?.zIndex) || 0), 0) || 0) + 1
+  };
+  let actions = [
+    {
+      type: 'add_element',
+      slideId,
+      reason: 'Criar um bloco simples com o texto solicitado.',
+      element,
+      setActive: true
+    }
+  ];
+  actions = constrainActionGeometry(actions, stageSize || DEFAULT_STAGE_SIZE);
+  actions = resolveActionLayoutCollisions(actions, slides, stageSize || DEFAULT_STAGE_SIZE);
+  actions = repairRemainingLayoutConflicts(actions, slides);
+  return actions;
+}
+
 
 function requestExplicitlyForbidsNewSlides(request) {
   const normalized = normalizeReferenceText(request);
@@ -3099,14 +3163,14 @@ function collectActionQualityIssues(actions = [], existingSlides = [], stageSize
   const stageWidth = Math.max(320, Number(stageSize?.width) || DEFAULT_STAGE_SIZE.width);
   const stageHeight = Math.max(180, Number(stageSize?.height) || DEFAULT_STAGE_SIZE.height);
   const elementsBySlide = new Map();
-  const addElement = (slideId, element) => {
+  const addElement = (slideId, element, generated = false) => {
     if (!slideId || !element?.type || isNonBlockingLayoutElement(element)) return;
     if (!elementsBySlide.has(slideId)) elementsBySlide.set(slideId, []);
-    elementsBySlide.get(slideId).push(element);
+    elementsBySlide.get(slideId).push({ element, generated });
   };
 
   existingSlides.forEach((slide) => {
-    (slide?.elements || []).forEach((element) => addElement(slide.id, element));
+    (slide?.elements || []).forEach((element) => addElement(slide.id, element, false));
   });
 
   actions.forEach((action) => {
@@ -3144,17 +3208,21 @@ function collectActionQualityIssues(actions = [], existingSlides = [], stageSize
       issues.push({ code: 'layout_overflow', message: `Elemento ${element.id || element.type} sai dos limites do palco.` });
     }
 
-    addElement(action.slideId, element);
+    addElement(action.slideId, element, true);
   });
 
-  elementsBySlide.forEach((elements, slideId) => {
-    if (elements.length > 14) {
+  elementsBySlide.forEach((entries, slideId) => {
+    const generatedCount = entries.filter((entry) => entry.generated).length;
+    if (generatedCount > 0 && entries.length > 14) {
       issues.push({ code: 'too_many_elements', message: `Slide ${slideId} tem elementos demais para um layout limpo.` });
     }
-    for (let firstIndex = 0; firstIndex < elements.length; firstIndex += 1) {
-      for (let secondIndex = firstIndex + 1; secondIndex < elements.length; secondIndex += 1) {
-        const first = elements[firstIndex];
-        const second = elements[secondIndex];
+    for (let firstIndex = 0; firstIndex < entries.length; firstIndex += 1) {
+      for (let secondIndex = firstIndex + 1; secondIndex < entries.length; secondIndex += 1) {
+        const firstEntry = entries[firstIndex];
+        const secondEntry = entries[secondIndex];
+        if (!firstEntry.generated && !secondEntry.generated) continue;
+        const first = firstEntry.element;
+        const second = secondEntry.element;
         if (isAllowedLayoutOverlap(first, second)) continue;
         const overlapRatio = getLayoutOverlapRatio(getElementLayoutBox(first, 0), getElementLayoutBox(second, 0));
         if (overlapRatio >= 0.12) {
@@ -5492,6 +5560,18 @@ async function proposeSlideActions({
   currentPlanItem = null
 }) {
   const normalizedAttachments = normalizeImageAttachments(attachments);
+  if (!normalizedAttachments.length && !executionPlan && !currentPlanItem) {
+    const simpleBlockActions = buildSimpleBlockTextActions({
+      request,
+      slides: Array.isArray(slides) ? slides : [],
+      activeSlideId,
+      stageSize: stageSize || DEFAULT_STAGE_SIZE
+    });
+    if (simpleBlockActions?.length) {
+      assertActionQuality(simpleBlockActions, Array.isArray(slides) ? slides : [], stageSize || DEFAULT_STAGE_SIZE, null);
+      return simpleBlockActions;
+    }
+  }
   const disableStoryExpansion = Boolean(executionPlan?.mode === 'deck' && currentPlanItem);
   const attachmentInsights = await describeAttachmentsWithNanoBanana({
     imageSettings: settingsRow,
@@ -5846,6 +5926,8 @@ module.exports = {
     collectActionQualityIssues,
     assertActionQuality,
     estimateTextCapacity,
+    extractSimpleBlockTextRequest,
+    buildSimpleBlockTextActions,
     ensureImageSpacePlaceholder,
     repairEmptySupportBlockStacking,
     repairRemainingLayoutConflicts,

@@ -226,6 +226,22 @@ const tests = [
     }
   },
   {
+    name: 'build deterministic action for simple block text prompt',
+    run() {
+      const actions = __test.buildSimpleBlockTextActions({
+        request: 'crie um bloco escrito ok',
+        slides: [{ id: 'slide-atual', title: 'Atual', elements: [] }],
+        activeSlideId: 'slide-atual',
+        stageSize: { width: 1280, height: 720 }
+      });
+      assert.equal(actions.length, 1);
+      assert.equal(actions[0].type, 'add_element');
+      assert.equal(actions[0].slideId, 'slide-atual');
+      assert.equal(actions[0].element.type, 'block');
+      assert.equal(actions[0].element.content, 'ok');
+    }
+  },
+  {
     name: 'treat educational how-to prompt as freeform deck',
     run() {
       const plan = __test.normalizeExecutionPlan(
@@ -452,6 +468,29 @@ const tests = [
           element: { id: 'texto-2', type: 'text', content: 'Texto B', x: 390, y: 210, width: 300, height: 120 }
         }
       ], [], { width: 1280, height: 720 }, null);
+      assert.equal(issues.some((issue) => issue.code === 'text_overlap'), false);
+    }
+  },
+  {
+    name: 'ignore text overlaps that already existed before generated actions',
+    run() {
+      const existingSlides = [
+        {
+          id: 'slide-1',
+          title: 'Atual',
+          elements: [
+            { id: 'old-a', type: 'text', content: 'A', x: 100, y: 100, width: 240, height: 80 },
+            { id: 'old-b', type: 'text', content: 'B', x: 120, y: 120, width: 240, height: 80 }
+          ]
+        }
+      ];
+      const issues = __test.collectActionQualityIssues([
+        {
+          type: 'add_element',
+          slideId: 'slide-1',
+          element: { id: 'new-block', type: 'block', content: 'ok', x: 760, y: 420, width: 260, height: 120 }
+        }
+      ], existingSlides, { width: 1280, height: 720 }, null);
       assert.equal(issues.some((issue) => issue.code === 'text_overlap'), false);
     }
   },
