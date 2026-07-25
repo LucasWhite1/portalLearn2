@@ -92,7 +92,13 @@
           <form id="notificationForm">
             <div class="field-group">
               <label for="notificationMessage">Mensagem</label>
-              <textarea id="notificationMessage" rows="2" required></textarea>
+              <textarea id="notificationMessage" rows="3" required placeholder="Escreva o aviso. Links com https:// ou www ficam clicáveis para o aluno."></textarea>
+            </div>
+            <div class="field-group">
+              <label>Anexo da atividade</label>
+              <input id="notificationFileInput" type="file" accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.zip,image/*" hidden />
+              <button id="notificationFileBtn" class="secondary-btn" type="button">Anexar arquivo do computador</button>
+              <small id="notificationFileStatus" style="color:#8b92b1;">Nenhum arquivo anexado.</small>
             </div>
             <div class="field-group">
               <label for="notificationTarget">Destinatario</label>
@@ -285,9 +291,9 @@
               <small style="color:#8b92b1;">Usado em planejamento, geração de slides, transcrição e comandos de texto.</small>
             </div>
             <div class="field-group">
-              <label for="aiImageCreditCostPerCall">Custo por chamada de IA de imagem</label>
+              <label for="aiImageCreditCostPerCall">Custo por chamada de Nano Banana / IA de imagem</label>
               <input id="aiImageCreditCostPerCall" type="number" min="0.1" step="0.1" value="1.0" />
-              <small style="color:#8b92b1;">Usado em Nano Banana, remover fundo, comparar imagens e imagens geradas nos slides.</small>
+              <small style="color:#8b92b1;">Usado em edição de imagem, Nano Banana, remover fundo, comparar imagens e imagens geradas nos slides.</small>
             </div>
             <div class="field-group">
               <label for="aiProviderKey">Identificador do provedor</label>
@@ -419,16 +425,14 @@
                   <th>Aluno</th>
                   <th>Curso</th>
                   <th>Módulo atual</th>
-                  <th>Vídeo (min)</th>
-                  <th>Interativo</th>
-                  <th>Nota</th>
+                  <th>Desempenho por módulo</th>
                   <th>Atualizado em</th>
                   <th>Ações</th>
                 </tr>
               </thead>
               <tbody id="reportsTableBody">
                 <tr>
-                  <td colspan="8" style="color:#8b92b1;">Carregando relatórios...</td>
+                  <td colspan="6" style="color:#8b92b1;">Carregando relatórios...</td>
                 </tr>
               </tbody>
             </table>
@@ -444,16 +448,14 @@
                   <th>Aluno</th>
                   <th>Curso</th>
                   <th>Módulo atual</th>
-                  <th>Vídeo (min)</th>
-                  <th>Interativo</th>
-                  <th>Nota</th>
+                  <th>Desempenho por módulo</th>
                   <th>Corrigido em</th>
                   <th>Ações</th>
                 </tr>
               </thead>
               <tbody id="correctedReportsTableBody">
                 <tr>
-                  <td colspan="8" style="color:#8b92b1;">Nenhum relatório corrigido ainda.</td>
+                  <td colspan="6" style="color:#8b92b1;">Nenhum relatório corrigido ainda.</td>
                 </tr>
               </tbody>
             </table>

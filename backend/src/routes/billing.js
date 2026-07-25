@@ -431,6 +431,7 @@ const upsertBillingSubscriptionRecord = async (client, eventType, payment, custo
   const plan = getPlanConfig(planCode);
   const providerPaymentId = sanitizeText(payment?.id || '', 80);
   const providerSubscriptionId = sanitizeText(payment?.subscription || '', 80) || null;
+  const providerCheckoutSessionId = sanitizeText(payment?.checkoutSession || '', 120) || null;
   const providerCustomerId = sanitizeText(payment?.customer || '', 80) || null;
   const amount = Number.isFinite(Number(payment?.value)) ? Number(payment.value) : plan.price;
   if (Math.abs(amount - plan.price) > 0.009) {
@@ -447,11 +448,18 @@ const upsertBillingSubscriptionRecord = async (client, eventType, payment, custo
          AND (
            provider_payment_id = $1
            OR checkout_external_reference = $2
+           OR provider_subscription_id = $3
+           OR COALESCE(raw_payload->>'id', '') = $4
          )
-       ORDER BY CASE WHEN provider_payment_id = $1 THEN 0 ELSE 1 END
+       ORDER BY CASE
+         WHEN provider_payment_id = $1 THEN 0
+         WHEN checkout_external_reference = $2 THEN 1
+         WHEN provider_subscription_id = $3 THEN 2
+         ELSE 3
+       END
        LIMIT 1
     `,
-    [providerPaymentId, checkoutExternalReference]
+    [providerPaymentId, checkoutExternalReference, providerSubscriptionId, providerCheckoutSessionId]
   );
   const existingSubscription = existingRows[0] || null;
   const payerEmail = sanitizeEmail(
@@ -660,9 +668,18 @@ const processAsaasWebhookEvent = async (eventPayload, requestMeta = {}) => {
     const { rows } = await db.query(
       `SELECT checkout_external_reference, plan_code
          FROM billing_subscriptions
-        WHERE provider = 'asaas' AND provider_payment_id = $1
+        WHERE provider = 'asaas'
+          AND (
+            provider_payment_id = $1
+            OR provider_subscription_id = $2
+            OR COALESCE(raw_payload->>'id', '') = $3
+          )
         LIMIT 1`,
-      [sanitizeText(payment.id, 80)]
+      [
+        sanitizeText(payment.id, 80),
+        sanitizeText(payment.subscription || '', 80),
+        sanitizeText(payment.checkoutSession || '', 120)
+      ]
     );
     const existingSubscription = rows[0];
     if (!existingSubscription) {
@@ -710,6 +727,9 @@ const processAsaasWebhookEvent = async (eventPayload, requestMeta = {}) => {
       verifiedPayment = await fetchAsaasPayment(payment.id);
       if (!verifiedPayment || verifiedPayment.id !== payment.id) {
         throw new Error('Nao foi possivel confirmar a cobranca diretamente no Asaas.');
+      }
+      if (!sanitizeText(verifiedPayment.externalReference || '', 160) && payment.externalReference) {
+        verifiedPayment.externalReference = payment.externalReference;
       }
       const verifiedPlanCode = normalizePlanCodeFromExternalReference(verifiedPayment.externalReference || '');
       if (verifiedPlanCode !== eventPlanCode) {

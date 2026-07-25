@@ -4,6 +4,10 @@ export const createLiveStageShareState = () => ({
   active: false,
   shareId: '',
   url: '',
+  manualPublish: false,
+  publishedPayload: null,
+  hasUnpublishedChanges: false,
+  lastPublishedAt: 0,
   syncTimer: null,
   syncing: false,
   pending: false,
@@ -49,6 +53,9 @@ export const createLiveStageShareController = ({
     state.active = false;
     state.shareId = '';
     state.url = '';
+    state.publishedPayload = null;
+    state.hasUnpublishedChanges = false;
+    state.lastPublishedAt = 0;
     state.syncing = false;
     state.pending = false;
     state.lastFingerprint = '';
@@ -77,6 +84,11 @@ export const createLiveStageShareController = ({
     if (!state.active || isPreviewActive()) {
       return;
     }
+    if (state.manualPublish) {
+      state.hasUnpublishedChanges = true;
+      notifyUi();
+      return;
+    }
     if (state.syncTimer) {
       clearTimeout(state.syncTimer);
     }
@@ -86,8 +98,13 @@ export const createLiveStageShareController = ({
     }, LIVE_STAGE_SYNC_DEBOUNCE_MS);
   };
 
-  const flushSync = async () => {
+  const flushSync = async ({ forcePublish = false } = {}) => {
     if (!state.active || !state.shareId || isPreviewActive()) {
+      return;
+    }
+    if (state.manualPublish && !forcePublish) {
+      state.hasUnpublishedChanges = true;
+      notifyUi();
       return;
     }
     if (state.syncing) {
@@ -127,12 +144,15 @@ export const createLiveStageShareController = ({
       }
       state.lastSyncAt = Date.now();
       state.lastFingerprint = fingerprint;
+      state.publishedPayload = JSON.parse(JSON.stringify(payload));
+      state.hasUnpublishedChanges = false;
+      state.lastPublishedAt = state.lastSyncAt;
     } catch (error) {
       state.lastError = error.message || 'Não foi possível atualizar o palco ao vivo.';
     } finally {
       state.syncing = false;
       notifyUi();
-      if (state.active) {
+      if (state.active && !state.manualPublish) {
         scheduleSync();
       }
     }
@@ -153,9 +173,14 @@ export const createLiveStageShareController = ({
       state.shareId = responseBody.shareId;
       state.url = getLiveStageShareViewerUrl(responseBody.shareId);
       state.lastFingerprint = JSON.stringify(payload);
+      state.publishedPayload = JSON.parse(JSON.stringify(payload));
+      state.hasUnpublishedChanges = false;
+      state.lastPublishedAt = Date.now();
       state.lastError = '';
       notifyUi();
-      scheduleSync();
+      if (!state.manualPublish) {
+        scheduleSync();
+      }
     } catch (error) {
       state.lastError = error.message || 'Não foi possível iniciar o palco ao vivo.';
       notifyUi();
@@ -199,7 +224,11 @@ export const createLiveStageShareController = ({
   const getDraftSnapshot = () => ({
     active: state.active,
     shareId: state.shareId,
-    url: state.url
+    url: state.url,
+    manualPublish: state.manualPublish,
+    publishedPayload: state.publishedPayload,
+    hasUnpublishedChanges: state.hasUnpublishedChanges,
+    lastPublishedAt: state.lastPublishedAt
   });
 
   const restoreFromDraft = (draftLiveStageShare = null) => {
@@ -209,10 +238,38 @@ export const createLiveStageShareController = ({
     state.active = Boolean(draftLiveStageShare.active);
     state.shareId = draftLiveStageShare.shareId || '';
     state.url = draftLiveStageShare.url || '';
+    state.manualPublish = Boolean(draftLiveStageShare.manualPublish);
+    state.publishedPayload = draftLiveStageShare.publishedPayload || null;
+    state.hasUnpublishedChanges = Boolean(draftLiveStageShare.hasUnpublishedChanges);
+    state.lastPublishedAt = Number(draftLiveStageShare.lastPublishedAt) || 0;
     notifyUi();
-    if (state.active && state.shareId) {
+    if (state.active && state.shareId && !state.manualPublish) {
       scheduleSync();
     }
+  };
+
+  const setManualPublish = (enabled) => {
+    const nextValue = Boolean(enabled);
+    if (state.manualPublish === nextValue) {
+      return;
+    }
+    state.manualPublish = nextValue;
+    if (state.active) {
+      if (state.manualPublish) {
+        state.publishedPayload = state.publishedPayload || buildPayload();
+        state.hasUnpublishedChanges = false;
+      } else {
+        void flushSync({ forcePublish: true });
+      }
+    }
+    notifyUi();
+  };
+
+  const publishNow = async () => {
+    if (!state.active) {
+      return;
+    }
+    await flushSync({ forcePublish: true });
   };
 
   return {
@@ -223,6 +280,8 @@ export const createLiveStageShareController = ({
     startShare,
     toggleShare,
     copyLink,
+    setManualPublish,
+    publishNow,
     getDraftSnapshot,
     restoreFromDraft
   };

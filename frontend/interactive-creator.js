@@ -123,6 +123,8 @@ let copyPublicModuleLinkBtn;
 let openPublicModuleLinkBtn;
 let modulePublicLinkStatus;
 let toggleLiveStageShareBtn;
+let publishLiveStageShareBtn;
+let manualLivePublishToggle;
 let allowLiveCursorsToggle;
 let liveStageShareLinkInput;
 let copyLiveStageShareLinkBtn;
@@ -597,7 +599,8 @@ const previewState = {
   replaceCounters: new Map(),
   hiddenElements: new Map(),
   mediaState: new Map(),
-  timedVideoTriggers: new Map()
+  timedVideoTriggers: new Map(),
+  blockBranchExpanded: new Map()
 };
 const previewAnimationState = new Map();
 let lastPreviewAnimationSlideId = null;
@@ -4035,6 +4038,17 @@ const syncLiveStageShareUi = () => {
   }
   const hasLink = Boolean(liveStageShareState.url);
   toggleLiveStageShareBtn.textContent = liveStageShareState.active ? 'Encerrar ao vivo' : 'Iniciar ao vivo';
+  if (manualLivePublishToggle) {
+    manualLivePublishToggle.checked = Boolean(liveStageShareState.manualPublish);
+  }
+  if (publishLiveStageShareBtn) {
+    publishLiveStageShareBtn.disabled = !liveStageShareState.active || !liveStageShareState.manualPublish || liveStageShareState.syncing;
+    publishLiveStageShareBtn.textContent = liveStageShareState.syncing
+      ? 'Publicando...'
+      : liveStageShareState.hasUnpublishedChanges
+        ? 'Publicar mudancas'
+        : 'Publicar agora';
+  }
   liveStageShareLinkInput.value = hasLink ? liveStageShareState.url : '';
   copyLiveStageShareLinkBtn.disabled = !hasLink;
   openLiveStageShareLinkBtn.disabled = !hasLink;
@@ -4045,7 +4059,11 @@ const syncLiveStageShareUi = () => {
   if (liveStageShareState.active) {
     transmitCameraBtn?.classList.remove('hidden');
     transmitScreenBtn?.classList.remove('hidden');
-    liveStageShareStatus.textContent = 'Compartilhamento ao vivo ativo. Os alunos veem o palco sendo editado em tempo real.';
+    liveStageShareStatus.textContent = liveStageShareState.manualPublish
+      ? liveStageShareState.hasUnpublishedChanges
+        ? 'Modo manual ativo. As mudancas estao privadas ate voce publicar.'
+        : 'Modo manual ativo. Os alunos veem a ultima versao publicada.'
+      : 'Compartilhamento ao vivo ativo. Os alunos veem o palco sendo editado em tempo real.';
     if (moduleAllowsLiveCursorsInCreator()) {
       startCreatorLiveCursorSync();
     } else {
@@ -4057,7 +4075,9 @@ const syncLiveStageShareUi = () => {
     stopCreatorLiveCursorSync();
     stopCameraShare();
     stopScreenShare();
-    liveStageShareStatus.textContent = 'Os alunos verão o palco sendo editado em tempo real, sem acesso ao editor.';
+    liveStageShareStatus.textContent = liveStageShareState.manualPublish
+      ? 'Ative o ao vivo para montar em privado e publicar quando quiser.'
+      : 'Os alunos verão o palco sendo editado em tempo real, sem acesso ao editor.';
   }
   renderCameraRequestsUi();
 };
@@ -6648,6 +6668,224 @@ const syncElementBackgroundState = (element) => {
   const solidValue = element.backgroundColor || element.solidColor || '#f4f6ff';
   element.solidColor = solidValue;
   element.backgroundColor = solidValue;
+};
+
+const getBlockBranchParentId = (element = {}) => String(element.parentBlockId || '').trim();
+
+const getBlockBranchChildren = (slide, parentId) =>
+  (slide?.elements || []).filter((element) => element?.type === 'block' && getBlockBranchParentId(element) === parentId);
+
+const getBlockBranchDescendantIds = (slide, parentId) => {
+  const descendants = new Set();
+  const visit = (id) => {
+    getBlockBranchChildren(slide, id).forEach((child) => {
+      if (!child?.id || descendants.has(child.id)) {
+        return;
+      }
+      descendants.add(child.id);
+      visit(child.id);
+    });
+  };
+  visit(parentId);
+  return descendants;
+};
+
+const getBlockBranchConnectionPoints = (parent, child) => {
+  const parentState = getElementRenderState(parent);
+  const childState = getElementRenderState(child);
+  const parentRight = Number(parentState.x) + (Number(parentState.width) || Number(parent.width) || 0);
+  const childLeft = Number(childState.x);
+  const parentCenterX = Number(parentState.x) + (Number(parentState.width) || Number(parent.width) || 0) / 2;
+  const parentCenterY = Number(parentState.y) + (Number(parentState.height) || Number(parent.height) || 0) / 2;
+  const childCenterX = Number(childState.x) + (Number(childState.width) || Number(child.width) || 0) / 2;
+  const childCenterY = Number(childState.y) + (Number(childState.height) || Number(child.height) || 0) / 2;
+  const fromX = parentRight <= childLeft ? parentRight : parentCenterX;
+  const toX = parentRight <= childLeft ? childLeft : childCenterX;
+  return {
+    fromX,
+    fromY: parentCenterY,
+    toX,
+    toY: childCenterY
+  };
+};
+
+const createBlockBranchPath = ({ fromX, fromY, toX, toY }) => {
+  const midX = fromX + (toX - fromX) * 0.5;
+  return `M ${fromX} ${fromY} C ${midX} ${fromY}, ${midX} ${toY}, ${toX} ${toY}`;
+};
+
+const renderBlockBranchConnectors = (slide, { interactive = false, isVisible = null } = {}) => {
+  const visiblePredicate = typeof isVisible === 'function' ? isVisible : () => true;
+  const blocks = (slide?.elements || []).filter((element) => element?.type === 'block' && element?.id && visiblePredicate(element));
+  if (!blocks.length) {
+    return null;
+  }
+  const blockMap = new Map(blocks.map((block) => [block.id, block]));
+  const connections = blocks
+    .map((child) => ({ child, parent: blockMap.get(getBlockBranchParentId(child)) }))
+    .filter(({ child, parent }) => child && parent);
+  if (!connections.length) {
+    return null;
+  }
+  const stage = getStageDimensions();
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.classList.add('block-branch-connectors');
+  if (interactive) {
+    svg.classList.add('is-editor');
+  }
+  svg.setAttribute('width', String(stage.width || DEFAULT_STAGE_SIZE.width));
+  svg.setAttribute('height', String(stage.height || DEFAULT_STAGE_SIZE.height));
+  svg.setAttribute('viewBox', `0 0 ${stage.width || DEFAULT_STAGE_SIZE.width} ${stage.height || DEFAULT_STAGE_SIZE.height}`);
+  svg.setAttribute('aria-hidden', 'true');
+  const markerId = `block-branch-arrow-${slide?.id || 'slide'}`;
+  const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+  const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+  marker.setAttribute('id', markerId);
+  marker.setAttribute('viewBox', '0 0 10 10');
+  marker.setAttribute('refX', '8.5');
+  marker.setAttribute('refY', '5');
+  marker.setAttribute('markerWidth', '7');
+  marker.setAttribute('markerHeight', '7');
+  marker.setAttribute('orient', 'auto-start-reverse');
+  const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  arrow.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z');
+  marker.appendChild(arrow);
+  defs.appendChild(marker);
+  svg.appendChild(defs);
+  connections.forEach(({ parent, child }) => {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', createBlockBranchPath(getBlockBranchConnectionPoints(parent, child)));
+    path.setAttribute('marker-end', `url(#${markerId})`);
+    svg.appendChild(path);
+  });
+  return svg;
+};
+
+const addBlockBranchChild = (parentId) => {
+  const slide = getActiveSlide();
+  const parent = slide?.elements.find((element) => element?.id === parentId && element.type === 'block');
+  if (!slide || !parent) {
+    return;
+  }
+  const stage = getStageDimensions();
+  const siblings = getBlockBranchChildren(slide, parent.id);
+  const parentWidth = Number(parent.width) || 260;
+  const parentHeight = Number(parent.height) || 150;
+  const childWidth = Math.max(180, Math.min(parentWidth, 280));
+  const childHeight = Math.max(96, Math.min(parentHeight, 150));
+  const nextX = clamp((Number(parent.x) || 0) + parentWidth + 130, 0, Math.max(0, stage.width - childWidth));
+  const nextY = clamp((Number(parent.y) || 0) + siblings.length * (childHeight + 34), 0, Math.max(0, stage.height - childHeight));
+  const child = addElementToSpecificSlide(slide.id, {
+    type: 'block',
+    parentBlockId: parent.id,
+    content: `Ramo ${siblings.length + 1}`,
+    x: nextX,
+    y: nextY,
+    width: childWidth,
+    height: childHeight,
+    shape: parent.shape || 'rectangle',
+    useGradient: Boolean(parent.useGradient),
+    solidColor: parent.solidColor || parent.backgroundColor || '#ffffff',
+    gradientStart: parent.gradientStart || '#ffd54f',
+    gradientEnd: parent.gradientEnd || '#ffb74d',
+    backgroundColor: parent.backgroundColor || parent.solidColor || '#ffffff',
+    textColor: parent.textColor || '#0f142c',
+    fontSize: Math.max(14, Number(parent.fontSize) || 18),
+    fontFamily: parent.fontFamily || 'Inter, sans-serif',
+    fontWeight: parent.fontWeight || '500'
+  });
+  selectElement(child.id, { openEditor: true });
+  renderSlide();
+  commitHistoryState();
+};
+
+const appendBlockBranchEditorControl = (container, element) => {
+  if (!container || previewState.active || element?.type !== 'block') {
+    return;
+  }
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'block-branch-editor-btn';
+  button.textContent = '+';
+  button.setAttribute('aria-label', 'Criar ramificacao deste bloco');
+  button.title = 'Criar ramificacao';
+  button.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  button.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    addBlockBranchChild(element.id);
+  });
+  container.appendChild(button);
+};
+
+const getPreviewBlockBranchExpandedKey = (slide) => `preview::${slide?.id || 'slide'}`;
+
+const getPreviewExpandedBlockBranches = (slide) =>
+  previewState.blockBranchExpanded.get(getPreviewBlockBranchExpandedKey(slide)) || new Set();
+
+const setPreviewBlockBranchExpanded = (slide, blockId, expanded) => {
+  if (!slide || !blockId) {
+    return;
+  }
+  const key = getPreviewBlockBranchExpandedKey(slide);
+  const expandedIds = new Set(previewState.blockBranchExpanded.get(key) || []);
+  if (expanded) {
+    expandedIds.add(blockId);
+  } else {
+    expandedIds.delete(blockId);
+    getBlockBranchDescendantIds(slide, blockId).forEach((id) => expandedIds.delete(id));
+  }
+  previewState.blockBranchExpanded.set(key, expandedIds);
+};
+
+const isPreviewBlockBranchHidden = (slide, element) => {
+  if (element?.type !== 'block') {
+    return false;
+  }
+  const blockMap = new Map((slide?.elements || []).filter((entry) => entry?.type === 'block' && entry?.id).map((entry) => [entry.id, entry]));
+  const expandedIds = getPreviewExpandedBlockBranches(slide);
+  let parentId = getBlockBranchParentId(element);
+  const visited = new Set();
+  while (parentId) {
+    if (visited.has(parentId)) {
+      return false;
+    }
+    visited.add(parentId);
+    if (!expandedIds.has(parentId)) {
+      return true;
+    }
+    parentId = getBlockBranchParentId(blockMap.get(parentId));
+  }
+  return false;
+};
+
+const appendPreviewBlockBranchControl = (node, element, slide) => {
+  const children = getBlockBranchChildren(slide, element?.id || '');
+  if (!node || element?.type !== 'block' || !children.length) {
+    return;
+  }
+  const expandedIds = getPreviewExpandedBlockBranches(slide);
+  const isExpanded = expandedIds.has(element.id);
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'block-branch-toggle-btn';
+  button.textContent = isExpanded ? '-' : '+';
+  button.setAttribute('aria-label', isExpanded ? 'Recolher ramificacao' : 'Mostrar ramificacao');
+  button.title = isExpanded ? 'Recolher ramificacao' : 'Mostrar ramificacao';
+  button.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  button.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setPreviewBlockBranchExpanded(slide, element.id, !isExpanded);
+    renderSlide();
+  });
+  node.appendChild(button);
 };
 
 const applyShapeStyles = (node, shape) => {
@@ -10837,6 +11075,15 @@ const renderSlide = () => {
   }
   slideCanvas.innerHTML = '';
   setStageBackground(slide);
+  {
+    const branchConnectors = renderBlockBranchConnectors(slide, {
+      interactive: !previewState.active,
+      isVisible: (element) => !previewState.active || !isPreviewBlockBranchHidden(slide, element)
+    });
+    if (branchConnectors) {
+      slideCanvas.appendChild(branchConnectors);
+    }
+  }
   if (!previewState.active) {
     syncBackgroundInputs(slide);
   }
@@ -10864,6 +11111,7 @@ const renderSlide = () => {
   slide.elements
     .slice()
     .sort((a, b) => (Number(a.zIndex) || 0) - (Number(b.zIndex) || 0))
+    .filter((element) => !previewState.active || !isPreviewBlockBranchHidden(slide, element))
     .forEach((element) => {
       const node = previewState.active ? createPreviewElementNode(element, slide) : renderElementNode(element);
       slideCanvas.appendChild(node);
@@ -10955,6 +11203,7 @@ const toggleStudentPreview = () => {
     previewState.hiddenElements = new Map();
     previewState.mediaState = new Map();
     previewState.timedVideoTriggers = new Map();
+    previewState.blockBranchExpanded = new Map();
     previewAnimationState.clear();
     lastPreviewAnimationSlideId = null;
     renderSlide();
@@ -10973,6 +11222,7 @@ const toggleStudentPreview = () => {
   previewState.hiddenElements = new Map();
   previewState.mediaState = new Map();
   previewState.timedVideoTriggers = new Map();
+  previewState.blockBranchExpanded = new Map();
   previewAnimationState.clear();
   lastPreviewAnimationSlideId = null;
   // Initialize initially hidden elements
@@ -11952,7 +12202,10 @@ const removeSelectedElement = () => {
   const targetElement = slide.elements.find((child) => child.id === selectedElementId) || null;
   detachLiveStudentStrokeElement(targetElement);
   rememberDismissedLiveStudentStroke(targetElement);
-  slide.elements = slide.elements.filter((child) => child.id !== selectedElementId);
+  const removedIds = targetElement?.type === 'block'
+    ? new Set([selectedElementId, ...getBlockBranchDescendantIds(slide, selectedElementId)])
+    : new Set([selectedElementId]);
+  slide.elements = slide.elements.filter((child) => !removedIds.has(child.id));
   selectedElementId = null;
   updateElementInspector(null);
   renderSlide();
@@ -14340,7 +14593,7 @@ const createPreviewElementNode = (element, slide, options = {}) => {
   const renderState = getElementRenderState(element);
   const preservedElapsedSeconds = getPreviewAnimationElapsed(slide, element);
   let node;
-  if (isPreviewElementHidden(slide?.id, element?.id)) {
+  if (isPreviewElementHidden(slide?.id, element?.id) || (!forExport && isPreviewBlockBranchHidden(slide, element))) {
     return document.createComment(`hidden-${element?.id || 'element'}`);
   }
   switch (element.type) {
@@ -14562,6 +14815,7 @@ const createPreviewElementNode = (element, slide, options = {}) => {
   if (element.fontFamily) node.style.fontFamily = element.fontFamily;
   if (element.fontWeight) node.style.fontWeight = element.fontWeight;
   applyElementAnimationStyles(node, element, { preservedElapsedSeconds });
+  appendPreviewBlockBranchControl(node, element, slide);
   enablePreviewStudentDrag(node, element, slide);
   return node;
 };
@@ -14810,6 +15064,7 @@ const renderElementNode = (element) => {
     trigger.style.top = '6px';
     trigger.style.zIndex = '1000002';
     wrapper.appendChild(trigger);
+    appendBlockBranchEditorControl(wrapper, element);
 
     return wrapper;
   }
@@ -14844,6 +15099,7 @@ const renderElementNode = (element) => {
     selectElement(element.id);
   });
   node.classList.toggle('will-be-hidden', Boolean(element.initiallyHidden));
+  appendBlockBranchEditorControl(node, element);
   return node;
 };
 
@@ -15108,6 +15364,8 @@ document.addEventListener('DOMContentLoaded', () => {
   openPublicModuleLinkBtn = document.getElementById('openPublicModuleLinkBtn');
   modulePublicLinkStatus = document.getElementById('modulePublicLinkStatus');
   toggleLiveStageShareBtn = document.getElementById('toggleLiveStageShareBtn');
+  publishLiveStageShareBtn = document.getElementById('publishLiveStageShareBtn');
+  manualLivePublishToggle = document.getElementById('manualLivePublishToggle');
   allowLiveCursorsToggle = document.getElementById('allowLiveCursorsToggle');
   liveStageShareLinkInput = document.getElementById('liveStageShareLinkInput');
   copyLiveStageShareLinkBtn = document.getElementById('copyLiveStageShareLinkBtn');
@@ -15656,6 +15914,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
   toggleLiveStageShareBtn?.addEventListener('click', toggleLiveStageShare);
+  publishLiveStageShareBtn?.addEventListener('click', () => {
+    liveStageShareController?.publishNow();
+  });
+  manualLivePublishToggle?.addEventListener('change', () => {
+    liveStageShareController?.setManualPublish(Boolean(manualLivePublishToggle.checked));
+    persistBuilderDraftLocally();
+  });
   copyLiveStageShareLinkBtn?.addEventListener('click', copyLiveStageShareLink);
   openLiveStageShareLinkBtn?.addEventListener('click', () => {
     if (liveStageShareState.url) {

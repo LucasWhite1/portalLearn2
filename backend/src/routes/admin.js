@@ -39,11 +39,14 @@ router.use(requireAuth);
 router.use(requireRole(['admin', 'professor']));
 const TEMPLATE_STORE_DIR = path.resolve(__dirname, '../../../template-store');
 const TEMPLATE_STORE_KEY_REGEX = /^[a-z0-9._-]+$/i;
+const NOTIFICATION_FILE_DATA_URL_REGEX = /^data:(application\/pdf|application\/msword|application\/vnd\.ms-(powerpoint|excel)|application\/vnd\.openxmlformats-officedocument\.(wordprocessingml\.document|presentationml\.presentation|spreadsheetml\.sheet)|text\/plain|application\/zip|image\/[a-z0-9.+-]+);base64,[a-z0-9+/=\s]+$/i;
+const MAX_NOTIFICATION_FILE_BYTES = 8 * 1024 * 1024;
 let courseCoverColumnEnsured = false;
 let courseStoreColumnEnsured = false;
 let courseAccessRequestsTableEnsured = false;
 let classesTableEnsured = false;
 let progressEventsColumnEnsured = false;
+let enrollmentProgressColumnsEnsured = false;
 let adminSmtpSettingsEnsured = false;
 let ownershipColumnsEnsured = false;
 let professorCreditColumnsEnsured = false;
@@ -412,6 +415,20 @@ const estimateModuleStorageBytes = ({ title, description, slug, builderData }) =
 const estimateCourseStorageBytes = ({ title, description, slug, coverImage }) =>
   estimateTextStorageBytes(title, description, slug, coverImage);
 
+const estimateNotificationAttachmentsStorageBytes = (attachments = []) =>
+  (Array.isArray(attachments) ? attachments : []).reduce((total, attachment) => {
+    const declaredSize = Number(attachment?.size);
+    if (Number.isFinite(declaredSize) && declaredSize > 0) {
+      return total + Math.trunc(declaredSize);
+    }
+    const url = String(attachment?.url || '');
+    if (url.startsWith('data:')) {
+      const base64 = url.split(',')[1] || '';
+      return total + Buffer.byteLength(base64, 'base64');
+    }
+    return total + Buffer.byteLength(url, 'utf8');
+  }, 0);
+
 const getProfessorStudentCount = async (professorId) => {
   const { rows } = await db.query(
     `SELECT COUNT(*)::int AS total
@@ -424,6 +441,7 @@ const getProfessorStudentCount = async (professorId) => {
 };
 
 const getProfessorStorageUsageBytes = async (professorId) => {
+  await ensureOwnershipColumns();
   const { rows } = await db.query(
     `WITH owned_courses AS (
        SELECT
@@ -447,9 +465,22 @@ const getProfessorStorageUsageBytes = async (professorId) => {
        FROM modules m
        JOIN courses c ON c.id = m.course_id
        WHERE c.owner_user_id = $1
+     ),
+     owned_notifications AS (
+       SELECT
+         COALESCE(SUM(
+           CASE
+             WHEN attachment.value ? 'size' AND (attachment.value->>'size') ~ '^[0-9]+$'
+               THEN (attachment.value->>'size')::bigint
+             ELSE octet_length(COALESCE(attachment.value->>'url', ''))
+           END
+         ), 0)::bigint AS total
+       FROM notifications n
+       LEFT JOIN LATERAL jsonb_array_elements(COALESCE(n.attachments, '[]'::jsonb)) AS attachment(value) ON TRUE
+       WHERE n.owner_user_id = $1 OR n.created_by = $1
      )
-     SELECT (owned_courses.total + owned_modules.total)::bigint AS total
-     FROM owned_courses, owned_modules`,
+     SELECT (owned_courses.total + owned_modules.total + owned_notifications.total)::bigint AS total
+     FROM owned_courses, owned_modules, owned_notifications`,
     [professorId]
   );
   return Number(rows[0]?.total || 0);
@@ -641,7 +672,86 @@ const ensureOwnershipColumns = async () => {
   await db.query(
     "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL"
   );
+  await db.query(
+    "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS attachments JSONB NOT NULL DEFAULT '[]'::jsonb"
+  );
   ownershipColumnsEnsured = true;
+};
+
+const sanitizeNotificationAttachments = (value = [], message = '') => {
+  const rawItems = Array.isArray(value)
+    ? value
+    : String(value || '')
+      .split(/\r?\n/)
+      .map((url) => ({ url }));
+  const attachments = [];
+  const seen = new Set();
+  const pushAttachment = (entry = {}) => {
+    const rawUrl = typeof entry === 'string' ? entry : entry.url;
+    const rawTextUrl = String(rawUrl || '').trim();
+    const normalizedTextUrl = rawTextUrl.startsWith('www.') ? `https://${rawTextUrl}` : rawTextUrl;
+    let url = sanitizeMediaUrl(normalizedTextUrl, { allowData: false });
+    if (!url && NOTIFICATION_FILE_DATA_URL_REGEX.test(rawTextUrl)) {
+      const base64 = rawTextUrl.split(',')[1] || '';
+      const estimatedBytes = Buffer.byteLength(base64, 'base64');
+      if (estimatedBytes <= MAX_NOTIFICATION_FILE_BYTES) {
+        url = rawTextUrl;
+      }
+    }
+    if (!url || seen.has(url)) {
+      return;
+    }
+    seen.add(url);
+    let fallbackTitle = 'Documento';
+    try {
+      const parsed = new URL(url);
+      const fileName = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() || '').replace(/\.[a-z0-9]{2,8}$/i, '');
+      fallbackTitle = fileName || parsed.hostname || fallbackTitle;
+    } catch (error) {
+      fallbackTitle = 'Documento';
+    }
+    attachments.push({
+      title: sanitizeText(entry.title || fallbackTitle, 120) || 'Documento',
+      url,
+      mimeType: sanitizeText(entry.mimeType || '', 120) || null,
+      size: Math.max(0, Math.min(MAX_NOTIFICATION_FILE_BYTES, Number(entry.size) || 0)) || null
+    });
+  };
+  rawItems.slice(0, 10).forEach(pushAttachment);
+  return attachments.slice(0, 10);
+};
+
+const getNotificationDataAttachment = (attachments = [], attachmentIndex = 0) => {
+  const index = Number.parseInt(String(attachmentIndex), 10);
+  if (!Array.isArray(attachments) || !Number.isInteger(index) || index < 0 || index >= attachments.length) {
+    return null;
+  }
+  const attachment = attachments[index];
+  const url = String(attachment?.url || '');
+  if (!NOTIFICATION_FILE_DATA_URL_REGEX.test(url)) {
+    return null;
+  }
+  const match = url.match(/^data:([^;,]+);base64,([\s\S]+)$/i);
+  if (!match) {
+    return null;
+  }
+  const buffer = Buffer.from(match[2], 'base64');
+  if (!buffer.length || buffer.length > MAX_NOTIFICATION_FILE_BYTES) {
+    return null;
+  }
+  return {
+    buffer,
+    mimeType: sanitizeText(attachment.mimeType || match[1], 120) || 'application/octet-stream',
+    title: sanitizeText(attachment.title || 'documento', 160) || 'documento'
+  };
+};
+
+const sendNotificationDataAttachment = (res, attachment) => {
+  const safeFileName = attachment.title.replace(/[\\/:*?"<>|\r\n]+/g, '_').slice(0, 160) || 'documento';
+  res.setHeader('Content-Type', attachment.mimeType);
+  res.setHeader('Content-Length', String(attachment.buffer.length));
+  res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(safeFileName)}"; filename*=UTF-8''${encodeURIComponent(safeFileName)}`);
+  res.send(attachment.buffer);
 };
 
 const ensureProfessorOwnsStudent = async (req, studentId) => {
@@ -773,6 +883,22 @@ const ensureProgressEventsColumn = async () => {
     "ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS progress_events JSONB NOT NULL DEFAULT '[]'::jsonb"
   );
   progressEventsColumnEnsured = true;
+};
+
+const ensureEnrollmentProgressColumns = async () => {
+  if (enrollmentProgressColumnsEnsured) {
+    return;
+  }
+  await db.query(
+    `ALTER TABLE enrollments
+       ADD COLUMN IF NOT EXISTS quiz_attempts JSONB NOT NULL DEFAULT '{}'::jsonb,
+       ADD COLUMN IF NOT EXISTS interactive_progress JSONB NOT NULL DEFAULT '{}'::jsonb,
+       ADD COLUMN IF NOT EXISTS video_progress JSONB NOT NULL DEFAULT '{}'::jsonb,
+       ADD COLUMN IF NOT EXISTS progress_events JSONB NOT NULL DEFAULT '[]'::jsonb,
+       ADD COLUMN IF NOT EXISTS input_responses JSONB NOT NULL DEFAULT '{}'::jsonb`
+  );
+  progressEventsColumnEnsured = true;
+  enrollmentProgressColumnsEnsured = true;
 };
 
 const ensureClassExists = async (req, className) => {
@@ -1446,7 +1572,7 @@ router.delete('/students/:id', async (req, res) => {
 });
 
 router.get('/reports', async (req, res) => {
-  await ensureProgressEventsColumn();
+  await ensureEnrollmentProgressColumns();
   await ensureReportCorrectionColumn();
   await ensureOwnershipColumns();
   const params = [];
@@ -1466,6 +1592,7 @@ router.get('/reports', async (req, res) => {
   let query = `SELECT u.id user_id, u.full_name, u.email, u.phone, u.class_name, c.id course_id, c.title course_title,
                       e.video_position, e.interactive_step, e.current_module, e.grade, e.updated_at,
                       e.report_corrected_at,
+                      e.quiz_attempts, e.interactive_progress, e.video_progress,
                       COALESCE(jsonb_array_length(e.progress_events), 0) AS progress_event_count
                FROM enrollments e
                JOIN users u ON u.id = e.user_id
@@ -1548,6 +1675,7 @@ router.delete('/reports/:userId/:courseId/corrected', async (req, res) => {
 });
 
 router.get('/reports/:userId/:courseId/timeline', async (req, res) => {
+  await ensureEnrollmentProgressColumns();
   const { userId, courseId } = req.params;
   if (!isUuid(userId) || !isUuid(courseId)) {
     return res.status(400).json({ message: 'ParÃ¢metros invÃ¡lidos.' });
@@ -1584,7 +1712,7 @@ router.get('/reports/:userId/:courseId/timeline', async (req, res) => {
 });
 
 router.get('/reports/:userId/:courseId/replay', async (req, res) => {
-  await ensureProgressEventsColumn();
+  await ensureEnrollmentProgressColumns();
   await ensureOwnershipColumns();
   const { userId, courseId } = req.params;
   if (!isUuid(userId) || !isUuid(courseId)) {
@@ -2197,7 +2325,7 @@ router.delete('/courses/:courseId/modules/:moduleId', async (req, res) => {
 router.get('/notifications', async (req, res) => {
   await ensureOwnershipColumns();
   const params = [];
-  let query = `SELECT id, message, target_type, target_value, created_by, created_at
+  let query = `SELECT id, message, target_type, target_value, attachments, created_by, created_at
                FROM notifications`;
   if (isProfessor(req)) {
     params.push(req.user.id);
@@ -2208,24 +2336,57 @@ router.get('/notifications', async (req, res) => {
   res.json(rows);
 });
 
+router.get('/notifications/:notificationId/attachments/:attachmentIndex', async (req, res) => {
+  await ensureOwnershipColumns();
+  const { notificationId, attachmentIndex } = req.params;
+  if (!isUuid(notificationId)) {
+    return res.status(400).json({ message: 'Notificacao invalida' });
+  }
+  const params = [notificationId];
+  let query = 'SELECT attachments FROM notifications WHERE id = $1';
+  if (isProfessor(req)) {
+    params.push(req.user.id);
+    query += ' AND owner_user_id = $2';
+  }
+  const { rows } = await db.query(query, params);
+  const attachment = getNotificationDataAttachment(rows[0]?.attachments, attachmentIndex);
+  if (!attachment) {
+    return res.status(404).json({ message: 'Anexo nao encontrado.' });
+  }
+  sendNotificationDataAttachment(res, attachment);
+});
+
 router.post('/notifications', async (req, res) => {
   await ensureOwnershipColumns();
   const message = sanitizeNotificationMessage(req.body?.message || '');
   const targetType = sanitizeText(req.body?.targetType || '', 20);
   const targetValue = sanitizeText(req.body?.targetValue || '', 120);
+  const attachments = sanitizeNotificationAttachments(req.body?.attachments || req.body?.attachmentUrls || [], message);
   if (!message) {
     return res.status(400).json({ message: 'Mensagem obrigatÃ³ria' });
   }
   if (!['student', 'class', 'all'].includes(targetType)) {
     return res.status(400).json({ message: 'targetType deve ser student, class ou all' });
   }
+  const attachmentBytes = estimateNotificationAttachmentsStorageBytes(attachments);
+  if (attachmentBytes > 0) {
+    try {
+      await assertProfessorStorageLimit(req, attachmentBytes);
+    } catch (error) {
+      return res.status(error?.statusCode || 403).json({
+        message: error.message || 'O limite de armazenamento deste professor foi atingido.',
+        code: error.code || 'PROFESSOR_STORAGE_LIMIT_REACHED',
+        quotaStatus: error.quotaStatus || null
+      });
+    }
+  }
   const id = crypto.randomUUID();
   await db.query(
-    `INSERT INTO notifications (id, message, target_type, target_value, created_by, owner_user_id)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [id, message, targetType, targetValue || null, req.user.id, isProfessor(req) ? req.user.id : null]
+    `INSERT INTO notifications (id, message, target_type, target_value, attachments, created_by, owner_user_id)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
+    [id, message, targetType, targetValue || null, JSON.stringify(attachments), req.user.id, isProfessor(req) ? req.user.id : null]
   );
-  res.status(201).json({ id });
+  res.status(201).json({ id, attachments });
 });
 
 router.delete('/notifications/:notificationId', async (req, res) => {
@@ -2621,7 +2782,6 @@ router.post('/ai/edit-image-element', aiRequestRateLimiter, async (req, res) => 
   if (!sourceImage) {
     return res.status(400).json({ message: 'Informe a imagem base para editar.' });
   }
-  let creditCharge = null;
   let imageCreditCharge = null;
   const { rows } = await db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
   const settingsRow = rows[0];
@@ -2630,11 +2790,13 @@ router.post('/ai/edit-image-element', aiRequestRateLimiter, async (req, res) => 
   }
 
   try {
-    creditCharge = await consumeProfessorAiCredit(req, 'a edicao da imagem base com o pincel magico');
     const attachment = await mediaUrlToImageAttachment(sourceImage, 'imagem-base');
     if (!attachment) {
       return res.status(400).json({ message: 'Nao foi possivel preparar a imagem base para a IA.' });
     }
+    imageCreditCharge = await consumeProfessorAiCredit(req, 'a edicao de imagem com IA no editor de imagem', {
+      creditType: 'image'
+    });
     const src = await editImageElementWithNanoBanana({
       settingsRow,
       request,
@@ -2642,20 +2804,14 @@ router.post('/ai/edit-image-element', aiRequestRateLimiter, async (req, res) => 
       sourceBounds,
       stageSize
     });
-    imageCreditCharge = await consumeProfessorAiCredit(req, 'a geracao de imagem com IA no editor de imagem', {
-      creditType: 'image'
-    });
     res.json({
       src,
       providerLabel: settingsRow.provider_label,
-      professorCreditsRemaining: imageCreditCharge?.remainingCredits ?? creditCharge?.remainingCredits ?? null
+      professorCreditsRemaining: imageCreditCharge?.remainingCredits ?? null
     });
   } catch (error) {
     if (imageCreditCharge?.charged) {
       await imageCreditCharge.refund();
-    }
-    if (creditCharge?.charged) {
-      await creditCharge.refund();
     }
     res.status(error?.statusCode || 400).json({
       message: error.message || 'A IA nao conseguiu editar a imagem base.',

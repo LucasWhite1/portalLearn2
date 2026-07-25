@@ -192,6 +192,7 @@ const viewerButtonRuleState = new Map();
 const viewerTriggeredDetectors = new Set();
 const viewerReplaceCounters = new Map();
 const viewerHiddenElements = new Map();
+const viewerBlockBranchExpandedState = new Map();
 const viewerAnimationState = new Map();
 const viewerTimedSlideTriggers = new Map();
 const viewerTimedVideoTriggers = new Map();
@@ -2880,6 +2881,61 @@ const getQuizAttemptState = (moduleId, slideKey, quizKey) =>
 
 const getViewerHiddenElementsKey = (slide, slideIndex = viewerState.slideIndex) => getStableSlideKey(slide, slideIndex);
 const isViewerElementHidden = (slide, elementId) => (viewerHiddenElements.get(getViewerHiddenElementsKey(slide)) || new Set()).has(elementId);
+const getViewerBlockBranchParentId = (element = {}) => String(element.parentBlockId || '').trim();
+const getViewerBlockBranchChildren = (slide, parentId) =>
+  (slide?.elements || []).filter((element) => element?.type === 'block' && getViewerBlockBranchParentId(element) === parentId);
+const getViewerBlockBranchExpandedKey = (slide) => `${viewerState.moduleId || getCurrentModule()?.id || 'module'}::${getViewerHiddenElementsKey(slide)}`;
+const getViewerExpandedBlockBranches = (slide) =>
+  viewerBlockBranchExpandedState.get(getViewerBlockBranchExpandedKey(slide)) || new Set();
+const setViewerBlockBranchExpanded = (slide, blockId, expanded) => {
+  if (!slide || !blockId) {
+    return;
+  }
+  const key = getViewerBlockBranchExpandedKey(slide);
+  const expandedIds = new Set(viewerBlockBranchExpandedState.get(key) || []);
+  if (expanded) {
+    expandedIds.add(blockId);
+  } else {
+    expandedIds.delete(blockId);
+    getViewerBlockBranchDescendantIds(slide, blockId).forEach((id) => expandedIds.delete(id));
+  }
+  viewerBlockBranchExpandedState.set(key, expandedIds);
+};
+const getViewerBlockBranchDescendantIds = (slide, parentId) => {
+  const descendants = new Set();
+  const visit = (id) => {
+    getViewerBlockBranchChildren(slide, id).forEach((child) => {
+      if (!child?.id || descendants.has(child.id)) {
+        return;
+      }
+      descendants.add(child.id);
+      visit(child.id);
+    });
+  };
+  visit(parentId);
+  return descendants;
+};
+const isViewerBlockBranchHidden = (slide, element) => {
+  if (element?.type !== 'block') {
+    return false;
+  }
+  const blockMap = new Map((slide?.elements || []).filter((entry) => entry?.type === 'block' && entry?.id).map((entry) => [entry.id, entry]));
+  const expandedIds = getViewerExpandedBlockBranches(slide);
+  let parentId = getViewerBlockBranchParentId(element);
+  const visited = new Set();
+  while (parentId) {
+    if (visited.has(parentId)) {
+      return false;
+    }
+    visited.add(parentId);
+    if (!expandedIds.has(parentId)) {
+      return true;
+    }
+    parentId = getViewerBlockBranchParentId(blockMap.get(parentId));
+  }
+  return false;
+};
+const isViewerElementVisibleByBranch = (slide, element) => !isViewerBlockBranchHidden(slide, element);
 const setViewerElementHidden = (slide, elementId, hidden) => {
   if (!slide || !elementId) {
     return false;
@@ -5762,6 +5818,101 @@ const applyShapeStyles = (node, shape) => {
   }
 };
 
+const getViewerBlockBranchConnectionPoints = (parent, child) => {
+  const parentState = getElementRenderState(parent);
+  const childState = getElementRenderState(child);
+  const parentWidth = Number(parentState.width) || Number(parent.width) || 0;
+  const parentHeight = Number(parentState.height) || Number(parent.height) || 0;
+  const childWidth = Number(childState.width) || Number(child.width) || 0;
+  const childHeight = Number(childState.height) || Number(child.height) || 0;
+  const parentRight = Number(parentState.x) + parentWidth;
+  const childLeft = Number(childState.x);
+  const parentCenterX = Number(parentState.x) + parentWidth / 2;
+  const parentCenterY = Number(parentState.y) + parentHeight / 2;
+  const childCenterX = Number(childState.x) + childWidth / 2;
+  const childCenterY = Number(childState.y) + childHeight / 2;
+  return {
+    fromX: parentRight <= childLeft ? parentRight : parentCenterX,
+    fromY: parentCenterY,
+    toX: parentRight <= childLeft ? childLeft : childCenterX,
+    toY: childCenterY
+  };
+};
+
+const createViewerBlockBranchPath = ({ fromX, fromY, toX, toY }) => {
+  const midX = fromX + (toX - fromX) * 0.5;
+  return `M ${fromX} ${fromY} C ${midX} ${fromY}, ${midX} ${toY}, ${toX} ${toY}`;
+};
+
+const renderViewerBlockBranchConnectors = (slide) => {
+  const blocks = (slide?.elements || []).filter((element) => element?.type === 'block' && element?.id && isViewerElementVisibleByBranch(slide, element));
+  if (!blocks.length) {
+    return null;
+  }
+  const blockMap = new Map(blocks.map((block) => [block.id, block]));
+  const connections = blocks
+    .map((child) => ({ child, parent: blockMap.get(getViewerBlockBranchParentId(child)) }))
+    .filter(({ child, parent }) => child && parent);
+  if (!connections.length) {
+    return null;
+  }
+  const stage = moduleStageDimensions || DEFAULT_STAGE_SIZE;
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.classList.add('block-branch-connectors');
+  svg.setAttribute('width', String(stage.width || DEFAULT_STAGE_SIZE.width));
+  svg.setAttribute('height', String(stage.height || DEFAULT_STAGE_SIZE.height));
+  svg.setAttribute('viewBox', `0 0 ${stage.width || DEFAULT_STAGE_SIZE.width} ${stage.height || DEFAULT_STAGE_SIZE.height}`);
+  svg.setAttribute('aria-hidden', 'true');
+  const markerId = `viewer-block-branch-arrow-${getStableSlideKey(slide, viewerState.slideIndex)}`;
+  const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+  const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+  marker.setAttribute('id', markerId);
+  marker.setAttribute('viewBox', '0 0 10 10');
+  marker.setAttribute('refX', '8.5');
+  marker.setAttribute('refY', '5');
+  marker.setAttribute('markerWidth', '7');
+  marker.setAttribute('markerHeight', '7');
+  marker.setAttribute('orient', 'auto-start-reverse');
+  const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  arrow.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z');
+  marker.appendChild(arrow);
+  defs.appendChild(marker);
+  svg.appendChild(defs);
+  connections.forEach(({ parent, child }) => {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', createViewerBlockBranchPath(getViewerBlockBranchConnectionPoints(parent, child)));
+    path.setAttribute('marker-end', `url(#${markerId})`);
+    svg.appendChild(path);
+  });
+  return svg;
+};
+
+const appendViewerBlockBranchControl = (node, element, slide) => {
+  const children = getViewerBlockBranchChildren(slide, element?.id || '');
+  if (!node || element?.type !== 'block' || !children.length || isReplayMode()) {
+    return;
+  }
+  const expandedIds = getViewerExpandedBlockBranches(slide);
+  const isExpanded = expandedIds.has(element.id);
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'block-branch-toggle-btn';
+  button.textContent = isExpanded ? '-' : '+';
+  button.setAttribute('aria-label', isExpanded ? 'Recolher ramificacao' : 'Mostrar ramificacao');
+  button.title = isExpanded ? 'Recolher ramificacao' : 'Mostrar ramificacao';
+  button.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  button.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setViewerBlockBranchExpanded(slide, element.id, !isExpanded);
+    renderSlide(slide);
+  });
+  node.appendChild(button);
+};
+
 const applyElementAnimationStyles = (node, element, options = {}) => {
   if (!node || !element) {
     return;
@@ -6680,10 +6831,15 @@ const renderSlide = (slide) => {
   moduleStage.style.backgroundSize = backgroundStyles.backgroundImage ? 'cover' : '';
   moduleStage.style.backgroundPosition = backgroundStyles.backgroundImage ? 'center' : '';
   moduleStage.style.backgroundColor = backgroundStyles.backgroundColor;
+  const branchConnectors = renderViewerBlockBranchConnectors(slide);
+  if (branchConnectors) {
+    wrapper.appendChild(branchConnectors);
+  }
   const deferredCaptionOverlays = [];
   (slide.elements || [])
     .slice()
     .sort((a, b) => (Number(a.zIndex) || 0) - (Number(b.zIndex) || 0))
+    .filter((element) => isViewerElementVisibleByBranch(slide, element))
     .forEach((element) => {
       const node = createRendererNode(element, slide);
       wrapper.appendChild(node);
@@ -6754,7 +6910,7 @@ const createRendererNode = (element, slide) => {
   const renderState = getElementRenderState(element);
   const preservedElapsedSeconds = getViewerAnimationElapsed(slide, element);
   let node;
-  if (isViewerElementHidden(slide, element?.id)) {
+  if (isViewerElementHidden(slide, element?.id) || !isViewerElementVisibleByBranch(slide, element)) {
     return document.createComment(`hidden-${element?.id || 'element'}`);
   }
   switch (element.type) {
@@ -6955,6 +7111,7 @@ const createRendererNode = (element, slide) => {
     }
   }
   applyElementAnimationStyles(node, element, { preservedElapsedSeconds });
+  appendViewerBlockBranchControl(node, element, slide);
   attachViewerStudentPenOverlay(node, element, slide);
   enableViewerStudentDrag(node, element, slide);
   return node;

@@ -1817,6 +1817,17 @@ body.mobile-builder-panel-open {
   filter: brightness(1.02);
 }
 
+.stage-live-share-actions .live-publish-btn:not(:disabled) {
+  border-color: rgba(17, 24, 39, 0.2);
+  background: #111827;
+  color: #fff;
+  box-shadow: 0 12px 24px rgba(17, 24, 39, 0.18);
+}
+
+.stage-live-share-actions .live-publish-btn:not(:disabled):hover {
+  filter: brightness(1.05);
+}
+
 .stage-live-share-field {
   display: flex;
   flex-direction: column;
@@ -2138,6 +2149,82 @@ body.mobile-builder-panel-open {
   overflow: hidden;
   will-change: transform, opacity;
   touch-action: none;
+}
+
+.block-branch-connectors {
+  position: absolute;
+  inset: 0;
+  z-index: 999000;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.block-branch-connectors path {
+  fill: none;
+  stroke: rgba(17, 24, 39, 0.72);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.block-branch-connectors marker path {
+  fill: rgba(17, 24, 39, 0.72);
+  stroke: none;
+}
+
+.block-branch-connectors.is-editor path {
+  stroke: rgba(37, 99, 235, 0.76);
+}
+
+.block-branch-connectors.is-editor marker path {
+  fill: rgba(37, 99, 235, 0.76);
+}
+
+.block-branch-editor-btn,
+.block-branch-toggle-btn {
+  position: absolute;
+  right: 7px;
+  top: 7px;
+  z-index: 1000003;
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid rgba(15, 23, 42, 0.16);
+  border-radius: 999px;
+  color: #111827;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.16);
+  font-size: 17px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(-3px) scale(0.94);
+  transition: opacity 0.16s ease, transform 0.16s ease, background 0.16s ease;
+}
+
+.block-branch-editor-btn {
+  right: 42px;
+  top: 6px;
+  width: 28px;
+  height: 28px;
+}
+
+.builder-block-element:hover > .block-branch-editor-btn,
+.builder-block-element:focus-within > .block-branch-editor-btn,
+.builder-block-element:hover > .block-branch-toggle-btn,
+.builder-block-element:focus-within > .block-branch-toggle-btn,
+[data-element-id]:hover > .block-branch-editor-btn,
+[data-element-id]:focus-within > .block-branch-editor-btn {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.block-branch-editor-btn:hover,
+.block-branch-toggle-btn:hover {
+  background: #ffffff;
+  transform: translateY(-1px) scale(1.04);
 }
 
 .builder-pen-element {

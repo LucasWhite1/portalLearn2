@@ -38,6 +38,7 @@ let adminCurrentChatMessages = [];
 let currentStudentSignupLink = '';
 let liveStagePollTimer = null;
 let mobileSidenavCleanup = null;
+let selectedNotificationAttachment = null;
 
 const getCurrentUserRole = () => localStorage.getItem(USER_ROLE_KEY) || '';
 const getCurrentUserData = () => {
@@ -72,6 +73,194 @@ const escapeHtml = (value) =>
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+
+const escapeAttribute = escapeHtml;
+
+const URL_IN_TEXT_REGEX = /(?:https?:\/\/|www\.)[^\s<>"')\]]+/gi;
+const MAX_NOTIFICATION_FILE_BYTES = 8 * 1024 * 1024;
+const NOTIFICATION_FILE_MIME_TYPES = new Set([
+  'application/pdf',
+  'application/msword',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'text/plain',
+  'application/zip'
+]);
+
+const getSafeHttpUrl = (value) => {
+  try {
+    const raw = String(value || '').trim();
+    const parsed = new URL(raw.startsWith('www.') ? `https://${raw}` : raw);
+    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.toString() : '';
+  } catch (error) {
+    return '';
+  }
+};
+
+const isSafeNotificationDataUrl = (value) =>
+  /^data:(application\/pdf|application\/msword|application\/vnd\.ms-(powerpoint|excel)|application\/vnd\.openxmlformats-officedocument\.(wordprocessingml\.document|presentationml\.presentation|spreadsheetml\.sheet)|text\/plain|application\/zip|image\/[a-z0-9.+-]+);base64,[a-z0-9+/=\s]+$/i.test(String(value || ''));
+
+const linkifyText = (value) => {
+  const raw = String(value || '');
+  let output = '';
+  let lastIndex = 0;
+  raw.replace(URL_IN_TEXT_REGEX, (match, offset) => {
+    output += escapeHtml(raw.slice(lastIndex, offset));
+    const safeUrl = getSafeHttpUrl(match);
+    output += safeUrl
+      ? `<a href="${escapeAttribute(safeUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(match)}</a>`
+      : escapeHtml(match);
+    lastIndex = offset + match.length;
+    return match;
+  });
+  output += escapeHtml(raw.slice(lastIndex));
+  return output.replace(/\n/g, '<br>');
+};
+
+const normalizeNotificationAttachments = (attachments) => {
+  if (!Array.isArray(attachments)) return [];
+  const seen = new Set();
+  return attachments
+    .map((entry) => {
+      const rawUrl = entry?.url || entry;
+      const url = getSafeHttpUrl(rawUrl) || (isSafeNotificationDataUrl(rawUrl) ? String(rawUrl) : '');
+      if (!url || seen.has(url)) return null;
+      seen.add(url);
+      return {
+        title: String(entry?.title || 'Documento').trim() || 'Documento',
+        url,
+        mimeType: entry?.mimeType || '',
+        size: Number(entry?.size) || 0,
+        isFileData: isSafeNotificationDataUrl(url)
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 10);
+};
+
+const renderNotificationAttachments = (attachments) => {
+  const safeAttachments = normalizeNotificationAttachments(attachments);
+  if (!safeAttachments.length) return '';
+  return `
+    <div class="notification-attachments">
+      ${safeAttachments.map((attachment, index) => attachment.isFileData
+        ? `
+        <button class="notification-attachment" type="button" data-notification-attachment-index="${index}">
+          <span class="notification-attachment-icon">DOC</span>
+          <span>${escapeHtml(attachment.title)}</span>
+        </button>
+      `
+        : `
+        <a class="notification-attachment" href="${escapeAttribute(attachment.url)}" target="_blank" rel="noopener noreferrer">
+          <span class="notification-attachment-icon">LINK</span>
+          <span>${escapeHtml(attachment.title)}</span>
+        </a>
+      `).join('')}
+    </div>
+  `;
+};
+
+const openNotificationAttachment = async (button) => {
+  const card = button?.closest('[data-notification-id]');
+  const notificationId = card?.dataset?.notificationId || '';
+  const attachmentIndex = button?.dataset?.notificationAttachmentIndex || '';
+  if (!notificationId || attachmentIndex === '') {
+    alert('Anexo indisponível nesta notificação.');
+    return;
+  }
+  const scope = getCurrentUserRole() === 'student' ? 'student' : 'admin';
+  try {
+    button.disabled = true;
+    const response = await authorizedFetch(`/api/${scope}/notifications/${encodeURIComponent(notificationId)}/attachments/${encodeURIComponent(attachmentIndex)}`, {
+      headers: {}
+    });
+    if (!response.ok) {
+      const errorPayload = await response.json().catch(() => null);
+      throw new Error(errorPayload?.message || 'Não foi possível abrir o anexo.');
+    }
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    window.open(objectUrl, '_blank', 'noopener,noreferrer');
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60 * 1000);
+  } catch (error) {
+    alert(error.message || 'Não foi possível abrir o anexo.');
+  } finally {
+    button.disabled = false;
+  }
+};
+
+const setupNotificationAttachmentClicks = () => {
+  document.addEventListener('click', async (event) => {
+    const button = event.target.closest('button[data-notification-attachment-index]');
+    if (!button) return;
+    event.preventDefault();
+    await openNotificationAttachment(button);
+  });
+};
+
+const getNotificationFileAllowed = (file) =>
+  Boolean(file) && (NOTIFICATION_FILE_MIME_TYPES.has(file.type) || file.type.startsWith('image/'));
+
+const inferNotificationFileMimeType = (file) => {
+  const explicitType = String(file?.type || '').trim();
+  if (explicitType) return explicitType;
+  const name = String(file?.name || '').toLowerCase();
+  if (name.endsWith('.pdf')) return 'application/pdf';
+  if (name.endsWith('.doc')) return 'application/msword';
+  if (name.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  if (name.endsWith('.ppt')) return 'application/vnd.ms-powerpoint';
+  if (name.endsWith('.pptx')) return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+  if (name.endsWith('.xls')) return 'application/vnd.ms-excel';
+  if (name.endsWith('.xlsx')) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  if (name.endsWith('.txt')) return 'text/plain';
+  if (name.endsWith('.zip')) return 'application/zip';
+  return '';
+};
+
+const getNotificationFileAllowedByTypeOrName = (file) => {
+  const mimeType = inferNotificationFileMimeType(file);
+  return Boolean(file) && (NOTIFICATION_FILE_MIME_TYPES.has(mimeType) || mimeType.startsWith('image/'));
+};
+
+const readNotificationAttachmentFile = (file) => new Promise((resolve, reject) => {
+  if (!file) {
+    resolve(null);
+    return;
+  }
+  const mimeType = inferNotificationFileMimeType(file);
+  if (!getNotificationFileAllowedByTypeOrName(file)) {
+    reject(new Error('Formato de arquivo não permitido. Use PDF, Word, PowerPoint, Excel, TXT, ZIP ou imagem.'));
+    return;
+  }
+  if (file.size > MAX_NOTIFICATION_FILE_BYTES) {
+    reject(new Error('O anexo pode ter no máximo 8 MB.'));
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const result = String(reader.result || '');
+    const base64 = result.includes(',') ? result.split(',').slice(1).join(',') : '';
+    resolve({
+      title: file.name,
+      url: base64 ? `data:${mimeType};base64,${base64}` : result,
+      mimeType,
+      size: file.size
+    });
+  };
+  reader.onerror = () => reject(new Error('Não foi possível ler o arquivo selecionado.'));
+  reader.readAsDataURL(file);
+});
+
+const clearNotificationAttachment = () => {
+  selectedNotificationAttachment = null;
+  const input = document.getElementById('notificationFileInput');
+  const status = document.getElementById('notificationFileStatus');
+  if (input) input.value = '';
+  if (status) status.textContent = 'Nenhum arquivo anexado.';
+};
 
 const truncateChatPreview = (value, max = 110) => {
   const normalized = String(value || '').replace(/\s+/g, ' ').trim();
@@ -478,6 +667,121 @@ const formatGrade = (value) => {
     return '—';
   }
   return `${Number(value).toFixed(1)}%`;
+};
+
+const normalizeJsonMap = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : {});
+
+const clampPercent = (value) => Math.max(0, Math.min(100, Number(value) || 0));
+
+const formatSecondsAsMinutes = (seconds) => {
+  const totalSeconds = Math.max(0, Number(seconds) || 0);
+  if (totalSeconds < 60) return `${Math.round(totalSeconds)}s`;
+  return `${Math.round(totalSeconds / 60)}min`;
+};
+
+const buildModulePerformanceMetrics = (row = {}) => {
+  const progress = normalizeJsonMap(row.progress);
+  const interactiveMap = normalizeJsonMap(row.interactive_progress || progress.interactive_progress);
+  const videoMap = normalizeJsonMap(row.video_progress || progress.video_progress);
+  const quizMap = normalizeJsonMap(row.quiz_attempts || progress.quiz_attempts);
+  const modules = sortModulesForPhase(row.modules || []);
+  const moduleTitleById = new Map(modules.map((module, index) => [module.id, module.title || `Módulo ${index + 1}`]));
+  const moduleIds = new Set();
+  modules.forEach((module) => module?.id && moduleIds.add(module.id));
+  Object.keys(interactiveMap).forEach((moduleId) => moduleId && moduleIds.add(moduleId));
+  Object.values(videoMap).forEach((entry) => {
+    if (entry?.moduleId) moduleIds.add(entry.moduleId);
+  });
+  Object.keys(quizMap).forEach((key) => {
+    const moduleId = String(key || '').split('::')[0];
+    if (moduleId) moduleIds.add(moduleId);
+  });
+  if (!moduleIds.size && row.current_module) {
+    moduleIds.add('current');
+  }
+  return Array.from(moduleIds).map((moduleId, index) => {
+    const interactive = interactiveMap[moduleId] || {};
+    const viewedSlides = Array.isArray(interactive.viewedSlides) ? interactive.viewedSlides.length : 0;
+    const completedSlides = Array.isArray(interactive.completedSlides) ? interactive.completedSlides.length : 0;
+    const totalSlides = Number(interactive.totalSlides) || Math.max(viewedSlides, completedSlides, 0);
+    const slidePercent = totalSlides > 0 ? clampPercent((completedSlides / totalSlides) * 100) : 0;
+    const videoEntries = Object.values(videoMap).filter((entry) => entry?.moduleId === moduleId);
+    const watchedSeconds = videoEntries.reduce((sum, entry) => sum + Math.min(Number(entry.watchedSeconds) || 0, Number(entry.durationSeconds) || Number(entry.watchedSeconds) || 0), 0);
+    const durationSeconds = videoEntries.reduce((sum, entry) => sum + (Number(entry.durationSeconds) || 0), 0);
+    const completedVideos = videoEntries.filter((entry) => entry?.completed).length;
+    const videoPercent = durationSeconds > 0
+      ? clampPercent((watchedSeconds / durationSeconds) * 100)
+      : (videoEntries.length ? clampPercent((completedVideos / videoEntries.length) * 100) : 0);
+    const quizEntries = Object.entries(quizMap).filter(([key]) => String(key || '').startsWith(`${moduleId}::`));
+    const answeredQuizzes = quizEntries.filter(([, attempt]) => attempt?.answered).length;
+    const correctQuizzes = quizEntries.filter(([, attempt]) => attempt?.answered && attempt?.isCorrect).length;
+    const gradePercent = answeredQuizzes > 0 ? clampPercent((correctQuizzes / answeredQuizzes) * 100) : null;
+    const availableScores = [slidePercent, videoEntries.length ? videoPercent : null, gradePercent].filter((value) => value !== null);
+    const performanceScore = availableScores.length
+      ? availableScores.reduce((sum, value) => sum + value, 0) / availableScores.length
+      : 0;
+    return {
+      moduleId,
+      label: moduleTitleById.get(moduleId) || (moduleId === 'current' ? (row.current_module || progress.current_module || 'Módulo atual') : `Módulo ${index + 1}`),
+      gradePercent,
+      answeredQuizzes,
+      correctQuizzes,
+      viewedSlides,
+      completedSlides,
+      totalSlides,
+      slidePercent,
+      videoCount: videoEntries.length,
+      completedVideos,
+      watchedSeconds,
+      durationSeconds,
+      videoPercent,
+      performanceScore
+    };
+  });
+};
+
+const renderMiniProgressBar = (value, tone = 'primary') => `
+  <span class="mini-progress-bar ${tone}">
+    <span style="width:${clampPercent(value).toFixed(1)}%;"></span>
+  </span>
+`;
+
+const renderModulePerformanceSummary = (row = {}) => {
+  const metrics = buildModulePerformanceMetrics(row);
+  if (!metrics.length) {
+    return '<span style="color:#8b92b1;">Sem dados detalhados.</span>';
+  }
+  return `
+    <div class="module-performance-grid">
+      ${metrics.map((metric) => `
+        <article class="module-performance-card">
+          <div class="module-performance-head">
+            <strong title="${escapeAttribute(metric.moduleId)}">${escapeHtml(metric.label)}</strong>
+            <span>${metric.performanceScore.toFixed(0)}%</span>
+          </div>
+          ${renderMiniProgressBar(metric.performanceScore, 'score')}
+          <div class="module-performance-metrics">
+            <span>Nota: ${metric.gradePercent === null ? 'Sem nota' : `${metric.gradePercent.toFixed(0)}% (${metric.correctQuizzes}/${metric.answeredQuizzes})`}</span>
+            <span>Vídeos: ${metric.videoCount ? `${metric.completedVideos}/${metric.videoCount} • ${formatSecondsAsMinutes(metric.watchedSeconds)} vistos` : '0 vistos'}</span>
+            <span>Slides: ${metric.totalSlides ? `${metric.completedSlides}/${metric.totalSlides} concluídos • ${metric.viewedSlides} vistos` : `${metric.viewedSlides} vistos`}</span>
+          </div>
+          <div class="module-performance-bars">
+            <label>Vídeo ${renderMiniProgressBar(metric.videoPercent, 'video')}</label>
+            <label>Slides ${renderMiniProgressBar(metric.slidePercent, 'slides')}</label>
+            <label>Nota ${renderMiniProgressBar(metric.gradePercent ?? 0, 'grade')}</label>
+          </div>
+        </article>
+      `).join('')}
+    </div>
+  `;
+};
+
+const getAverageModuleGrade = (row = {}) => {
+  const grades = buildModulePerformanceMetrics(row)
+    .map((metric) => metric.gradePercent)
+    .filter((value) => value !== null && Number.isFinite(Number(value)));
+  if (!grades.length) return null;
+  return grades.reduce((sum, value) => sum + Number(value), 0) / grades.length;
 };
 
 const updateEnrollmentStudentSelect = () => {
@@ -938,7 +1242,12 @@ const renderNotifications = async () => {
     data.forEach((note) => {
       const item = document.createElement('div');
       item.className = 'notification';
-      item.innerHTML = `<p style="margin:0;">${escapeHtml(note.message)}</p><small style="color:#8b92b1;">${escapeHtml(new Date(note.created_at).toLocaleString())}</small>`;
+      item.dataset.notificationId = note.id;
+      item.innerHTML = `
+        <p style="margin:0;">${linkifyText(note.message)}</p>
+        ${renderNotificationAttachments(note.attachments)}
+        <small style="color:#8b92b1;">${escapeHtml(new Date(note.created_at).toLocaleString())}</small>
+      `;
       panel.appendChild(item);
     });
   } catch (err) {
@@ -1028,11 +1337,21 @@ const renderDashboard = async () => {
       document.getElementById('interactiveProgress').style.width = `${interactivePercent}%`;
       const gradeNode = document.getElementById('gradeValue');
       const moduleNode = document.getElementById('currentModule');
+      const studentModulePerformance = document.getElementById('studentModulePerformance');
+      const portalModulePerformance = document.getElementById('portalModulePerformance');
+      const averageModuleGrade = getAverageModuleGrade(courses[0]);
+      const modulePerformanceMarkup = renderModulePerformanceSummary(courses[0]);
       if (gradeNode) {
-        gradeNode.textContent = formatGrade(progress.grade);
+        gradeNode.textContent = averageModuleGrade === null ? '—' : formatGrade(averageModuleGrade);
       }
       if (moduleNode) {
         moduleNode.textContent = progress.current_module || 'Módulo 01';
+      }
+      if (studentModulePerformance) {
+        studentModulePerformance.innerHTML = modulePerformanceMarkup;
+      }
+      if (portalModulePerformance) {
+        portalModulePerformance.innerHTML = modulePerformanceMarkup;
       }
       if (currentCourseLabel) {
         currentCourseLabel.textContent = courses[0].title;
@@ -1054,9 +1373,9 @@ const renderDashboard = async () => {
       }
       if (gradeDetail) {
         gradeDetail.textContent =
-          progress.grade === null || progress.grade === undefined
+          averageModuleGrade === null
             ? 'Sem nota registrada'
-            : `Nota média atual: ${formatGrade(progress.grade)}`;
+            : `Nota média dos módulos: ${formatGrade(averageModuleGrade)}`;
       }
       if (videoDetail) {
         videoDetail.textContent = totalVideoDuration
@@ -1069,6 +1388,14 @@ const renderDashboard = async () => {
           : 'Nenhum slide concluído ainda.';
       }
     } else {
+      const studentModulePerformance = document.getElementById('studentModulePerformance');
+      const portalModulePerformance = document.getElementById('portalModulePerformance');
+      if (studentModulePerformance) {
+        studentModulePerformance.innerHTML = '<p class="muted" style="margin:0;">As notas por módulo aparecem aqui.</p>';
+      }
+      if (portalModulePerformance) {
+        portalModulePerformance.innerHTML = '<p class="muted" style="margin:0;">Sem dados por módulo ainda.</p>';
+      }
       if (currentCourseLabel) {
         currentCourseLabel.textContent = 'Nenhum curso em andamento';
       }
@@ -1949,8 +2276,8 @@ const loadReports = async () => {
     const response = await authorizedFetch('/api/admin/reports');
     const data = await response.json();
     if (!data.length) {
-      tbody.innerHTML = '<tr><td colspan="8" style="color:#8b92b1;">Nenhum progresso registrado.</td></tr>';
-      correctedTbody.innerHTML = '<tr><td colspan="8" style="color:#8b92b1;">Nenhum relatório corrigido ainda.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6" style="color:#8b92b1;">Nenhum progresso registrado.</td></tr>';
+      correctedTbody.innerHTML = '<tr><td colspan="6" style="color:#8b92b1;">Nenhum relatório corrigido ainda.</td></tr>';
       return;
     }
     const pendingReports = data.filter((row) => !row.report_corrected_at);
@@ -1966,9 +2293,7 @@ const loadReports = async () => {
                 </td>
                 <td>${row.course_title}</td>
                 <td>${row.current_module || 'Módulo 1'}</td>
-                <td>${formatMinutes(row.video_position)}</td>
-                <td>${row.interactive_step || '0.0'}</td>
-                <td>${formatGrade(row.grade)}</td>
+                <td>${renderModulePerformanceSummary(row)}</td>
                 <td>${formatDate(row.updated_at)}</td>
                 <td>
                   <div class="report-action-group">
@@ -1983,7 +2308,7 @@ const loadReports = async () => {
               </tr>`
           )
           .join('')
-      : '<tr><td colspan="8" style="color:#8b92b1;">Nenhum relatório pendente no momento.</td></tr>';
+      : '<tr><td colspan="6" style="color:#8b92b1;">Nenhum relatório pendente no momento.</td></tr>';
     correctedTbody.innerHTML = correctedReports.length
       ? correctedReports
           .map(
@@ -1995,9 +2320,7 @@ const loadReports = async () => {
                 </td>
                 <td>${row.course_title}</td>
                 <td>${row.current_module || 'Módulo 1'}</td>
-                <td>${formatMinutes(row.video_position)}</td>
-                <td>${row.interactive_step || '0.0'}</td>
-                <td>${formatGrade(row.grade)}</td>
+                <td>${renderModulePerformanceSummary(row)}</td>
                 <td>${formatDate(row.report_corrected_at)}</td>
                 <td>
                   <div class="report-action-group">
@@ -2012,7 +2335,7 @@ const loadReports = async () => {
               </tr>`
           )
           .join('')
-      : '<tr><td colspan="8" style="color:#8b92b1;">Nenhum relatório corrigido ainda.</td></tr>';
+      : '<tr><td colspan="6" style="color:#8b92b1;">Nenhum relatório corrigido ainda.</td></tr>';
     return;
     tbody.innerHTML = data
       .map(
@@ -2024,9 +2347,7 @@ const loadReports = async () => {
             </td>
             <td>${row.course_title}</td>
             <td>${row.current_module || 'Módulo 1'}</td>
-            <td>${formatMinutes(row.video_position)}</td>
-            <td>${row.interactive_step || '0.0'}</td>
-            <td>${formatGrade(row.grade)}</td>
+            <td>${renderModulePerformanceSummary(row)}</td>
             <td>${formatDate(row.updated_at)}</td>
             <td>
               <button
@@ -2041,9 +2362,9 @@ const loadReports = async () => {
           </tr>`
       )
       .join('');
-    correctedTbody.innerHTML = correctedTbody.innerHTML || '<tr><td colspan="8" style="color:#8b92b1;">Nenhum relatório corrigido ainda.</td></tr>';
+    correctedTbody.innerHTML = correctedTbody.innerHTML || '<tr><td colspan="6" style="color:#8b92b1;">Nenhum relatório corrigido ainda.</td></tr>';
   } catch (error) {
-    tbody.innerHTML = '<tr><td colspan="8" style="color:#ff6b6b;">Não foi possível carregar os relatórios.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" style="color:#ff6b6b;">Não foi possível carregar os relatórios.</td></tr>';
   }
 };
 
@@ -2249,8 +2570,9 @@ const loadAdminNotifications = async () => {
     list.innerHTML = notifications
       .map(
         (notification) => `
-          <div class="module-list-item">
-            <h4>${escapeHtml(notification.message)}</h4>
+          <div class="module-list-item" data-notification-id="${escapeAttribute(notification.id)}">
+            <h4>${linkifyText(notification.message)}</h4>
+            ${renderNotificationAttachments(notification.attachments)}
             <p>Destino: ${escapeHtml(notification.target_type)}${notification.target_value ? ` • ${escapeHtml(notification.target_value)}` : ''}</p>
             <p>${escapeHtml(new Date(notification.created_at).toLocaleString('pt-BR'))}</p>
             <div class="actions">
@@ -2313,6 +2635,24 @@ const initAdminPage = () => {
   const studentSelector = document.getElementById('studentSelector');
   notifTarget?.addEventListener('change', () => {
     studentSelector.style.display = notifTarget.value === 'student' ? 'block' : 'none';
+  });
+  document.getElementById('notificationFileBtn')?.addEventListener('click', () => {
+    document.getElementById('notificationFileInput')?.click();
+  });
+  document.getElementById('notificationFileInput')?.addEventListener('change', async (event) => {
+    const file = event.target.files?.[0] || null;
+    const status = document.getElementById('notificationFileStatus');
+    try {
+      selectedNotificationAttachment = file ? await readNotificationAttachmentFile(file) : null;
+      if (status) {
+        status.textContent = selectedNotificationAttachment
+          ? `${selectedNotificationAttachment.title} anexado (${formatStorageAmount(selectedNotificationAttachment.size)})`
+          : 'Nenhum arquivo anexado.';
+      }
+    } catch (error) {
+      clearNotificationAttachment();
+      alert(error.message || 'Não foi possível anexar este arquivo.');
+    }
   });
 
   document.getElementById('studentForm')?.addEventListener('submit', async (event) => {
@@ -2412,11 +2752,13 @@ const initAdminPage = () => {
         body: JSON.stringify({
           message: document.getElementById('notificationMessage').value,
           targetType,
-          targetValue
+          targetValue,
+          attachments: selectedNotificationAttachment ? [selectedNotificationAttachment] : []
         })
       });
       alert('Notificação enviada com sucesso.');
       document.getElementById('notificationForm').reset();
+      clearNotificationAttachment();
       studentSelector.style.display = 'none';
       loadAdminNotifications();
     } catch (error) {
@@ -3056,6 +3398,7 @@ const initChatModal = () => {
 
 const init = () => {
   setupLogoutButtons();
+  setupNotificationAttachmentClicks();
   if (document.getElementById('loginForm')) {
     initLogin();
     return;

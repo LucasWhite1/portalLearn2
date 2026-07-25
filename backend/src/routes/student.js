@@ -9,6 +9,8 @@ const { getShare, listShares, addCameraRequest, addDrawingStroke, updateCursorPo
 const { sanitizeText, sanitizeMediaUrl, sanitizeColor, isUuid, createRateLimiter } = require('../security');
 
 const router = express.Router();
+const NOTIFICATION_FILE_DATA_URL_REGEX = /^data:(application\/pdf|application\/msword|application\/vnd\.ms-(powerpoint|excel)|application\/vnd\.openxmlformats-officedocument\.(wordprocessingml\.document|presentationml\.presentation|spreadsheetml\.sheet)|text\/plain|application\/zip|image\/[a-z0-9.+-]+);base64,[a-z0-9+/=\s]+$/i;
+const MAX_NOTIFICATION_FILE_BYTES = 8 * 1024 * 1024;
 let quizAttemptsColumnEnsured = false;
 let interactiveProgressColumnEnsured = false;
 let videoProgressColumnEnsured = false;
@@ -102,7 +104,43 @@ const ensureOwnershipColumns = async () => {
   await db.query(
     "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL"
   );
+  await db.query(
+    "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS attachments JSONB NOT NULL DEFAULT '[]'::jsonb"
+  );
   ownershipColumnsEnsured = true;
+};
+
+const getNotificationDataAttachment = (attachments = [], attachmentIndex = 0) => {
+  const index = Number.parseInt(String(attachmentIndex), 10);
+  if (!Array.isArray(attachments) || !Number.isInteger(index) || index < 0 || index >= attachments.length) {
+    return null;
+  }
+  const attachment = attachments[index];
+  const url = String(attachment?.url || '');
+  if (!NOTIFICATION_FILE_DATA_URL_REGEX.test(url)) {
+    return null;
+  }
+  const match = url.match(/^data:([^;,]+);base64,([\s\S]+)$/i);
+  if (!match) {
+    return null;
+  }
+  const buffer = Buffer.from(match[2], 'base64');
+  if (!buffer.length || buffer.length > MAX_NOTIFICATION_FILE_BYTES) {
+    return null;
+  }
+  return {
+    buffer,
+    mimeType: sanitizeText(attachment.mimeType || match[1], 120) || 'application/octet-stream',
+    title: sanitizeText(attachment.title || 'documento', 160) || 'documento'
+  };
+};
+
+const sendNotificationDataAttachment = (res, attachment) => {
+  const safeFileName = attachment.title.replace(/[\\/:*?"<>|\r\n]+/g, '_').slice(0, 160) || 'documento';
+  res.setHeader('Content-Type', attachment.mimeType);
+  res.setHeader('Content-Length', String(attachment.buffer.length));
+  res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(safeFileName)}"; filename*=UTF-8''${encodeURIComponent(safeFileName)}`);
+  res.send(attachment.buffer);
 };
 
 const ensureStudentLiveShareAccess = async (req, res, share) => {
@@ -815,7 +853,7 @@ router.get('/notifications', async (req, res) => {
   await ensureOwnershipColumns();
   const params = [req.user.className, req.user.id, req.user.ownerUserId || null];
   const { rows } = await db.query(
-    `SELECT id, message, target_type, target_value, created_at
+    `SELECT id, message, target_type, target_value, attachments, created_at
      FROM notifications
      WHERE (
        target_type = 'all'
@@ -828,6 +866,31 @@ router.get('/notifications', async (req, res) => {
      params
   );
   res.json(rows);
+});
+
+router.get('/notifications/:notificationId/attachments/:attachmentIndex', async (req, res) => {
+  await ensureOwnershipColumns();
+  const { notificationId, attachmentIndex } = req.params;
+  if (!isUuid(notificationId)) {
+    return res.status(400).json({ message: 'Notificacao invalida' });
+  }
+  const { rows } = await db.query(
+    `SELECT attachments
+     FROM notifications
+     WHERE id = $1
+       AND (
+         target_type = 'all'
+         OR (target_type = 'class' AND target_value = $2)
+         OR (target_type = 'student' AND target_value = $3)
+       )
+       AND (owner_user_id IS NOT DISTINCT FROM $4)`,
+    [notificationId, req.user.className, req.user.id, req.user.ownerUserId || null]
+  );
+  const attachment = getNotificationDataAttachment(rows[0]?.attachments, attachmentIndex);
+  if (!attachment) {
+    return res.status(404).json({ message: 'Anexo nao encontrado.' });
+  }
+  sendNotificationDataAttachment(res, attachment);
 });
 
 router.get('/progress', async (req, res) => {
