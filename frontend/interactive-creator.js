@@ -202,6 +202,7 @@ let elementAnimationDelayInput;
 let elementAnimationLoopToggle;
 let handleLayer = null;
 let elementShapeSelect;
+let elementFillModeSelect;
 let elementGradientToggle;
 let elementSolidColorInput;
 let elementGradientStartInput;
@@ -248,6 +249,7 @@ let blockElementHeightInput;
 let blockElementRotationInput;
 let blockElementLayerInput;
 let blockElementShapeSelect;
+let blockElementFillModeSelect;
 let blockElementGradientToggle;
 let blockElementSolidColorInput;
 let blockElementGradientStartInput;
@@ -296,6 +298,12 @@ let floatingButtonEditorCard;
 let floatingEditorBadge;
 let floatingEditorTitle;
 let floatingButtonLabelInput;
+let floatingButtonShadowToggle;
+let floatingButtonShadowColorInput;
+let floatingButtonShadowOpacityInput;
+let floatingButtonShadowOpacityValue;
+let floatingButtonShadowOffsetInput;
+let floatingButtonShadowBlurInput;
 let floatingKeyboardConfigBtn;
 let floatingKeyBindingsInput;
 let floatingKeyVisibleToggle;
@@ -544,6 +552,7 @@ let selectedVideoCaptionSegmentIndex = 0;
 let selectedAudioCaptionSegmentIndex = 0;
 
 const FLOATING_INSERT_ACTIONS = ['addText', 'addImage', 'addAudio', 'addVideo', 'addQuiz'];
+const FLOATING_TARGET_ACTIONS = ['moveElement', 'playAnimation', 'replaceText', 'playAudio', 'playVideo', 'pauseVideo', 'seekVideo', 'showElement', 'hideElement'];
 const ACTION_TRIGGER_ELEMENT_TYPES = ['floatingButton', 'detector', 'timedTrigger', 'input', 'key'];
 const MAX_ELEMENT_TRIGGER_COUNT = 40;
 const STUDENT_DRAGGABLE_TYPES = new Set(['text', 'block', 'image']);
@@ -572,6 +581,7 @@ const aiAssistantState = {
   pendingActions: [],
   loading: false,
   loadingInterval: null,
+  activeRequestController: null,
   loadingMessage: 'Gerando proposta da IA',
   isStreaming: false,
   stopRequested: false,
@@ -2096,8 +2106,11 @@ const getSlideBackgroundStyles = (slide = {}) => {
     normalized.backgroundFillType === 'gradient'
       ? `linear-gradient(135deg, ${normalized.backgroundGradientStart}, ${normalized.backgroundGradientEnd})`
       : '';
+  const backgroundLayer = backgroundImage || backgroundGradient;
   return {
-    backgroundImage: backgroundImage || backgroundGradient,
+    // "none" prevents the stylesheet's decorative default gradient from leaking into solid fills.
+    backgroundImage: backgroundLayer || 'none',
+    hasBackgroundLayer: Boolean(backgroundLayer),
     backgroundColor: normalized.backgroundColor || '#fdfbff'
   };
 };
@@ -2272,8 +2285,8 @@ const buildTemplateStorePreviewNode = (template, previewWidth = 220) => {
       : DEFAULT_STAGE_SIZE;
   const backgroundStyles = getSlideBackgroundStyles(slide);
   previewRoot.style.backgroundImage = backgroundStyles.backgroundImage;
-  previewRoot.style.backgroundSize = backgroundStyles.backgroundImage ? 'cover' : '';
-  previewRoot.style.backgroundPosition = backgroundStyles.backgroundImage ? 'center' : '';
+  previewRoot.style.backgroundSize = backgroundStyles.hasBackgroundLayer ? 'cover' : '';
+  previewRoot.style.backgroundPosition = backgroundStyles.hasBackgroundLayer ? 'center' : '';
   previewRoot.style.backgroundColor = backgroundStyles.backgroundColor;
 
   previewStage.style.width = `${stageSize.width}px`;
@@ -2722,8 +2735,8 @@ const renderSlideToExportStage = async (slide) => {
   const backgroundStyles = getSlideBackgroundStyles(slide);
   renderStageBackgroundMedia(stageNode, slide, { interactive: false });
   stageNode.style.backgroundImage = backgroundStyles.backgroundImage;
-  stageNode.style.backgroundSize = backgroundStyles.backgroundImage ? 'cover' : '';
-  stageNode.style.backgroundPosition = backgroundStyles.backgroundImage ? 'center' : '';
+  stageNode.style.backgroundSize = backgroundStyles.hasBackgroundLayer ? 'cover' : '';
+  stageNode.style.backgroundPosition = backgroundStyles.hasBackgroundLayer ? 'center' : '';
   stageNode.style.backgroundColor = backgroundStyles.backgroundColor;
   const deferredCaptionOverlays = [];
   (slide?.elements || [])
@@ -3405,6 +3418,62 @@ const buildBackgroundStyle = (element) => {
     return `linear-gradient(135deg, ${element.gradientStart}, ${element.gradientEnd})`;
   }
   return element.solidColor || element.backgroundColor || '#f4f6ff';
+};
+
+const DEFAULT_FLOATING_BUTTON_SHADOW = {
+  enabled: true,
+  color: '#6d63ff',
+  opacity: 0.4,
+  offsetY: 12,
+  blur: 25
+};
+
+const normalizeShadowNumber = (value, fallback, min, max) => {
+  const numericValue = Number(value);
+  return Number.isNaN(numericValue) ? fallback : clamp(numericValue, min, max);
+};
+
+const hexToRgb = (value, fallback = '#000000') => {
+  const hex = String(value || fallback).trim().replace(/^#/, '');
+  const normalized = hex.length === 3
+    ? hex.split('').map((char) => `${char}${char}`).join('')
+    : hex;
+  if (!/^[0-9a-f]{6}$/i.test(normalized)) {
+    return fallback === '#000000' ? { r: 0, g: 0, b: 0 } : hexToRgb(fallback, '#000000');
+  }
+  return {
+    r: parseInt(normalized.slice(0, 2), 16),
+    g: parseInt(normalized.slice(2, 4), 16),
+    b: parseInt(normalized.slice(4, 6), 16)
+  };
+};
+
+const normalizeFloatingButtonShadow = (element) => {
+  if (!element || element.type !== 'floatingButton') return;
+  element.shadowEnabled = typeof element.shadowEnabled === 'boolean'
+    ? element.shadowEnabled
+    : element.boxShadow === 'none'
+      ? false
+      : DEFAULT_FLOATING_BUTTON_SHADOW.enabled;
+  element.shadowColor = typeof element.shadowColor === 'string' && element.shadowColor
+    ? element.shadowColor
+    : DEFAULT_FLOATING_BUTTON_SHADOW.color;
+  element.shadowOpacity = normalizeShadowNumber(element.shadowOpacity, DEFAULT_FLOATING_BUTTON_SHADOW.opacity, 0, 1);
+  element.shadowOffsetY = normalizeShadowNumber(element.shadowOffsetY, DEFAULT_FLOATING_BUTTON_SHADOW.offsetY, 0, 80);
+  element.shadowBlur = normalizeShadowNumber(element.shadowBlur, DEFAULT_FLOATING_BUTTON_SHADOW.blur, 0, 120);
+};
+
+const buildFloatingButtonShadow = (element) => {
+  if (!element || element.type !== 'floatingButton') return '';
+  normalizeFloatingButtonShadow(element);
+  if (!element.shadowEnabled) return 'none';
+  const rgb = hexToRgb(element.shadowColor, DEFAULT_FLOATING_BUTTON_SHADOW.color);
+  return `0 ${Math.round(element.shadowOffsetY)}px ${Math.round(element.shadowBlur)}px rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${element.shadowOpacity})`;
+};
+
+const applyFloatingButtonShadow = (node, element) => {
+  if (!node || element?.type !== 'floatingButton') return;
+  node.style.boxShadow = buildFloatingButtonShadow(element);
 };
 
 const getDefaultElementSize = (type) => {
@@ -5455,11 +5524,7 @@ const getFloatingTargetCandidateIds = (actionType = 'none', sourceElement = null
             : actionType === 'playAnimation'
               ? Array.from(ANIMATABLE_ELEMENT_TYPES)
               : [];
-  const allowSourceElementAsTarget =
-    (['playVideo', 'pauseVideo', 'seekVideo'].includes(actionType) &&
-      sourceElement?.type === 'video' &&
-      sourceElement?.provider !== 'youtube') ||
-    (actionType === 'playAudio' && sourceElement?.type === 'audio');
+  const allowSourceElementAsTarget = canActionTargetSourceElement(actionType, sourceElement);
   return new Set(
     (slide?.elements || [])
       .filter((item) => {
@@ -5481,11 +5546,18 @@ const getFloatingTargetCandidateIds = (actionType = 'none', sourceElement = null
 const canActionTriggerElementPlaceInsertedContent = (element, actionType = 'none') =>
   ACTION_TRIGGER_ELEMENT_TYPES.includes(element?.type) && FLOATING_INSERT_ACTIONS.includes(actionType);
 
+const canActionTargetSourceElement = (actionType = 'none', sourceElement = null) =>
+  ['showElement', 'hideElement'].includes(actionType) ||
+  (['playVideo', 'pauseVideo', 'seekVideo'].includes(actionType) &&
+    sourceElement?.type === 'video' &&
+    sourceElement?.provider !== 'youtube') ||
+  (actionType === 'playAudio' && sourceElement?.type === 'audio');
+
 const updateFloatingPlacementControls = (element) => {
   const selectedTrigger = getSelectedFloatingTrigger(element);
   const actionType = selectedTrigger?.actionConfig?.type || 'none';
   const supportsPlacement = canActionTriggerElementPlaceInsertedContent(element, actionType);
-  const supportsTargetPicking = ['moveElement', 'playAnimation', 'replaceText', 'playAudio', 'playVideo', 'pauseVideo', 'seekVideo', 'showElement', 'hideElement'].includes(actionType);
+  const supportsTargetPicking = FLOATING_TARGET_ACTIONS.includes(actionType);
   document.getElementById('floatingPlacementToolsField')?.classList.toggle('hidden', !supportsPlacement);
   if (floatingPickPlacementBtn) {
     floatingPickPlacementBtn.textContent = isPickingFloatingInsertPosition && supportsPlacement ? 'Clique no palco...' : 'Marcar no palco';
@@ -5573,7 +5645,7 @@ const updateFloatingPlacementPreview = () => {
   if (!FLOATING_INSERT_ACTIONS.includes(actionType)) {
     isPickingFloatingInsertPosition = false;
   }
-  if (!['moveElement', 'playAnimation', 'replaceText'].includes(actionType)) {
+  if (!FLOATING_TARGET_ACTIONS.includes(actionType)) {
     isPickingFloatingTargetElement = false;
   }
   if (FLOATING_INSERT_ACTIONS.includes(actionType)) {
@@ -6493,11 +6565,11 @@ const updateBackgroundMediaEditorFields = () => {
   }
   if (!backgroundMediaEditorStatus) return;
   if (mode === 'color-solid') {
-    backgroundMediaEditorStatus.textContent = 'Escolha uma cor sólida para o fundo do slide.';
+    backgroundMediaEditorStatus.textContent = 'Escolha uma cor unica para o fundo do slide.';
     return;
   }
   if (mode === 'color-gradient') {
-    backgroundMediaEditorStatus.textContent = 'Escolha duas cores para montar um fundo em gradiente.';
+    backgroundMediaEditorStatus.textContent = 'Escolha as cores de inicio e fim do gradiente.';
     return;
   }
   if (isBatch && (mode === 'image-url' || mode === 'video-url')) {
@@ -6665,7 +6737,7 @@ const syncElementBackgroundState = (element) => {
     element.solidColor = element.gradientStart;
     return;
   }
-  const solidValue = element.backgroundColor || element.solidColor || '#f4f6ff';
+  const solidValue = element.solidColor || element.backgroundColor || '#f4f6ff';
   element.solidColor = solidValue;
   element.backgroundColor = solidValue;
 };
@@ -6910,8 +6982,18 @@ const applyShapeStyles = (node, shape) => {
 };
 
 const updateGradientFieldsVisibility = () => {
-  if (!elementGradientToggle || !gradientFields.length) return;
+  if (!elementGradientToggle) return;
+  if (elementFillModeSelect) {
+    elementFillModeSelect.value = elementGradientToggle.checked ? 'gradient' : 'solid';
+  }
+  document.getElementById('solidColorField')?.classList.toggle('hidden', elementGradientToggle.checked);
   gradientFields.forEach((field) => field.classList.toggle('hidden', !elementGradientToggle.checked));
+};
+
+const syncElementFillModeFromSelect = () => {
+  if (!elementGradientToggle || !elementFillModeSelect) return;
+  elementGradientToggle.checked = elementFillModeSelect.value === 'gradient';
+  updateGradientFieldsVisibility();
 };
 
 const populateQuizAnswerOptions = (options = [], selectedIndex = 0) => {
@@ -6942,9 +7024,18 @@ const syncTextEditorControls = (element, options = {}) => {
 
 const updateBlockGradientFieldsVisibility = () => {
   const useGradient = Boolean(blockElementGradientToggle?.checked);
+  if (blockElementFillModeSelect) {
+    blockElementFillModeSelect.value = useGradient ? 'gradient' : 'solid';
+  }
   document.getElementById('blockElementSolidColorField')?.classList.toggle('hidden', useGradient);
   document.getElementById('blockElementGradientStartField')?.classList.toggle('hidden', !useGradient);
   document.getElementById('blockElementGradientEndField')?.classList.toggle('hidden', !useGradient);
+};
+
+const syncBlockFillModeFromSelect = () => {
+  if (!blockElementGradientToggle || !blockElementFillModeSelect) return;
+  blockElementGradientToggle.checked = blockElementFillModeSelect.value === 'gradient';
+  updateBlockGradientFieldsVisibility();
 };
 
 const syncBlockEditorControls = (element) => {
@@ -6959,6 +7050,7 @@ const syncBlockEditorControls = (element) => {
   if (blockElementLayerInput) blockElementLayerInput.value = isBlock ? String(element.zIndex ?? 0) : '0';
   if (blockElementShapeSelect) blockElementShapeSelect.value = isBlock ? element.shape || 'rectangle' : 'rectangle';
   if (blockElementGradientToggle) blockElementGradientToggle.checked = isBlock ? Boolean(element.useGradient) : false;
+  if (blockElementFillModeSelect) blockElementFillModeSelect.value = isBlock && element.useGradient ? 'gradient' : 'solid';
   if (blockElementSolidColorInput) {
     blockElementSolidColorInput.value = isBlock ? element.solidColor || element.backgroundColor || '#f4f6ff' : '#f4f6ff';
   }
@@ -9411,7 +9503,10 @@ const populateFloatingTargetElements = (selectedId = '', actionType = 'none', so
               : [];
   const options = (slide?.elements || [])
     .filter((item) => {
-      if (!item?.id || !allowedTypes.includes(item.type) || item.id === sourceElement?.id) {
+      if (!item?.id || !allowedTypes.includes(item.type)) {
+        return false;
+      }
+      if (item.id === sourceElement?.id && !canActionTargetSourceElement(actionType, sourceElement)) {
         return false;
       }
       if (allowedTypes.includes('video') && item.type === 'video' && item.provider === 'youtube') {
@@ -9536,6 +9631,13 @@ const updateFloatingButtonEditorVisibility = (element, options = {}) => {
     floatingKeyboardConfigBtn.classList.toggle('is-active', shouldShowFloatingKeyboardConfig);
   }
   document.getElementById('floatingButtonLabelField')?.classList.toggle('hidden', element.type !== 'floatingButton');
+  [
+    'floatingButtonShadowEnabledField',
+    'floatingButtonShadowColorField',
+    'floatingButtonShadowOpacityField',
+    'floatingButtonShadowOffsetField',
+    'floatingButtonShadowBlurField'
+  ].forEach((id) => document.getElementById(id)?.classList.toggle('hidden', element.type !== 'floatingButton'));
   document.getElementById('floatingKeyBindingsField')?.classList.toggle('hidden', !shouldShowFloatingKeyboardConfig);
   document.getElementById('floatingInputPlaceholderField')?.classList.toggle('hidden', element.type !== 'input');
   document.getElementById('floatingInputSubmitLabelField')?.classList.toggle('hidden', element.type !== 'input');
@@ -9553,6 +9655,30 @@ const updateFloatingButtonEditorVisibility = (element, options = {}) => {
   document.getElementById('floatingTriggerTimeField')?.classList.toggle('hidden', element.type !== 'timedTrigger');
   if (floatingButtonLabelInput) {
     syncTextInputValue(floatingButtonLabelInput, element.type === 'floatingButton' ? element.label || 'Ação' : '');
+  }
+  if (element.type === 'floatingButton') {
+    normalizeFloatingButtonShadow(element);
+  }
+  if (floatingButtonShadowToggle) {
+    floatingButtonShadowToggle.checked = element.type === 'floatingButton' ? Boolean(element.shadowEnabled) : false;
+  }
+  if (floatingButtonShadowColorInput) {
+    floatingButtonShadowColorInput.value = element.type === 'floatingButton' ? element.shadowColor || DEFAULT_FLOATING_BUTTON_SHADOW.color : DEFAULT_FLOATING_BUTTON_SHADOW.color;
+  }
+  if (floatingButtonShadowOpacityInput) {
+    const opacityPercent = element.type === 'floatingButton'
+      ? Math.round((element.shadowOpacity ?? DEFAULT_FLOATING_BUTTON_SHADOW.opacity) * 100)
+      : Math.round(DEFAULT_FLOATING_BUTTON_SHADOW.opacity * 100);
+    floatingButtonShadowOpacityInput.value = String(opacityPercent);
+    if (floatingButtonShadowOpacityValue) {
+      floatingButtonShadowOpacityValue.textContent = `${opacityPercent}%`;
+    }
+  }
+  if (floatingButtonShadowOffsetInput) {
+    floatingButtonShadowOffsetInput.value = element.type === 'floatingButton' ? String(element.shadowOffsetY ?? DEFAULT_FLOATING_BUTTON_SHADOW.offsetY) : String(DEFAULT_FLOATING_BUTTON_SHADOW.offsetY);
+  }
+  if (floatingButtonShadowBlurInput) {
+    floatingButtonShadowBlurInput.value = element.type === 'floatingButton' ? String(element.shadowBlur ?? DEFAULT_FLOATING_BUTTON_SHADOW.blur) : String(DEFAULT_FLOATING_BUTTON_SHADOW.blur);
   }
   if (floatingKeyBindingsInput) {
     syncTextInputValue(floatingKeyBindingsInput, shouldShowFloatingKeyboardConfig ? getTriggerKeyBindings(selectedTrigger).join(', ') : '');
@@ -9686,7 +9812,7 @@ const updateFloatingButtonEditorVisibility = (element, options = {}) => {
   populateFloatingQuizCorrectOptions(config.quizOptions, config.quizCorrectOption);
   const actionType = config.type;
   document.getElementById('floatingTargetSlideField')?.classList.toggle('hidden', actionType !== 'jumpSlide');
-  document.getElementById('floatingTargetElementField')?.classList.toggle('hidden', !['moveElement', 'playAnimation', 'replaceText', 'playAudio', 'playVideo', 'pauseVideo', 'seekVideo', 'showElement', 'hideElement'].includes(actionType));
+  document.getElementById('floatingTargetElementField')?.classList.toggle('hidden', !FLOATING_TARGET_ACTIONS.includes(actionType));
   document.getElementById('floatingRuleGroupField')?.classList.toggle('hidden', element.type === 'detector' || element.type === 'timedTrigger' || element.type === 'input' || !config.requireAllButtonsInGroup);
   document.getElementById('floatingDetectorAcceptedField')?.classList.toggle('hidden', element.type !== 'detector');
   document.getElementById('floatingDetectorMinCountField')?.classList.toggle('hidden', element.type !== 'detector');
@@ -9736,7 +9862,7 @@ const updateFloatingButtonEditorVisibility = (element, options = {}) => {
   if (!insertMode) {
     isPickingFloatingInsertPosition = false;
   }
-  if (!['moveElement', 'playAnimation', 'replaceText', 'playAudio', 'playVideo', 'pauseVideo', 'seekVideo', 'showElement', 'hideElement'].includes(actionType)) {
+  if (!FLOATING_TARGET_ACTIONS.includes(actionType)) {
     isPickingFloatingTargetElement = false;
   }
   updateFloatingPlacementControls(element);
@@ -9785,6 +9911,29 @@ const syncFloatingButtonEditor = () => {
     element.label = nextLabel;
     if (floatingButtonLabelInput && document.activeElement !== floatingButtonLabelInput && floatingButtonLabelInput.value !== nextLabel) {
       floatingButtonLabelInput.value = nextLabel;
+    }
+    element.shadowEnabled = Boolean(floatingButtonShadowToggle?.checked);
+    element.shadowColor = floatingButtonShadowColorInput?.value || DEFAULT_FLOATING_BUTTON_SHADOW.color;
+    element.shadowOpacity = normalizeShadowNumber(
+      Number(floatingButtonShadowOpacityInput?.value) / 100,
+      DEFAULT_FLOATING_BUTTON_SHADOW.opacity,
+      0,
+      1
+    );
+    element.shadowOffsetY = normalizeShadowNumber(
+      floatingButtonShadowOffsetInput?.value,
+      DEFAULT_FLOATING_BUTTON_SHADOW.offsetY,
+      0,
+      80
+    );
+    element.shadowBlur = normalizeShadowNumber(
+      floatingButtonShadowBlurInput?.value,
+      DEFAULT_FLOATING_BUTTON_SHADOW.blur,
+      0,
+      120
+    );
+    if (floatingButtonShadowOpacityValue) {
+      floatingButtonShadowOpacityValue.textContent = `${Math.round(element.shadowOpacity * 100)}%`;
     }
   }
   if (element.type === 'input') {
@@ -9928,7 +10077,7 @@ const toggleFloatingTargetElementPicker = () => {
   }
   normalizeFloatingActionConfig(element);
   const selectedTrigger = getSelectedFloatingTrigger(element);
-  if (!['moveElement', 'playAnimation', 'replaceText', 'playAudio', 'playVideo', 'pauseVideo', 'seekVideo', 'showElement', 'hideElement'].includes(selectedTrigger?.actionConfig?.type || 'none')) {
+  if (!FLOATING_TARGET_ACTIONS.includes(selectedTrigger?.actionConfig?.type || 'none')) {
     isPickingFloatingTargetElement = false;
     updateFloatingPlacementPreview();
     return;
@@ -10022,6 +10171,7 @@ const syncBlockEditor = () => {
     element.zIndex = Math.max(0, Math.round(layer));
   }
   element.shape = blockElementShapeSelect?.value || element.shape || 'rectangle';
+  syncBlockFillModeFromSelect();
   element.useGradient = Boolean(blockElementGradientToggle?.checked);
   if (element.useGradient) {
     element.gradientStart = blockElementGradientStartInput?.value || element.gradientStart || '#ffd54f';
@@ -10139,18 +10289,22 @@ const updateSmartSidebarVisibility = (element) => {
   ['sharedTextColorField', 'sharedFontSizeField', 'sharedFontFamilyField', 'sharedFontWeightField'].forEach((id) =>
     toggle(id, supportsTypography)
   );
-  toggle('sharedBackgroundField', ['text', 'floatingButton', 'key'].includes(type));
+  toggle('sharedBackgroundField', type === 'text');
   toggle('sharedStudentDragField', ['text', 'block'].includes(type));
   toggle('sharedInitiallyHiddenField', hasElement); // Show for all element types
   toggle('textBackgroundField', type === 'text');
   toggle('textBorderField', type === 'text');
   toggle('textAlignToolsField', type === 'text');
   const supportsBlockStyles = ['floatingButton', 'key'].includes(type);
+  const useGradient = Boolean(element?.useGradient);
   toggle('blockShapeField', ['floatingButton', 'key'].includes(type));
   toggle('gradientToggleField', supportsBlockStyles);
-  toggle('solidColorField', supportsBlockStyles);
-  toggle('gradientStartField', supportsBlockStyles && Boolean(element?.useGradient));
-  toggle('gradientEndField', supportsBlockStyles && Boolean(element?.useGradient));
+  toggle('solidColorField', supportsBlockStyles && !useGradient);
+  toggle('gradientStartField', supportsBlockStyles && useGradient);
+  toggle('gradientEndField', supportsBlockStyles && useGradient);
+  if (supportsBlockStyles) {
+    updateGradientFieldsVisibility();
+  }
   updateTextAlignmentControls(element);
   updateRemoveBackgroundButtonState();
 };
@@ -10626,10 +10780,44 @@ const getAiAssistantWorkingState = () => {
   return state;
 };
 
+const AI_PLAN_TIMEOUT_MS = 70000;
+const AI_SLIDE_TIMEOUT_MS = 80000;
+
+const authorizedAiAssistantFetch = async (path, options = {}, timeoutMs = AI_SLIDE_TIMEOUT_MS) => {
+  const controller = new AbortController();
+  aiAssistantState.activeRequestController = controller;
+  const timeoutId = window.setTimeout(() => controller.abort('timeout'), timeoutMs);
+  try {
+    return await authorizedFetch(path, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      if (aiAssistantState.stopRequested) {
+        throw new Error('Geracao interrompida pelo professor.');
+      }
+      const timeoutError = new Error('A geracao deste slide excedeu o tempo limite. A fila foi encerrada sem ficar presa.');
+      timeoutError.code = 'AI_SLIDE_TIMEOUT';
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+    if (aiAssistantState.activeRequestController === controller) {
+      aiAssistantState.activeRequestController = null;
+    }
+  }
+};
+
+const compactAiExecutionPlan = (plan = null) => ({
+  mode: plan?.mode || 'deck',
+  visualTheme: plan?.visualTheme || null,
+  designSystem: plan?.designSystem || null,
+  interactionStrategy: plan?.interactionStrategy || null
+});
+
 const requestAiExecutionPlan = async (request, attachmentsPayload = getAiAssistantAttachmentsPayload()) => {
   const workingState = getAiAssistantWorkingState();
   const resolvedAttachments = Array.isArray(attachmentsPayload) ? attachmentsPayload : getAiAssistantAttachmentsPayload();
-  const response = await authorizedFetch('/api/admin/ai/slide-actions/plan', {
+  const response = await authorizedAiAssistantFetch('/api/admin/ai/slide-actions/plan', {
     method: 'POST',
     body: JSON.stringify({
       request,
@@ -10638,7 +10826,7 @@ const requestAiExecutionPlan = async (request, attachmentsPayload = getAiAssista
       stageSize: builderState.stageSize.width && builderState.stageSize.height ? builderState.stageSize : DEFAULT_STAGE_SIZE,
       attachments: resolvedAttachments
     })
-  });
+  }, AI_PLAN_TIMEOUT_MS);
   const result = await response.json().catch(() => null);
   if (!response.ok) {
     throw new Error(result?.message || 'A IA não conseguiu montar o plano.');
@@ -10675,7 +10863,7 @@ const executeAiSlidePlanItem = async ({
 }) => {
   const workingState = getAiAssistantWorkingState();
   const resolvedAttachments = Array.isArray(attachmentsPayload) ? attachmentsPayload : getAiAssistantAttachmentsPayload();
-  const response = await authorizedFetch('/api/admin/ai/slide-actions', {
+  const response = await authorizedAiAssistantFetch('/api/admin/ai/slide-actions', {
     method: 'POST',
     body: JSON.stringify({
       request,
@@ -10683,13 +10871,15 @@ const executeAiSlidePlanItem = async ({
       activeSlideId: workingState.activeSlideId,
       stageSize: builderState.stageSize.width && builderState.stageSize.height ? builderState.stageSize : DEFAULT_STAGE_SIZE,
       attachments: resolvedAttachments,
-      executionPlan: plan,
+      executionPlan: compactAiExecutionPlan(plan),
       currentPlanItem: planItem
     })
-  });
+  }, AI_SLIDE_TIMEOUT_MS);
   const result = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(result?.message || 'Falha ao gerar o slide atual.');
+    const requestError = new Error(result?.message || 'Falha ao gerar o slide atual.');
+    requestError.code = result?.code || null;
+    throw requestError;
   }
   syncProfessorCreditsFromPayload(result);
   const actions = Array.isArray(result?.actions) ? result.actions.map((action) => deepClone(action)) : [];
@@ -10727,7 +10917,12 @@ const executeAiSlidePlanItemWithRetry = async (options) => {
     return await executeAiSlidePlanItem(options);
   } catch (error) {
     const message = String(error?.message || 'Falha ao gerar o slide.');
-    if (/credito|crédito|saldo|limite|desativad|configur/i.test(message)) {
+    const canRetryOnce = (
+      error?.code !== 'AI_SLIDE_TIMEOUT'
+      && !aiAssistantState.stopRequested
+      && /(failed to fetch|network|rede|temporar|502|503|connection)/i.test(message)
+    );
+    if (!canRetryOnce) {
       throw error;
     }
     pushAiAssistantFeedback(
@@ -10738,6 +10933,23 @@ const executeAiSlidePlanItemWithRetry = async (options) => {
     await new Promise((resolve) => window.setTimeout(resolve, 500));
     return executeAiSlidePlanItem(options);
   }
+};
+
+const describeAiPlanDirection = (plan) => {
+  if (!plan || typeof plan !== 'object') return '';
+  const designName = plan.designSystem?.name || plan.visualTheme?.label || 'Identidade visual consistente';
+  const slides = Array.isArray(plan.slides) ? plan.slides : [];
+  const archetypes = Array.from(new Set(slides.map((item) => item?.archetype).filter(Boolean)));
+  const interactions = Array.from(
+    new Set(
+      slides
+        .map((item) => item?.interactionType)
+        .filter((type) => type && !['content', 'mission-content'].includes(type))
+    )
+  );
+  const archetypeText = archetypes.length ? `Layouts: ${archetypes.join(', ')}.` : '';
+  const interactionText = interactions.length ? `Interacoes: ${interactions.join(', ')}.` : 'Interacoes apenas onde ajudam a aula.';
+  return `${designName}. ${archetypeText} ${interactionText}`.replace(/\s+/g, ' ').trim();
 };
 
 const requestAiPlannedProposal = async (request, options = {}) => {
@@ -10771,6 +10983,10 @@ const requestAiPlannedProposal = async (request, options = {}) => {
     pendingActionCount: 0
   };
   renderAiAssistantDebug();
+  const planDirection = describeAiPlanDirection(plan);
+  if (planDirection) {
+    pushAiAssistantFeedback('Direcao da aula', planDirection, 'success');
+  }
 
   const requireConfirmation = planResponse?.requireConfirmation !== false;
   let stoppedOnSlideError = false;
@@ -10797,7 +11013,7 @@ const requestAiPlannedProposal = async (request, options = {}) => {
       }
       pushAiAssistantFeedback(
         `Executando slide ${planItem.order || ''}`,
-        `${planItem.title || 'Slide'}: ${planItem.goal || 'Montando o layout deste slide.'}`,
+        `${planItem.title || 'Slide'}: ${planItem.goal || 'Montando o layout deste slide.'} Layout ${planItem.archetype || 'conteudo'}; interacao ${planItem.interactionType || 'content'}.`,
         'muted'
       );
       try {
@@ -10807,7 +11023,7 @@ const requestAiPlannedProposal = async (request, options = {}) => {
           planItem,
           requireConfirmation,
           providerLabel: planResponse?.providerLabel || '',
-          attachmentsPayload: resolvedAttachments
+          attachmentsPayload: planItem.imageIntent === 'required' ? resolvedAttachments : []
         });
       } catch (error) {
         stoppedOnSlideError = true;
@@ -10927,8 +11143,8 @@ const loadAiAssistantSettings = async () => {
       const imageProvider = aiAssistantState.settings?.imageProvider;
       updateAiAssistantStatus(
         imageProvider?.connected && imageProvider?.isEnabled
-          ? `${aiAssistantState.settings.providerLabel} (${aiAssistantState.settings.model}) + ${imageProvider.providerLabel} (${imageProvider.model}) conectados.`
-          : `${aiAssistantState.settings.providerLabel} conectado em ${aiAssistantState.settings.model}.`
+          ? 'IA de texto e IA de imagem conectadas.'
+          : 'IA de texto conectada.'
       );
     } else {
       updateAiAssistantStatus('Configure a integração de IA no painel admin antes de usar o assistente.');
@@ -11464,8 +11680,8 @@ function setStageBackground(slide) {
   const backgroundStyles = getSlideBackgroundStyles(slide);
   renderStageBackgroundMedia(slideCanvas, slide, { interactive: previewState.active });
   slideCanvas.style.backgroundImage = backgroundStyles.backgroundImage;
-  slideCanvas.style.backgroundSize = backgroundStyles.backgroundImage ? 'cover' : '';
-  slideCanvas.style.backgroundPosition = backgroundStyles.backgroundImage ? 'center' : '';
+  slideCanvas.style.backgroundSize = backgroundStyles.hasBackgroundLayer ? 'cover' : '';
+  slideCanvas.style.backgroundPosition = backgroundStyles.hasBackgroundLayer ? 'center' : '';
   slideCanvas.style.backgroundColor = backgroundStyles.backgroundColor;
 }
 
@@ -11489,7 +11705,7 @@ function syncBackgroundInputs(slide) {
           : 'Imagem de fundo definida por URL.'
         : slide.backgroundFillType === 'gradient'
           ? 'Gradiente configurado para o fundo do slide.'
-          : 'Cor sólida configurada para o fundo do slide.'
+          : 'Cor unica configurada para o fundo do slide.'
   }
   // Quiz requirement is now managed at module level
 }
@@ -11539,8 +11755,8 @@ const updateBackgroundMediaEditorVisibility = (forceOpen = false) => {
       : slide.backgroundImage
         ? 'Imagem de fundo configurada para este slide.'
         : slide.backgroundFillType === 'gradient'
-          ? 'Gradiente de fundo configurado para este slide.'
-          : 'Cor sólida configurada para este slide.';
+          ? 'Gradiente configurado para este slide.'
+          : 'Cor unica configurada para este slide.';
   }
   updateBackgroundMediaEditorFields();
   requestAnimationFrame(() => positionStageEditorCard('background'));
@@ -12021,6 +12237,9 @@ function updateElementInspector(element) {
     if (elementGradientToggle) {
       elementGradientToggle.checked = false;
     }
+    if (elementFillModeSelect) {
+      elementFillModeSelect.value = 'solid';
+    }
     if (elementSolidColorInput) {
       elementSolidColorInput.value = '#ffffff';
     }
@@ -12102,6 +12321,9 @@ function updateElementInspector(element) {
   }
   if (elementGradientToggle) {
     elementGradientToggle.checked = Boolean(element.useGradient);
+  }
+  if (elementFillModeSelect) {
+    elementFillModeSelect.value = element.useGradient ? 'gradient' : 'solid';
   }
   if (elementSolidColorInput) {
     elementSolidColorInput.value = element.solidColor || element.backgroundColor || '#ffffff';
@@ -12444,6 +12666,11 @@ function applyElementStyles() {
   if (shapeSource && ['block', 'floatingButton', 'key'].includes(element.type) && String(shapeSource.value || '').trim()) {
     element.shape = shapeSource.value || 'rectangle';
   }
+  if (isBlockEditor) {
+    syncBlockFillModeFromSelect();
+  } else if (['floatingButton', 'key'].includes(element.type)) {
+    syncElementFillModeFromSelect();
+  }
   if (gradientToggleSource) {
     if (!isBlockEditor || element.type !== 'block') {
       element.useGradient = Boolean(gradientToggleSource.checked);
@@ -12478,8 +12705,17 @@ function applyElementStyles() {
     element.fontWeight = fontWeightSource?.value || element.fontWeight;
   }
   if (['text', 'block', 'floatingButton', 'key'].includes(element.type)) {
-    if (!isBlockEditor || element.type !== 'block') {
+    if (element.type === 'text') {
       element.backgroundColor = backgroundSource?.value || element.backgroundColor;
+    } else if (element.type !== 'block' || !isBlockEditor) {
+      if (element.useGradient) {
+        element.gradientStart = gradientStartSource?.value || element.gradientStart || '#ffef5c';
+        element.gradientEnd = gradientEndSource?.value || element.gradientEnd || '#ff9d5c';
+      } else {
+        const solidValue = solidColorSource?.value || element.solidColor || element.backgroundColor;
+        element.solidColor = solidValue;
+        element.backgroundColor = solidValue;
+      }
     }
   } else if (['image', 'camera'].includes(element.type) && String(element.backgroundColor || '').toLowerCase() !== 'transparent') {
     element.backgroundColor = 'transparent';
@@ -12830,8 +13066,23 @@ const moveSelectedElementByKeyboard = (deltaX, deltaY) => {
 };
 
 const updateElementFromPatch = (element, patch) => {
+  const hasSolidColorPatch =
+    Object.prototype.hasOwnProperty.call(patch || {}, 'backgroundColor')
+    || Object.prototype.hasOwnProperty.call(patch || {}, 'solidColor');
+  const requestedColor = patch?.solidColor || patch?.backgroundColor || '';
+  const explicitlySetsSolidColor =
+    hasSolidColorPatch
+    && patch?.useGradient !== true
+    && !patch?.gradientStart
+    && !patch?.gradientEnd
+    && !String(requestedColor).trim().toLowerCase().startsWith('linear-gradient');
   Object.assign(element, patch);
   if (['block', 'floatingButton', 'key'].includes(element.type)) {
+    if (explicitlySetsSolidColor) {
+      element.useGradient = false;
+      element.solidColor = requestedColor;
+      element.backgroundColor = requestedColor;
+    }
     if (patch.backgroundColor && !patch.solidColor && !patch.useGradient) {
       element.solidColor = patch.backgroundColor;
     }
@@ -12894,6 +13145,40 @@ const getFallbackAiSlideTargetFromState = (targetState, requestedSlideId) => {
 };
 
 const getFallbackAiSlideTarget = (requestedSlideId) => getFallbackAiSlideTargetFromState(builderState, requestedSlideId);
+
+const getAiUpdateSlideTargetFromState = (targetState, actions, actionIndex, requestedSlideId) => {
+  const existingSlides = targetState?.slides || [];
+  const directMatch = existingSlides.find((entry) => entry.id === requestedSlideId);
+  if (directMatch) {
+    return directMatch;
+  }
+
+  const matchingUpdates = (actions || [])
+    .map((entry, index) => ({ entry, index }))
+    .filter(({ entry }) => entry?.type === 'update_slide' && entry.slideId === requestedSlideId);
+  if (requestedSlideId && matchingUpdates.length > 1 && matchingUpdates.length <= existingSlides.length) {
+    const updatePosition = matchingUpdates.findIndex(({ index }) => index === actionIndex);
+    if (updatePosition >= 0) {
+      return existingSlides[updatePosition] || null;
+    }
+  }
+
+  return getFallbackAiSlideTargetFromState(targetState, requestedSlideId);
+};
+
+const getAiSlidePatchFromAction = (action = {}) => {
+  const patch = action.slide && typeof action.slide === 'object' ? { ...action.slide } : {};
+  ['title', 'backgroundImage', 'backgroundColor', 'backgroundFillType', 'backgroundGradientStart', 'backgroundGradientEnd', 'backgroundImagePrompt']
+    .forEach((key) => {
+      if (patch[key] === undefined && action[key] !== undefined) {
+        patch[key] = action[key];
+      }
+    });
+  if (patch.backgroundColor && !patch.backgroundFillType) {
+    patch.backgroundFillType = 'solid';
+  }
+  return Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined));
+};
 
 const inferElementTypeFromAiId = (elementId = '') => {
   const value = String(elementId || '').toLowerCase();
@@ -13150,19 +13435,19 @@ const applyAiActions = (actions) => {
         break;
       }
       case 'update_slide': {
-        let slide = getFallbackAiSlideTarget(action.slideId);
-        if (!slide && action.slide) {
-          slide = createFallbackSlideFromAiUpdate(builderState, action);
+        const slidePatch = getAiSlidePatchFromAction(action);
+        let slide = getAiUpdateSlideTargetFromState(builderState, actions, index, action.slideId);
+        if (!slide && Object.keys(slidePatch).length) {
+          slide = createFallbackSlideFromAiUpdate(builderState, { ...action, slide: slidePatch });
           if (slide && action.slideId) {
             slideAliasMap.set(action.slideId, slide.id);
           }
         }
-        if (!slide || !action.slide) {
+        if (!slide || !Object.keys(slidePatch).length) {
           applyWarnings.push(`Ação ${index + 1}: não encontrei o slide para update_slide (${action.slideId || 'sem slideId'}).`);
           break;
         }
         action.slideId = slide.id;
-        const slidePatch = { ...action.slide };
         delete slidePatch.id;
         Object.assign(slide, slidePatch);
         if (action.setActive !== false) {
@@ -13360,19 +13645,19 @@ const applyAiActionsToState = (targetState, actions, options = {}) => {
         break;
       }
       case 'update_slide': {
-        let slide = getFallbackAiSlideTargetFromState(targetState, action.slideId);
-        if (!slide && action.slide) {
-          slide = createFallbackSlideFromAiUpdate(targetState, action);
+        const slidePatch = getAiSlidePatchFromAction(action);
+        let slide = getAiUpdateSlideTargetFromState(targetState, actions, index, action.slideId);
+        if (!slide && Object.keys(slidePatch).length) {
+          slide = createFallbackSlideFromAiUpdate(targetState, { ...action, slide: slidePatch });
           if (slide && action.slideId) {
             slideAliasMap.set(action.slideId, slide.id);
           }
         }
-        if (!slide || !action.slide) {
+        if (!slide || !Object.keys(slidePatch).length) {
           applyWarnings.push(`Ação ${index + 1}: slide não encontrado para update_slide.`);
           break;
         }
         action.slideId = slide.id;
-        const slidePatch = { ...action.slide };
         delete slidePatch.id;
         Object.assign(slide, slidePatch);
         if (action.setActive !== false) {
@@ -14748,6 +15033,7 @@ const createPreviewElementNode = (element, slide, options = {}) => {
       node.className = 'floating-button-element';
       node.textContent = element.label || 'Ação';
       applyElementBackground(node, element);
+      applyFloatingButtonShadow(node, element);
       applyShapeStyles(node, element.shape || 'rectangle');
       {
         normalizeFloatingActionConfig(element);
@@ -14943,6 +15229,7 @@ const renderElementNode = (element) => {
       node.className = 'floating-button-element';
       node.textContent = element.label || 'Ação';
       applyElementBackground(node, element);
+      applyFloatingButtonShadow(node, element);
       applyShapeStyles(node, element.shape || 'rectangle');
       break;
     case 'key':
@@ -15235,6 +15522,9 @@ const enableDrag = (node, element) => {
     ) {
       return;
     }
+    if (isPickingFloatingTargetElement) {
+      return;
+    }
     if (selectedElementId !== element.id) {
       selectElement(element.id);
     }
@@ -15421,6 +15711,7 @@ document.addEventListener('DOMContentLoaded', () => {
   elementAnimationDelayInput = document.getElementById('elementAnimationDelayInput');
   elementAnimationLoopToggle = document.getElementById('elementAnimationLoopToggle');
   elementShapeSelect = document.getElementById('elementShapeSelect');
+  elementFillModeSelect = document.getElementById('elementFillModeSelect');
   elementGradientToggle = document.getElementById('elementGradientToggle');
   elementSolidColorInput = document.getElementById('elementSolidColorInput');
   elementGradientStartInput = document.getElementById('elementGradientStartInput');
@@ -15490,6 +15781,7 @@ document.addEventListener('DOMContentLoaded', () => {
   blockElementRotationInput = document.getElementById('blockElementRotationInput');
   blockElementLayerInput = document.getElementById('blockElementLayerInput');
   blockElementShapeSelect = document.getElementById('blockElementShapeSelect');
+  blockElementFillModeSelect = document.getElementById('blockElementFillModeSelect');
   blockElementGradientToggle = document.getElementById('blockElementGradientToggle');
   blockElementSolidColorInput = document.getElementById('blockElementSolidColorInput');
   blockElementGradientStartInput = document.getElementById('blockElementGradientStartInput');
@@ -15539,6 +15831,12 @@ document.addEventListener('DOMContentLoaded', () => {
   floatingEditorBadge = document.getElementById('floatingEditorBadge');
   floatingEditorTitle = document.getElementById('floatingEditorTitle');
   floatingButtonLabelInput = document.getElementById('floatingButtonLabelInput');
+  floatingButtonShadowToggle = document.getElementById('floatingButtonShadowToggle');
+  floatingButtonShadowColorInput = document.getElementById('floatingButtonShadowColorInput');
+  floatingButtonShadowOpacityInput = document.getElementById('floatingButtonShadowOpacityInput');
+  floatingButtonShadowOpacityValue = document.getElementById('floatingButtonShadowOpacityValue');
+  floatingButtonShadowOffsetInput = document.getElementById('floatingButtonShadowOffsetInput');
+  floatingButtonShadowBlurInput = document.getElementById('floatingButtonShadowBlurInput');
   floatingKeyboardConfigBtn = document.getElementById('floatingKeyboardConfigBtn');
   floatingKeyBindingsInput = document.getElementById('floatingKeyBindingsInput');
   floatingKeyVisibleToggle = document.getElementById('floatingKeyVisibleToggle');
@@ -16004,6 +16302,10 @@ document.addEventListener('DOMContentLoaded', () => {
   elementAnimationDelayInput?.addEventListener('input', applyElementStyles);
   elementAnimationLoopToggle?.addEventListener('change', applyElementStyles);
   elementInitiallyHiddenToggle?.addEventListener('change', applyElementStyles);
+  elementFillModeSelect?.addEventListener('change', () => {
+    syncElementFillModeFromSelect();
+    applyElementStyles();
+  });
   elementGradientToggle?.addEventListener('change', updateGradientFieldsVisibility);
   removeSelectedElementBtn?.addEventListener('click', removeSelectedElement);
   undoActionBtn?.addEventListener('click', undoLastAction);
@@ -16085,6 +16387,7 @@ document.addEventListener('DOMContentLoaded', () => {
     blockElementRotationInput,
     blockElementLayerInput,
     blockElementShapeSelect,
+    blockElementFillModeSelect,
     blockElementGradientToggle,
     blockElementSolidColorInput,
     blockElementGradientStartInput,
@@ -16117,6 +16420,7 @@ document.addEventListener('DOMContentLoaded', () => {
   aiAssistantApplyBtn?.addEventListener('click', applyPendingAiActions);
   aiAssistantDiscardBtn?.addEventListener('click', () => {
     aiAssistantState.stopRequested = true;
+    aiAssistantState.activeRequestController?.abort('cancelled');
     clearAiAssistantProposal();
     updateAiAssistantStatus('Geração interrompida e proposta descartada.');
   });
@@ -16360,6 +16664,11 @@ document.addEventListener('DOMContentLoaded', () => {
   penMagicGenerateBtn?.addEventListener('click', requestMagicPenActions);
   [
     floatingButtonLabelInput,
+    floatingButtonShadowToggle,
+    floatingButtonShadowColorInput,
+    floatingButtonShadowOpacityInput,
+    floatingButtonShadowOffsetInput,
+    floatingButtonShadowBlurInput,
     floatingKeyBindingsInput,
     floatingKeyVisibleToggle,
     floatingInputPlaceholderInput,
@@ -16602,6 +16911,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (handleFloatingPlacementPick(event)) {
       return;
     }
+    if (isPickingFloatingTargetElement) {
+      return;
+    }
     selectElement(null);
   });
   document.addEventListener('keydown', (event) => {
@@ -16680,6 +16992,7 @@ document.addEventListener('DOMContentLoaded', () => {
     elementBgColorInput,
     elementStudentDragToggle,
     elementShapeSelect,
+    elementFillModeSelect,
     elementGradientToggle,
     elementSolidColorInput,
     elementGradientStartInput,

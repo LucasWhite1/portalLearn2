@@ -10,6 +10,7 @@ const {
   buildPublicAiSettings,
   editImageElementWithNanoBanana,
   proposeMagicPenActions,
+  proposeAdminAssistantTurn,
   proposeNextSlideAction,
   proposeSlideExecutionPlan,
   proposeSlideActions,
@@ -17,6 +18,16 @@ const {
   generateBackgroundMaskWithNanoBanana,
   compareImagesWithNanoBanana
 } = require('../aiProvider');
+const {
+  cleanHistory,
+  containsSensitiveRequest,
+  ensureAssistantTables,
+  executeProposal,
+  loadAssistantContext,
+  normalizeAssistantResponse,
+  redactSecrets,
+  storeProposal
+} = require('../adminAssistant');
 const { readImageSource } = require('../pixian');
 const { extractAudioFromMediaSource, transcribeMediaSource } = require('../mediaProcessing');
 const { createShare, updateShare, deleteShare, clearDrawingStrokes, removeDrawingStroke, getShare, updateCursorPosition, listCursorPositions, removeCameraRequest } = require('../liveStageShareStore');
@@ -776,6 +787,11 @@ const ensureProfessorOwnsCourse = async (req, courseId) => {
   return rows[0] || null;
 };
 
+const buildStudentOwnershipWriteClause = (req, idParamIndex) =>
+  isProfessor(req)
+    ? `id = $${idParamIndex} AND role = 'student' AND owner_user_id = $${idParamIndex + 1}`
+    : `id = $${idParamIndex} AND role = 'student'`;
+
 const ensureCourseCoverColumn = async () => {
   if (courseCoverColumnEnsured) {
     return;
@@ -1489,16 +1505,37 @@ router.post('/students/:id/enroll', async (req, res) => {
 router.delete('/students/:id/enrollments/:courseId', async (req, res) => {
   const { id, courseId } = req.params;
   await ensureOwnershipColumns();
+  if (!isUuid(id) || !isUuid(courseId)) {
+    return res.status(400).json({ message: 'Matricula invalida' });
+  }
   if (!(await ensureProfessorOwnsStudent(req, id)) || !(await ensureProfessorOwnsCourse(req, courseId))) {
     return res.status(404).json({ message: 'Matricula nao encontrada' });
   }
-  await db.query('DELETE FROM enrollments WHERE user_id = $1 AND course_id = $2', [id, courseId]);
+  const params = [id, courseId];
+  let query = `DELETE FROM enrollments
+                     WHERE user_id = $1
+                       AND course_id = $2
+                       AND EXISTS (
+                         SELECT 1
+                           FROM users u
+                           JOIN courses c ON c.id = enrollments.course_id
+                          WHERE u.id = enrollments.user_id
+                            AND u.role = 'student'`;
+  if (isProfessor(req)) {
+    params.push(req.user.id);
+    query += ' AND u.owner_user_id = $3 AND c.owner_user_id = $3';
+  }
+  query += ')';
+  await db.query(query, params);
   res.status(204).send();
 });
 
 router.put('/students/:id', async (req, res) => {
   await ensureOwnershipColumns();
   const { id } = req.params;
+  if (!isUuid(id)) {
+    return res.status(400).json({ message: 'Aluno invalido' });
+  }
   if (!(await ensureProfessorOwnsStudent(req, id))) {
     return res.status(404).json({ message: 'Aluno nao encontrado' });
   }
@@ -1538,13 +1575,28 @@ router.put('/students/:id', async (req, res) => {
   }
 
   values.push(id);
-  await db.query(`UPDATE users SET ${updates.join(', ')} WHERE id = $${values.length}`, values);
+  const idParamIndex = values.length;
+  if (isProfessor(req)) {
+    values.push(req.user.id);
+  }
+  const { rowCount } = await db.query(
+    `UPDATE users
+        SET ${updates.join(', ')}
+      WHERE ${buildStudentOwnershipWriteClause(req, idParamIndex)}`,
+    values
+  );
+  if (!rowCount) {
+    return res.status(404).json({ message: 'Aluno nao encontrado' });
+  }
   res.status(204).send();
 });
 
 router.put('/students/:id/status', async (req, res) => {
   await ensureOwnershipColumns();
   const { id } = req.params;
+  if (!isUuid(id)) {
+    return res.status(400).json({ message: 'Aluno invalido' });
+  }
   if (!(await ensureProfessorOwnsStudent(req, id))) {
     return res.status(404).json({ message: 'Aluno nao encontrado' });
   }
@@ -1555,19 +1607,45 @@ router.put('/students/:id/status', async (req, res) => {
   if (typeof isActive !== 'boolean') {
     return res.status(400).json({ message: 'Informe isActive como booleano' });
   }
-  await db.query('UPDATE users SET is_active = $1 WHERE id = $2', [isActive, id]);
+  const params = [isActive, id];
+  if (isProfessor(req)) {
+    params.push(req.user.id);
+  }
+  const { rowCount } = await db.query(
+    `UPDATE users
+        SET is_active = $1
+      WHERE ${buildStudentOwnershipWriteClause(req, 2)}`,
+    params
+  );
+  if (!rowCount) {
+    return res.status(404).json({ message: 'Aluno nao encontrado' });
+  }
   res.status(204).send();
 });
 
 router.delete('/students/:id', async (req, res) => {
   await ensureOwnershipColumns();
+  if (!isUuid(req.params.id)) {
+    return res.status(400).json({ message: 'Aluno invalido' });
+  }
   if (!(await ensureProfessorOwnsStudent(req, req.params.id))) {
     return res.status(404).json({ message: 'Aluno nao encontrado' });
   }
   if (!isUuid(req.params.id)) {
     return res.status(400).json({ message: 'Aluno invÃ¡lido' });
   }
-  await db.query('DELETE FROM users WHERE id = $1 AND role = \'student\'', [req.params.id]);
+  const params = [req.params.id];
+  if (isProfessor(req)) {
+    params.push(req.user.id);
+  }
+  const { rowCount } = await db.query(
+    `DELETE FROM users
+      WHERE ${buildStudentOwnershipWriteClause(req, 1)}`,
+    params
+  );
+  if (!rowCount) {
+    return res.status(404).json({ message: 'Aluno nao encontrado' });
+  }
   res.status(204).send();
 });
 
@@ -2541,6 +2619,96 @@ router.post('/ai-settings/test', aiRequestRateLimiter, async (req, res) => {
   }
 });
 
+router.post('/assistant/chat', aiRequestRateLimiter, async (req, res) => {
+  await ensureAdminAiImageColumns();
+  await ensureAssistantTables();
+  const rawMessage = sanitizeText(req.body?.message || '', 2000, { trim: true });
+  if (!rawMessage) {
+    return res.status(400).json({ message: 'Escreva o que você quer fazer no painel.' });
+  }
+  if (containsSensitiveRequest(rawMessage)) {
+    return res.json({
+      reply: 'Não posso mostrar ou manipular senhas, tokens, chaves, configurações privadas ou código interno. Posso ajudar com alunos, cursos, matrículas, relatórios, notificações e chats.',
+      actions: [],
+      proposalId: null,
+      requiresConfirmation: false
+    });
+  }
+  const { rows } = await db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
+  const settingsRow = rows[0];
+  if (!settingsRow?.is_enabled) {
+    return res.status(400).json({ message: 'Ative a integração de IA para usar a assistente do painel.' });
+  }
+
+  let creditCharge = null;
+  try {
+    creditCharge = await consumeProfessorAiCredit(req, 'a assistente do painel');
+    const context = await loadAssistantContext(req.user);
+    const modelPayload = await proposeAdminAssistantTurn({
+      settingsRow,
+      message: redactSecrets(rawMessage),
+      history: cleanHistory(req.body?.history),
+      context
+    });
+    const response = normalizeAssistantResponse(modelPayload, context);
+    const proposal = await storeProposal({
+      userId: req.user.id,
+      requestText: rawMessage,
+      response
+    });
+    return res.json({
+      reply: response.reply,
+      actions: response.actions.map(({ label, summary, dangerous }) => ({ label, summary, dangerous })),
+      proposalId: proposal?.id || null,
+      proposalExpiresAt: proposal?.expiresAt || null,
+      requiresConfirmation: response.actions.length > 0,
+      professorCreditsRemaining: creditCharge?.remainingCredits ?? null
+    });
+  } catch (error) {
+    if (creditCharge?.charged) {
+      await creditCharge.refund();
+    }
+    return res.status(error?.statusCode || 400).json({
+      message: error.message || 'A assistente não conseguiu processar o pedido.',
+      code: error?.code || null,
+      professorCreditsRemaining: error?.creditStatus?.aiCredits ?? null
+    });
+  }
+});
+
+router.post('/assistant/proposals/:proposalId/execute', aiRequestRateLimiter, async (req, res) => {
+  try {
+    const results = await executeProposal({
+      proposalId: req.params.proposalId,
+      user: req.user
+    });
+    return res.json({
+      success: true,
+      message: results.length === 1
+        ? results[0].result
+        : `${results.length} ações foram executadas com sucesso.`,
+      results
+    });
+  } catch (error) {
+    return res.status(error?.statusCode || 400).json({
+      message: error.message || 'Não foi possível executar a proposta.'
+    });
+  }
+});
+
+router.get('/assistant/audit', async (req, res) => {
+  await ensureAssistantTables();
+  const { rows } = await db.query(
+    `SELECT id, proposal_id, action_type, action_summary, status, error_message, created_at
+     FROM admin_ai_assistant_audit
+     WHERE user_id = $1
+     ORDER BY created_at DESC
+     LIMIT 50`,
+    [req.user.id]
+  );
+  res.json(rows);
+});
+
 router.post('/ai/slide-actions', aiRequestRateLimiter, async (req, res) => {
   await ensureAdminAiImageColumns();
   const request = sanitizeText(req.body?.request || '', 1800, { trim: true });
@@ -2562,7 +2730,14 @@ router.post('/ai/slide-actions', aiRequestRateLimiter, async (req, res) => {
   }
 
   try {
-    creditCharge = await consumeProfessorAiCredit(req, 'o assistente de IA para slides');
+    const usesPlannedDeterministicLayout = (
+      executionPlan?.mode === 'deck'
+      && Boolean(currentPlanItem?.targetSlideId || currentPlanItem?.id)
+      && Boolean(currentPlanItem?.contentBrief?.keyMessage)
+    );
+    if (!usesPlannedDeterministicLayout) {
+      creditCharge = await consumeProfessorAiCredit(req, 'o assistente de IA para slides');
+    }
     const actions = await proposeSlideActions({
       settingsRow,
       request,

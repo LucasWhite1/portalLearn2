@@ -163,7 +163,7 @@
             <label>Fundo do slide</label>
             <button id="slideBgUploadBtn" class="secondary-btn" type="button">Abrir editor de fundo</button>
             <input id="slideBgInput" hidden />
-            <small id="slideBgStatus" class="muted">Escolha cor sólida, gradiente, imagem ou vídeo para o fundo do
+            <small id="slideBgStatus" class="muted">Escolha cor unica, gradiente, imagem ou vídeo para o fundo do
               slide.</small>
           </div>
         </div>
@@ -251,21 +251,23 @@
             </select>
           </div>
           <div id="gradientToggleField" class="builder-field hidden">
-            <label>
-              <input type="checkbox" id="elementGradientToggle" />
-              Usar gradiente
-            </label>
+            <label for="elementFillModeSelect">Preenchimento</label>
+            <select id="elementFillModeSelect">
+              <option value="solid">Cor unica</option>
+              <option value="gradient">Gradiente</option>
+            </select>
+            <input type="checkbox" id="elementGradientToggle" class="hidden" />
           </div>
           <div id="solidColorField" class="builder-field hidden">
-            <label for="elementSolidColorInput">Cor sólida</label>
+            <label for="elementSolidColorInput">Cor</label>
             <input id="elementSolidColorInput" type="color" value="#ffffff" />
           </div>
           <div id="gradientStartField" class="builder-field gradient-colors hidden">
-            <label for="elementGradientStartInput">Cor inicial</label>
+            <label for="elementGradientStartInput">Inicio</label>
             <input id="elementGradientStartInput" type="color" value="#ffef5c" />
           </div>
           <div id="gradientEndField" class="builder-field gradient-colors hidden">
-            <label for="elementGradientEndInput">Cor final</label>
+            <label for="elementGradientEndInput">Fim</label>
             <input id="elementGradientEndInput" type="color" value="#ff9d5c" />
           </div>
           <div id="textBackgroundField" class="builder-field hidden">
@@ -688,21 +690,23 @@
                 </select>
               </div>
               <div class="builder-field">
-                <label class="toggle-inline">
-                  <input id="blockElementGradientToggle" type="checkbox" />
-                  Usar gradiente
-                </label>
+                <label for="blockElementFillModeSelect">Preenchimento</label>
+                <select id="blockElementFillModeSelect">
+                  <option value="solid">Cor unica</option>
+                  <option value="gradient">Gradiente</option>
+                </select>
+                <input id="blockElementGradientToggle" class="hidden" type="checkbox" />
               </div>
               <div id="blockElementSolidColorField" class="builder-field">
-                <label for="blockElementSolidColorInput">Cor sólida</label>
+                <label for="blockElementSolidColorInput">Cor</label>
                 <input id="blockElementSolidColorInput" type="color" value="#f4f6ff" />
               </div>
               <div id="blockElementGradientStartField" class="builder-field hidden">
-                <label for="blockElementGradientStartInput">Cor inicial</label>
+                <label for="blockElementGradientStartInput">Inicio</label>
                 <input id="blockElementGradientStartInput" type="color" value="#ffd54f" />
               </div>
               <div id="blockElementGradientEndField" class="builder-field hidden">
-                <label for="blockElementGradientEndInput">Cor final</label>
+                <label for="blockElementGradientEndInput">Fim</label>
                 <input id="blockElementGradientEndInput" type="color" value="#ffb74d" />
               </div>
               <div class="builder-field">
@@ -964,6 +968,31 @@
               <div id="floatingButtonLabelField" class="builder-field hidden">
                 <label for="floatingButtonLabelInput">Texto do botão</label>
                 <input id="floatingButtonLabelInput" placeholder="Ex: Explorar agora" />
+              </div>
+              <div id="floatingButtonShadowEnabledField" class="builder-field hidden">
+                <label class="toggle-inline">
+                  <input id="floatingButtonShadowToggle" type="checkbox" />
+                  Usar sombra
+                </label>
+              </div>
+              <div id="floatingButtonShadowColorField" class="builder-field hidden">
+                <label for="floatingButtonShadowColorInput">Cor da sombra</label>
+                <input id="floatingButtonShadowColorInput" type="color" value="#6d63ff" />
+              </div>
+              <div id="floatingButtonShadowOpacityField" class="builder-field hidden">
+                <label for="floatingButtonShadowOpacityInput">Opacidade da sombra</label>
+                <div class="range-with-value">
+                  <input id="floatingButtonShadowOpacityInput" type="range" min="0" max="100" step="1" value="40" />
+                  <span id="floatingButtonShadowOpacityValue" class="muted">40%</span>
+                </div>
+              </div>
+              <div id="floatingButtonShadowOffsetField" class="builder-field hidden">
+                <label for="floatingButtonShadowOffsetInput">Distancia da sombra</label>
+                <input id="floatingButtonShadowOffsetInput" type="number" min="0" max="80" step="1" value="12" />
+              </div>
+              <div id="floatingButtonShadowBlurField" class="builder-field hidden">
+                <label for="floatingButtonShadowBlurInput">Desfoque da sombra</label>
+                <input id="floatingButtonShadowBlurInput" type="number" min="0" max="120" step="1" value="25" />
               </div>
               <div id="floatingKeyBindingsField" class="builder-field hidden">
                 <label for="floatingKeyBindingsInput">Teclas deste gatilho</label>
@@ -1927,8 +1956,8 @@
               <div class="builder-field">
                 <label for="backgroundMediaTypeSelect">Tipo de fundo</label>
                 <select id="backgroundMediaTypeSelect">
-                  <option value="color-solid">Cor sólida</option>
-                  <option value="color-gradient">Cor gradiente</option>
+                  <option value="color-solid">Cor unica</option>
+                  <option value="color-gradient">Gradiente</option>
                   <option value="image-url">Imagem por URL</option>
                   <option value="image-local">Imagem do computador</option>
                   <option value="video-url">Vídeo por URL</option>
@@ -1943,15 +1972,15 @@
                 <small class="muted">Quando ativado, aplica várias mídias e cria um slide para cada fundo.</small>
               </div>
               <div id="backgroundSolidColorField" class="builder-field hidden">
-                <label for="backgroundSolidColorInput">Cor sólida</label>
+                <label for="backgroundSolidColorInput">Cor</label>
                 <input id="backgroundSolidColorInput" type="color" value="#fdfbff" />
               </div>
               <div id="backgroundGradientStartField" class="builder-field hidden">
-                <label for="backgroundGradientStartInput">Gradiente: cor inicial</label>
+                <label for="backgroundGradientStartInput">Inicio</label>
                 <input id="backgroundGradientStartInput" type="color" value="#fdfbff" />
               </div>
               <div id="backgroundGradientEndField" class="builder-field hidden">
-                <label for="backgroundGradientEndInput">Gradiente: cor final</label>
+                <label for="backgroundGradientEndInput">Fim</label>
                 <input id="backgroundGradientEndInput" type="color" value="#dfe7ff" />
               </div>
               <div id="backgroundMediaUrlField" class="builder-field">

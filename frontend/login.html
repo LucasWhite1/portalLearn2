@@ -10,13 +10,18 @@
   <div class="login-shell">
     <div class="login-box">
       <div class="field-group">
-        <div class="badge badge-pill">Curso Avançado</div>
+        <div class="badge badge-pill">Criatyve</div>
         <h1>Entrar</h1>
-        <p>Use seu email cadastrado para acessar as aulas, progressos e notificações.</p>
+        <p>Escolha seu perfil e use seu e-mail cadastrado para acessar aulas, progresso e notificações.</p>
       </div>
-        <form id="loginForm" method="post" action="/login.html">
+      <div class="login-role-toggle" aria-label="Tipo de acesso">
+        <button class="login-role-btn active" type="button" data-login-role="student" aria-pressed="true">Sou aluno</button>
+        <button class="login-role-btn" type="button" data-login-role="professor" aria-pressed="false">Sou professor</button>
+      </div>
+
+      <form id="loginForm" method="post" action="/login.html">
         <div class="field-group">
-          <label for="email">Email institucional</label>
+          <label for="email" id="loginEmailLabel">E-mail do aluno</label>
           <input type="email" id="email" name="email" required placeholder="aluno@curso.com" />
         </div>
         <div class="field-group">
@@ -24,23 +29,23 @@
           <input type="password" id="password" name="password" required placeholder="••••••••" />
         </div>
         <button type="submit" class="primary-btn">Entrar</button>
-        <a href="create-account.html" class="secondary-btn auth-secondary-link">Criar conta</a>
+        <button type="button" class="secondary-btn auth-secondary-link" id="createAccountChoiceBtn">Criar conta de aluno</button>
         <p style="text-align:center; margin-top:1rem;"><a href="#" id="showForgotBtn" style="color:#8b92b1; text-decoration:none; font-size:0.9rem;">Esqueci minha senha</a></p>
       </form>
 
-        <form id="studentSignupForm" method="post" action="/login.html" style="display:none;">
+      <form id="studentSignupForm" method="post" action="/login.html" style="display:none;">
         <div class="field-group">
-          <div class="badge badge-pill">Cadastro por convite</div>
+          <div class="badge badge-pill" id="studentSignupBadge">Cadastro de aluno</div>
           <h1 id="studentSignupTitle">Criar conta de aluno</h1>
-          <p id="studentSignupSubtitle">Valide o link para concluir seu cadastro.</p>
+          <p id="studentSignupSubtitle">Crie sua conta para entrar no portal do aluno e solicitar acesso aos cursos da vitrine.</p>
         </div>
         <div class="field-group">
           <label for="studentSignupFullName">Nome completo</label>
           <input type="text" id="studentSignupFullName" name="studentSignupFullName" required placeholder="Seu nome completo" />
         </div>
         <div class="field-group">
-          <label for="studentSignupEmail">Email</label>
-          <input type="email" id="studentSignupEmail" name="studentSignupEmail" required placeholder="voce@exemplo.com" />
+          <label for="studentSignupEmail">E-mail</label>
+          <input type="email" id="studentSignupEmail" name="studentSignupEmail" required placeholder="aluno@exemplo.com" />
         </div>
         <div class="field-group">
           <label for="studentSignupPhone">Telefone</label>
@@ -51,13 +56,19 @@
           <input type="password" id="studentSignupPassword" name="studentSignupPassword" required minlength="12" placeholder="Crie uma senha segura" />
           <small style="color:#8b92b1;">Use pelo menos 12 caracteres.</small>
         </div>
+        <label class="legal-consent-box" for="studentSignupTermsAccepted">
+          <input type="checkbox" id="studentSignupTermsAccepted" name="termsAccepted" required />
+          <span>
+            Li e aceito os <a href="terms.html" target="_blank" rel="noopener noreferrer">Termos de Uso e Privacidade</a>. Estou ciente de que a Criatyve poderá usar meus dados para suporte, avisos, cobrança, segurança e contatos de marketing.
+          </span>
+        </label>
         <button type="submit" class="primary-btn" id="studentSignupSubmitBtn">Criar conta</button>
         <p style="text-align:center; margin-top:1rem;"><a href="#" id="showLoginFromSignupBtn" style="color:#8b92b1; text-decoration:none; font-size:0.9rem;">Já tenho conta</a></p>
       </form>
 
-        <form id="forgotPasswordForm" method="post" action="/login.html" style="display:none;">
+      <form id="forgotPasswordForm" method="post" action="/login.html" style="display:none;">
         <div class="field-group">
-          <label for="forgotEmail">Email institucional</label>
+          <label for="forgotEmail">E-mail institucional</label>
           <input type="email" id="forgotEmail" name="forgotEmail" required placeholder="aluno@curso.com" />
           <small style="color:#8b92b1;">Um token será enviado para este e-mail se ele existir.</small>
         </div>
@@ -65,7 +76,7 @@
         <p style="text-align:center; margin-top:1rem;"><a href="#" id="showLoginFromForgotBtn" style="color:#8b92b1; text-decoration:none; font-size:0.9rem;">Voltar ao login</a></p>
       </form>
 
-        <form id="resetPasswordForm" method="post" action="/login.html" style="display:none;">
+      <form id="resetPasswordForm" method="post" action="/login.html" style="display:none;">
         <div class="field-group">
           <label for="resetToken">Token de Recuperação</label>
           <input type="text" id="resetToken" name="resetToken" required placeholder="Ex: 123456" />

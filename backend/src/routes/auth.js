@@ -18,7 +18,9 @@ let professorQuotaColumnsEnsurePromise = null;
 let adminSmtpSettingsEnsured = false;
 let classesTableEnsured = false;
 let studentSignupLinksTableEnsured = false;
+let legalConsentColumnsEnsured = false;
 const SIGNUP_LINK_TOKEN_REGEX = /^[a-f0-9]{64}$/i;
+const LEGAL_TERMS_VERSION = '2026-07-28';
 const resetPasswordRateLimiter = createRateLimiter({
   windowMs: 15 * 60 * 1000,
   max: 10,
@@ -160,6 +162,17 @@ const ensureStudentSignupLinksTable = async () => {
   `);
   studentSignupLinksTableEnsured = true;
 };
+
+const ensureLegalConsentColumns = async () => {
+  if (legalConsentColumnsEnsured) return;
+  await db.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ');
+  await db.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_version TEXT');
+  await db.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS marketing_consent_at TIMESTAMPTZ');
+  legalConsentColumnsEnsured = true;
+};
+
+const hasRequiredLegalConsent = (body = {}) =>
+  body?.termsAccepted === true || body?.acceptTerms === true || body?.terms_accepted === true;
 
 const normalizeSignupLinkToken = (value = '') => {
   const normalized = sanitizeText(value, 128).toLowerCase();
@@ -344,6 +357,7 @@ router.post('/signup', signupIpRateLimiter, selfSignupRateLimiter, async (req, r
   await ensureProfessorCreditColumns();
   await ensureProfessorQuotaColumns();
   await ensureClassesTable();
+  await ensureLegalConsentColumns();
 
   const fullName = sanitizeText(req.body?.fullName || '', 160);
   const email = sanitizeEmail(req.body?.email || '');
@@ -352,6 +366,9 @@ router.post('/signup', signupIpRateLimiter, selfSignupRateLimiter, async (req, r
   const roleInput = sanitizeText(req.body?.role || '', 32).toLowerCase();
   const role = roleInput === 'professor' ? 'professor' : roleInput === 'student' ? 'student' : '';
 
+  if (!hasRequiredLegalConsent(req.body)) {
+    return res.status(400).json({ message: 'Para criar a conta, aceite os Termos de Uso e Privacidade.' });
+  }
   if (!fullName || !email || !password || !role) {
     return res.status(400).json({ message: 'Nome, email, senha e tipo de conta são obrigatórios.' });
   }
@@ -380,9 +397,10 @@ router.post('/signup', signupIpRateLimiter, selfSignupRateLimiter, async (req, r
     await db.query(
       `INSERT INTO users (
          id, full_name, email, phone, password_hash, role, class_name, is_active, owner_user_id,
-         ai_credits, ai_credits_updated_at, student_limit, storage_limit_bytes
+         ai_credits, ai_credits_updated_at, student_limit, storage_limit_bytes,
+         terms_accepted_at, terms_version, marketing_consent_at
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, $8, $9, NOW(), $10, $11)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, $8, $9, NOW(), $10, $11, NOW(), $12, $13)`,
       [
         userId,
         fullName,
@@ -394,7 +412,9 @@ router.post('/signup', signupIpRateLimiter, selfSignupRateLimiter, async (req, r
         null,
         aiCredits,
         studentLimit,
-        storageLimitBytes
+        storageLimitBytes,
+        LEGAL_TERMS_VERSION,
+        req.body?.marketingConsent === false ? null : new Date()
       ]
     );
   } catch (error) {
@@ -582,11 +602,15 @@ router.post('/student-signup-link/:token/register', signupIpRateLimiter, signupL
   await ensureProfessorQuotaColumns();
   await ensureStudentSignupLinksTable();
   await ensureClassesTable();
+  await ensureLegalConsentColumns();
   const inviteToken = normalizeSignupLinkToken(req.params.token || '');
   const fullName = sanitizeText(req.body?.fullName || '', 160);
   const email = sanitizeEmail(req.body?.email || '');
   const phone = sanitizePhone(req.body?.phone || '');
   const password = sanitizeText(req.body?.password || '', 256, { trim: false });
+  if (!hasRequiredLegalConsent(req.body)) {
+    return res.status(400).json({ message: 'Para criar a conta, aceite os Termos de Uso e Privacidade.' });
+  }
   if (!inviteToken) {
     return res.status(404).json({ message: 'Link de cadastro inválido.' });
   }
@@ -644,9 +668,22 @@ router.post('/student-signup-link/:token/register', signupIpRateLimiter, signupL
       [crypto.randomUUID(), invite.professor_user_id]
     );
     await client.query(
-      `INSERT INTO users (id, full_name, email, phone, password_hash, role, class_name, is_active, owner_user_id)
-       VALUES ($1, $2, $3, $4, $5, 'student', $6, TRUE, $7)`,
-      [userId, fullName, email, phone || null, passwordHash, 'Turma A', invite.professor_user_id]
+      `INSERT INTO users (
+         id, full_name, email, phone, password_hash, role, class_name, is_active, owner_user_id,
+         terms_accepted_at, terms_version, marketing_consent_at
+       )
+       VALUES ($1, $2, $3, $4, $5, 'student', $6, TRUE, $7, NOW(), $8, $9)`,
+      [
+        userId,
+        fullName,
+        email,
+        phone || null,
+        passwordHash,
+        'Turma A',
+        invite.professor_user_id,
+        LEGAL_TERMS_VERSION,
+        req.body?.marketingConsent === false ? null : new Date()
+      ]
     );
     const { rows: createdRows } = await client.query('SELECT * FROM users WHERE id = $1', [userId]);
     await client.query('COMMIT');

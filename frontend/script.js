@@ -14,6 +14,8 @@
 const API_BASE = resolveApiBase();
 const STORAGE_KEY = 'curso-platform-token';
 const USER_ROLE_KEY = 'curso-platform-role';
+const WHATSAPP_SUPPORT_PHONE = '5599999999999';
+const WHATSAPP_SUPPORT_MESSAGE = 'Ola, quero falar com o suporte da Criatyve.';
 let cachedCourses = [];
 let cachedStoreCourses = [];
 let adminStudentsCache = [];
@@ -39,6 +41,9 @@ let currentStudentSignupLink = '';
 let liveStagePollTimer = null;
 let mobileSidenavCleanup = null;
 let selectedNotificationAttachment = null;
+let adminAssistantHistory = [];
+let adminAssistantProposalId = '';
+let adminAssistantBusy = false;
 
 const getCurrentUserRole = () => localStorage.getItem(USER_ROLE_KEY) || '';
 const getCurrentUserData = () => {
@@ -438,6 +443,42 @@ const updateStudentClassSelect = () => {
     .join('');
 };
 
+const updateNotificationClassSelect = () => {
+  const select = document.getElementById('notificationClass');
+  if (!select) return;
+  const previousValue = select.value;
+  if (!adminClassesCache.length) {
+    select.innerHTML = '<option value="">Nenhuma turma cadastrada</option>';
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  select.innerHTML = adminClassesCache
+    .map((item) => `<option value="${escapeAttribute(item.name)}">${escapeHtml(item.name)}</option>`)
+    .join('');
+  select.value = adminClassesCache.some((item) => item.name === previousValue)
+    ? previousValue
+    : adminClassesCache[0].name;
+};
+
+const updateNotificationStudentSelect = () => {
+  const select = document.getElementById('notificationStudent');
+  if (!select) return;
+  const previousValue = select.value;
+  if (!adminStudentsCache.length) {
+    select.innerHTML = '<option value="">Nenhum aluno cadastrado</option>';
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  select.innerHTML = adminStudentsCache
+    .map((student) => `<option value="${escapeAttribute(student.id)}">${escapeHtml(student.full_name)} • ${escapeHtml(student.email)}</option>`)
+    .join('');
+  select.value = adminStudentsCache.some((student) => student.id === previousValue)
+    ? previousValue
+    : adminStudentsCache[0].id;
+};
+
 const renderClassList = () => {
   const list = document.getElementById('classList');
   if (!list) return;
@@ -464,10 +505,12 @@ const loadAdminClasses = async () => {
     const classes = await response.json();
     adminClassesCache = Array.isArray(classes) ? classes : [];
     updateStudentClassSelect();
+    updateNotificationClassSelect();
     renderClassList();
   } catch (error) {
     adminClassesCache = [];
     updateStudentClassSelect();
+    updateNotificationClassSelect();
     renderClassList();
   }
 };
@@ -576,6 +619,16 @@ const showSectionById = (targetId, button = null) => {
   document.querySelector('.main-panel')?.scrollTo({ top: 0, behavior: 'smooth' });
 
   return true;
+};
+
+const setupWhatsappSupportLinks = () => {
+  const cleanPhone = String(WHATSAPP_SUPPORT_PHONE || '').replace(/\D/g, '');
+  const href = cleanPhone
+    ? `https://wa.me/${cleanPhone}?text=${encodeURIComponent(WHATSAPP_SUPPORT_MESSAGE)}`
+    : `https://wa.me/?text=${encodeURIComponent(WHATSAPP_SUPPORT_MESSAGE)}`;
+  document.querySelectorAll('#adminWhatsappSupportLink').forEach((link) => {
+    link.setAttribute('href', href);
+  });
 };
 
 const setupSideNavigation = () => {
@@ -761,19 +814,95 @@ const renderModulePerformanceSummary = (row = {}) => {
           </div>
           ${renderMiniProgressBar(metric.performanceScore, 'score')}
           <div class="module-performance-metrics">
-            <span>Nota: ${metric.gradePercent === null ? 'Sem nota' : `${metric.gradePercent.toFixed(0)}% (${metric.correctQuizzes}/${metric.answeredQuizzes})`}</span>
-            <span>Vídeos: ${metric.videoCount ? `${metric.completedVideos}/${metric.videoCount} • ${formatSecondsAsMinutes(metric.watchedSeconds)} vistos` : '0 vistos'}</span>
-            <span>Slides: ${metric.totalSlides ? `${metric.completedSlides}/${metric.totalSlides} concluídos • ${metric.viewedSlides} vistos` : `${metric.viewedSlides} vistos`}</span>
+            <span><b>Nota</b>${metric.gradePercent === null ? 'Sem nota' : `${metric.gradePercent.toFixed(0)}% (${metric.correctQuizzes}/${metric.answeredQuizzes})`}</span>
+            <span><b>Vídeos</b>${metric.videoCount ? `${metric.completedVideos}/${metric.videoCount} • ${formatSecondsAsMinutes(metric.watchedSeconds)}` : '0 vistos'}</span>
+            <span><b>Slides</b>${metric.totalSlides ? `${metric.completedSlides}/${metric.totalSlides} • ${metric.viewedSlides} vistos` : `${metric.viewedSlides} vistos`}</span>
           </div>
           <div class="module-performance-bars">
-            <label>Vídeo ${renderMiniProgressBar(metric.videoPercent, 'video')}</label>
-            <label>Slides ${renderMiniProgressBar(metric.slidePercent, 'slides')}</label>
-            <label>Nota ${renderMiniProgressBar(metric.gradePercent ?? 0, 'grade')}</label>
+            <label><span>Vídeo</span>${renderMiniProgressBar(metric.videoPercent, 'video')}</label>
+            <label><span>Slides</span>${renderMiniProgressBar(metric.slidePercent, 'slides')}</label>
+            <label><span>Nota</span>${renderMiniProgressBar(metric.gradePercent ?? 0, 'grade')}</label>
           </div>
         </article>
       `).join('')}
     </div>
   `;
+};
+
+const buildReportModulePanelKey = (row = {}, scope = 'pending') =>
+  `${scope}:${row.user_id || 'user'}:${row.course_id || 'course'}`;
+
+const renderModulePerformanceToggle = (row = {}, scope = 'pending') => {
+  const metrics = buildModulePerformanceMetrics(row);
+  const key = buildReportModulePanelKey(row, scope);
+  if (!metrics.length) {
+    return '<span style="color:#8b92b1;">Sem dados detalhados.</span>';
+  }
+  const averageScore = metrics.reduce((sum, metric) => sum + metric.performanceScore, 0) / metrics.length;
+  return `
+    <button
+      class="secondary-btn small module-performance-toggle"
+      type="button"
+      data-module-performance-toggle="${escapeAttribute(key)}"
+      aria-expanded="false"
+    >
+      <span class="module-performance-toggle-label">Ver módulos</span>
+      <span class="module-performance-toggle-meta">${metrics.length} • ${averageScore.toFixed(0)}%</span>
+    </button>
+  `;
+};
+
+const renderReportRows = (row = {}, scope = 'pending') => {
+  const panelKey = buildReportModulePanelKey(row, scope);
+  const isCorrected = scope === 'corrected';
+  return `
+    <tr>
+      <td data-label="Aluno">
+        <strong>${escapeHtml(row.full_name)}</strong>
+        <small style="display:block; color:#8b92b1;">${escapeHtml(row.email)}</small>
+      </td>
+      <td data-label="Curso">${escapeHtml(row.course_title)}</td>
+      <td data-label="Módulo atual">${escapeHtml(row.current_module || 'Módulo 1')}</td>
+      <td data-label="Desempenho">${renderModulePerformanceToggle(row, scope)}</td>
+      <td data-label="${isCorrected ? 'Corrigido em' : 'Atualizado em'}">${formatDate(isCorrected ? row.report_corrected_at : row.updated_at)}</td>
+      <td data-label="Ações">
+        <div class="report-action-group">
+          <button class="secondary-btn small report-action-btn" type="button" data-progress-timeline-user="${escapeAttribute(row.user_id)}" data-progress-timeline-course="${escapeAttribute(row.course_id)}">
+            Ver passos${Number(row.progress_event_count) > 0 ? ` (${Number(row.progress_event_count)})` : ''}
+          </button>
+          ${isCorrected
+            ? `<button class="secondary-btn small report-action-btn" type="button" data-corrected-delete-user="${escapeAttribute(row.user_id)}" data-corrected-delete-course="${escapeAttribute(row.course_id)}">Excluir</button>`
+            : `<button class="primary-btn small report-action-btn" type="button" data-report-correct-user="${escapeAttribute(row.user_id)}" data-report-correct-course="${escapeAttribute(row.course_id)}">Corrigir</button>`}
+        </div>
+      </td>
+    </tr>
+    <tr class="module-performance-detail-row" data-module-performance-panel="${escapeAttribute(panelKey)}" hidden>
+      <td colspan="6">
+        <div class="module-performance-detail-card">
+          <div class="module-performance-detail-head">
+            <strong>Desempenho por módulos</strong>
+            <span>${escapeHtml(row.full_name || 'Aluno')}</span>
+          </div>
+          ${renderModulePerformanceSummary(row)}
+        </div>
+      </td>
+    </tr>
+  `;
+};
+
+const toggleReportModulePanel = (button) => {
+  if (!button) return;
+  const key = button.dataset.modulePerformanceToggle || '';
+  const tableBody = button.closest('tbody');
+  const panelRow = Array.from(tableBody?.querySelectorAll('[data-module-performance-panel]') || [])
+    .find((node) => node.dataset.modulePerformancePanel === key);
+  if (!panelRow) return;
+  const willOpen = panelRow.hidden;
+  panelRow.hidden = !willOpen;
+  button.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+  button.classList.toggle('is-open', willOpen);
+  const label = button.querySelector('.module-performance-toggle-label');
+  if (label) label.textContent = willOpen ? 'Ocultar módulos' : 'Ver módulos';
 };
 
 const getAverageModuleGrade = (row = {}) => {
@@ -1275,14 +1404,6 @@ const renderDashboard = async () => {
       loadStoreCourses(),
       renderNotifications()
     ];
-    const currentCourseLabel = document.getElementById('portalCurrentCourseLabel');
-    const currentCourseStatus = document.getElementById('portalCurrentCourseStatus');
-    const currentModuleLabel = document.getElementById('portalCurrentModuleLabel');
-    const currentSlideLabel = document.getElementById('portalCurrentSlideLabel');
-    const nextActionLabel = document.getElementById('portalNextActionLabel');
-    const gradeDetail = document.getElementById('portalGradeDetail');
-    const videoDetail = document.getElementById('portalVideoDetail');
-    const slideDetail = document.getElementById('portalSlideDetail');
     if (courses[0]) {
       const progress = courses[0].progress || {};
       const videoProgressMap =
@@ -1311,23 +1432,6 @@ const renderDashboard = async () => {
       const interactivePercent = totalInteractiveSlides
         ? Math.min(100, (completedInteractiveSlides / totalInteractiveSlides) * 100)
         : 0;
-      const sortedModules = sortModulesForPhase(courses[0].modules || []);
-      const recommendedModule = getRecommendedCourseModule(courses[0]);
-      const currentModuleProgress =
-        recommendedModule?.id && progress.interactive_progress && typeof progress.interactive_progress === 'object'
-          ? progress.interactive_progress[recommendedModule.id]
-          : null;
-      const currentSlideId = currentModuleProgress?.lastSlideId || null;
-      const currentSlideIndex =
-        currentSlideId && recommendedModule?.builder_data?.slides?.length
-          ? recommendedModule.builder_data.slides.findIndex((slide) => slide.id === currentSlideId)
-          : -1;
-      const readableSlideLabel =
-        currentSlideIndex >= 0
-          ? `Slide ${currentSlideIndex + 1} de ${recommendedModule.builder_data.slides.length}`
-          : recommendedModule?.builder_data?.slides?.length
-            ? `Slide 1 de ${recommendedModule.builder_data.slides.length}`
-            : 'Nenhum slide em andamento';
       document.getElementById('videoTitle').textContent = courses[0].title;
       document.getElementById('videoTimestamp').textContent = `${Math.floor((Number(progress.video_position) || 0) / 60)} min`;
       document.getElementById('interactiveStep').textContent = totalInteractiveSlides
@@ -1338,7 +1442,6 @@ const renderDashboard = async () => {
       const gradeNode = document.getElementById('gradeValue');
       const moduleNode = document.getElementById('currentModule');
       const studentModulePerformance = document.getElementById('studentModulePerformance');
-      const portalModulePerformance = document.getElementById('portalModulePerformance');
       const averageModuleGrade = getAverageModuleGrade(courses[0]);
       const modulePerformanceMarkup = renderModulePerformanceSummary(courses[0]);
       if (gradeNode) {
@@ -1350,75 +1453,10 @@ const renderDashboard = async () => {
       if (studentModulePerformance) {
         studentModulePerformance.innerHTML = modulePerformanceMarkup;
       }
-      if (portalModulePerformance) {
-        portalModulePerformance.innerHTML = modulePerformanceMarkup;
-      }
-      if (currentCourseLabel) {
-        currentCourseLabel.textContent = courses[0].title;
-      }
-      if (currentCourseStatus) {
-        currentCourseStatus.textContent = `${sortedModules.length} módulo(s) disponíveis nesta trilha.`;
-      }
-      if (currentModuleLabel) {
-        currentModuleLabel.textContent =
-          progress.current_module || recommendedModule?.title || courses[0].modules?.[0]?.title || 'Nenhum módulo em andamento';
-      }
-      if (currentSlideLabel) {
-        currentSlideLabel.textContent = readableSlideLabel;
-      }
-      if (nextActionLabel) {
-        nextActionLabel.textContent = recommendedModule
-          ? `Retome "${recommendedModule.title}" e continue a partir de ${readableSlideLabel.toLowerCase()}.`
-          : 'Aguardando novos módulos serem publicados para sua turma.';
-      }
-      if (gradeDetail) {
-        gradeDetail.textContent =
-          averageModuleGrade === null
-            ? 'Sem nota registrada'
-            : `Nota média dos módulos: ${formatGrade(averageModuleGrade)}`;
-      }
-      if (videoDetail) {
-        videoDetail.textContent = totalVideoDuration
-          ? `Vídeo assistido: ${watchedVideoDuration.toFixed(0)}s de ${totalVideoDuration.toFixed(0)}s`
-          : 'Nenhum vídeo iniciado neste curso.';
-      }
-      if (slideDetail) {
-        slideDetail.textContent = totalInteractiveSlides
-          ? `Slides concluídos: ${completedInteractiveSlides} de ${totalInteractiveSlides}`
-          : 'Nenhum slide concluído ainda.';
-      }
     } else {
       const studentModulePerformance = document.getElementById('studentModulePerformance');
-      const portalModulePerformance = document.getElementById('portalModulePerformance');
       if (studentModulePerformance) {
         studentModulePerformance.innerHTML = '<p class="muted" style="margin:0;">As notas por módulo aparecem aqui.</p>';
-      }
-      if (portalModulePerformance) {
-        portalModulePerformance.innerHTML = '<p class="muted" style="margin:0;">Sem dados por módulo ainda.</p>';
-      }
-      if (currentCourseLabel) {
-        currentCourseLabel.textContent = 'Nenhum curso em andamento';
-      }
-      if (currentCourseStatus) {
-        currentCourseStatus.textContent = 'Assim que você entrar em um curso, ele aparece aqui.';
-      }
-      if (currentModuleLabel) {
-        currentModuleLabel.textContent = 'Nenhum módulo em andamento';
-      }
-      if (currentSlideLabel) {
-        currentSlideLabel.textContent = 'Nenhum slide em andamento';
-      }
-      if (nextActionLabel) {
-        nextActionLabel.textContent = 'Assim que houver curso matriculado, sua próxima ação aparece aqui.';
-      }
-      if (gradeDetail) {
-        gradeDetail.textContent = 'Sem nota registrada';
-      }
-      if (videoDetail) {
-        videoDetail.textContent = 'Vídeos ainda não iniciados.';
-      }
-      if (slideDetail) {
-        slideDetail.textContent = 'Slides ainda não iniciados.';
       }
     }
     await Promise.all(secondaryLoads);
@@ -1458,12 +1496,19 @@ const initLogin = () => {
   const feedback = document.getElementById('loginFeedback');
   const signupTitle = document.getElementById('studentSignupTitle');
   const signupSubtitle = document.getElementById('studentSignupSubtitle');
+  const signupBadge = document.getElementById('studentSignupBadge');
   const signupSubmitBtn = document.getElementById('studentSignupSubmitBtn');
   const inviteToken = new URLSearchParams(window.location.search).get('invite') || '';
   const showForgotBtn = document.getElementById('showForgotBtn');
   const showLoginFromForgotBtn = document.getElementById('showLoginFromForgotBtn');
   const showLoginFromResetBtn = document.getElementById('showLoginFromResetBtn');
   const showLoginFromSignupBtn = document.getElementById('showLoginFromSignupBtn');
+  const createAccountChoiceBtn = document.getElementById('createAccountChoiceBtn');
+  const loginEmailLabel = document.getElementById('loginEmailLabel');
+  const loginRoleButtons = Array.from(document.querySelectorAll('[data-login-role]'));
+  let selectedLoginRole = new URLSearchParams(window.location.search).get('role') === 'professor'
+    ? 'professor'
+    : 'student';
 
   const hideAllAuthForms = () => {
     if (form) form.style.display = 'none';
@@ -1491,6 +1536,44 @@ const initLogin = () => {
     if (signupForm) signupForm.style.display = 'block';
     if (feedback) feedback.style.display = 'none';
   };
+
+  const applyLoginRoleMode = (nextRole) => {
+    selectedLoginRole = nextRole === 'professor' ? 'professor' : 'student';
+    loginRoleButtons.forEach((button) => {
+      const isActive = button.dataset.loginRole === selectedLoginRole;
+      button.classList.toggle('active', isActive);
+      button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    });
+    if (loginEmailLabel) {
+      loginEmailLabel.textContent = selectedLoginRole === 'professor' ? 'E-mail do professor' : 'E-mail do aluno';
+    }
+    if (form?.email) {
+      form.email.placeholder = selectedLoginRole === 'professor' ? 'professor@curso.com' : 'aluno@curso.com';
+    }
+    if (createAccountChoiceBtn) {
+      createAccountChoiceBtn.textContent = selectedLoginRole === 'professor'
+        ? 'Criar conta de professor'
+        : 'Criar conta de aluno';
+    }
+  };
+
+  loginRoleButtons.forEach((button) => {
+    button.addEventListener('click', () => applyLoginRoleMode(button.dataset.loginRole));
+  });
+
+  createAccountChoiceBtn?.addEventListener('click', () => {
+    if (selectedLoginRole === 'professor') {
+      window.location.href = 'create-account.html';
+      return;
+    }
+    if (signupBadge) signupBadge.textContent = 'Cadastro de aluno';
+    if (signupTitle) signupTitle.textContent = 'Criar conta de aluno';
+    if (signupSubtitle) {
+      signupSubtitle.textContent = 'Crie sua conta para entrar no portal do aluno e solicitar acesso aos cursos da vitrine.';
+    }
+    if (signupSubmitBtn) signupSubmitBtn.disabled = false;
+    showSignupMode();
+  });
 
   if (showForgotBtn) showForgotBtn.addEventListener('click', (e) => { e.preventDefault(); showForgotMode(); });
   if (showLoginFromForgotBtn) showLoginFromForgotBtn.addEventListener('click', (e) => { e.preventDefault(); showLoginMode(); });
@@ -1547,24 +1630,27 @@ const initLogin = () => {
   signupForm?.addEventListener('submit', async (event) => {
     event.preventDefault();
     feedback.style.display = 'none';
-    if (!inviteToken) {
-      feedback.textContent = 'Link de cadastro inválido.';
-      feedback.style.color = '#ff6b6b';
-      feedback.style.display = 'block';
-      return;
-    }
     if (signupSubmitBtn) signupSubmitBtn.disabled = true;
     try {
-      const response = await fetch(`${API_BASE}/api/auth/student-signup-link/${encodeURIComponent(inviteToken)}/register`, {
+      const signupPayload = {
+        fullName: signupForm.studentSignupFullName.value,
+        email: signupForm.studentSignupEmail.value,
+        phone: signupForm.studentSignupPhone.value,
+        password: signupForm.studentSignupPassword.value,
+        termsAccepted: Boolean(signupForm.termsAccepted?.checked),
+        marketingConsent: Boolean(signupForm.termsAccepted?.checked)
+      };
+      if (!signupPayload.termsAccepted) {
+        throw new Error('Para criar a conta, aceite os Termos de Uso e Privacidade.');
+      }
+      const signupUrl = inviteToken
+        ? `${API_BASE}/api/auth/student-signup-link/${encodeURIComponent(inviteToken)}/register`
+        : `${API_BASE}/api/auth/signup`;
+      const response = await fetch(signupUrl, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fullName: signupForm.studentSignupFullName.value,
-          email: signupForm.studentSignupEmail.value,
-          phone: signupForm.studentSignupPhone.value,
-          password: signupForm.studentSignupPassword.value
-        })
+        body: JSON.stringify(inviteToken ? signupPayload : { ...signupPayload, role: 'student' })
       });
       const data = await parseJsonSafely(response);
       if (!response.ok) {
@@ -1608,6 +1694,7 @@ const initLogin = () => {
   });
 
   if (inviteToken) {
+    if (signupBadge) signupBadge.textContent = 'Cadastro por convite';
     showSignupMode();
     if (signupSubmitBtn) signupSubmitBtn.disabled = true;
     fetch(`${API_BASE}/api/auth/student-signup-link/${encodeURIComponent(inviteToken)}`)
@@ -1639,6 +1726,8 @@ const initLogin = () => {
         feedback.style.display = 'block';
       });
   }
+
+  applyLoginRoleMode(selectedLoginRole);
 };
 
 const initCreateAccount = () => {
@@ -1713,6 +1802,7 @@ const initCreateAccount = () => {
     const phone = form.createAccountPhone?.value?.trim() || '';
     const password = form.createAccountPassword?.value || '';
     const confirmPassword = form.createAccountConfirmPassword?.value || '';
+    const termsAccepted = Boolean(form.termsAccepted?.checked);
 
     if (!fullName || !email || !password) {
       setFeedback('Preencha nome, email e senha para continuar.');
@@ -1724,6 +1814,10 @@ const initCreateAccount = () => {
     }
     if (password !== confirmPassword) {
       setFeedback('As senhas não coincidem.');
+      return;
+    }
+    if (!termsAccepted) {
+      setFeedback('Para criar a conta, aceite os Termos de Uso e Privacidade.');
       return;
     }
 
@@ -1738,7 +1832,9 @@ const initCreateAccount = () => {
           email,
           phone,
           password,
-          role
+          role,
+          termsAccepted,
+          marketingConsent: termsAccepted
         })
       });
       const data = await parseJsonSafely(response);
@@ -1768,23 +1864,24 @@ const loadAdminStudents = async () => {
     if (!students.length) {
       tbody.innerHTML = '<tr><td colspan="5" style="color:#8b92b1;">Nenhum aluno cadastrado.</td></tr>';
       updateEnrollmentStudentSelect();
+      updateNotificationStudentSelect();
       return;
     }
     students.forEach((student) => {
       const row = document.createElement('tr');
       row.innerHTML = `
-        <td>
-          <strong>${student.full_name}</strong>
-          <span style="font-size:0.85rem;color:#8b92b1;">${student.email}</span>
+        <td data-label="Aluno">
+          <strong>${escapeHtml(student.full_name)}</strong>
+          <span style="font-size:0.85rem;color:#8b92b1;">${escapeHtml(student.email)}</span>
         </td>
-        <td>${student.class_name || 'Sem turma'}</td>
-        <td>${student.phone || '—'}</td>
-        <td>
+        <td data-label="Turma">${escapeHtml(student.class_name || 'Sem turma')}</td>
+        <td data-label="Telefone">${escapeHtml(student.phone || '—')}</td>
+        <td data-label="Status">
           <span class="toggle-pill" style="background:${student.is_active ? 'rgba(109, 99, 255, 0.15)' : '#fff0f0'}; color:${student.is_active ? '#6d63ff' : '#ff6b6b'};">
             ${student.is_active ? 'Ativo' : 'Bloqueado'}
           </span>
         </td>
-        <td>
+        <td data-label="Ações">
           <div class="table-actions">
             <button data-student-id="${student.id}" data-action="toggle" class="primary-btn" style="width:auto; padding:0.4rem 0.9rem; font-size:0.85rem;">
               ${student.is_active ? 'Bloquear' : 'Autorizar'}
@@ -1798,6 +1895,7 @@ const loadAdminStudents = async () => {
       tbody.appendChild(row);
     });
     updateEnrollmentStudentSelect();
+    updateNotificationStudentSelect();
   } catch (error) {
     console.error(error);
   }
@@ -1999,7 +2097,7 @@ const loadAdminCourses = async () => {
       .map((course) => {
         const coverImage = getCourseCoverImage(course);
         return `
-        <div class="list-item admin-course-item">
+        <article class="admin-course-card admin-course-item">
           <div class="admin-course-content">
             <div class="course-cover-preview-card admin-course-thumb"${coverImage ? ` style="background-image:linear-gradient(155deg, rgba(16, 20, 52, 0.18), rgba(16, 20, 52, 0.02)), url('${coverImage.replace(/'/g, "\'")}')"` : ''}>
               <div class="course-cover-preview-copy">
@@ -2073,7 +2171,7 @@ const loadAdminCourses = async () => {
               <input data-course-cover-file="${course.id}" type="file" accept="image/*" hidden />
             </div>
           </div>
-        </div>`;
+        </article>`;
       })
       .join('');
     updateEnrollmentCourseSelect();
@@ -2284,56 +2382,12 @@ const loadReports = async () => {
     const correctedReports = data.filter((row) => Boolean(row.report_corrected_at));
     tbody.innerHTML = pendingReports.length
       ? pendingReports
-          .map(
-            (row) => `
-              <tr>
-                <td>
-                  <strong>${row.full_name}</strong>
-                  <small style="display:block; color:#8b92b1;">${row.email}</small>
-                </td>
-                <td>${row.course_title}</td>
-                <td>${row.current_module || 'Módulo 1'}</td>
-                <td>${renderModulePerformanceSummary(row)}</td>
-                <td>${formatDate(row.updated_at)}</td>
-                <td>
-                  <div class="report-action-group">
-                    <button class="secondary-btn small report-action-btn" type="button" data-progress-timeline-user="${row.user_id}" data-progress-timeline-course="${row.course_id}">
-                      Ver passos${Number(row.progress_event_count) > 0 ? ` (${Number(row.progress_event_count)})` : ''}
-                    </button>
-                    <button class="primary-btn small report-action-btn" type="button" data-report-correct-user="${row.user_id}" data-report-correct-course="${row.course_id}">
-                      Corrigir
-                    </button>
-                  </div>
-                </td>
-              </tr>`
-          )
+          .map((row) => renderReportRows(row, 'pending'))
           .join('')
       : '<tr><td colspan="6" style="color:#8b92b1;">Nenhum relatório pendente no momento.</td></tr>';
     correctedTbody.innerHTML = correctedReports.length
       ? correctedReports
-          .map(
-            (row) => `
-              <tr>
-                <td>
-                  <strong>${row.full_name}</strong>
-                  <small style="display:block; color:#8b92b1;">${row.email}</small>
-                </td>
-                <td>${row.course_title}</td>
-                <td>${row.current_module || 'Módulo 1'}</td>
-                <td>${renderModulePerformanceSummary(row)}</td>
-                <td>${formatDate(row.report_corrected_at)}</td>
-                <td>
-                  <div class="report-action-group">
-                    <button class="secondary-btn small report-action-btn" type="button" data-progress-timeline-user="${row.user_id}" data-progress-timeline-course="${row.course_id}">
-                      Ver passos${Number(row.progress_event_count) > 0 ? ` (${Number(row.progress_event_count)})` : ''}
-                    </button>
-                    <button class="secondary-btn small report-action-btn" type="button" data-corrected-delete-user="${row.user_id}" data-corrected-delete-course="${row.course_id}">
-                      Excluir
-                    </button>
-                  </div>
-                </td>
-              </tr>`
-          )
+          .map((row) => renderReportRows(row, 'corrected'))
           .join('')
       : '<tr><td colspan="6" style="color:#8b92b1;">Nenhum relatório corrigido ainda.</td></tr>';
     return;
@@ -2513,11 +2567,11 @@ const renderAiSettingsStatus = (settings) => {
   const imageProvider = settings.imageProvider;
   const imageLabel =
     imageProvider?.connected && imageProvider?.isEnabled
-      ? ` • ${imageProvider.providerLabel} • ${imageProvider.model} • imagem ativa`
-      : ' • Nano Banana não configurada';
+      ? ' • imagem ativa'
+      : ' • imagem não configurada';
   const textCost = settings.aiTextCreditCostPerCall || settings.aiCreditCostPerCall || 0.5;
   const imageCost = settings.aiImageCreditCostPerCall || 1.0;
-  statusNode.textContent = `${settings.providerLabel} • ${settings.model} • ${statusLabel} • ${confirmationLabel}${imageLabel} • texto: ${formatCreditNumber(textCost)} • imagem: ${formatCreditNumber(imageCost)}`;
+  statusNode.textContent = `Integração de IA ${statusLabel} • ${confirmationLabel}${imageLabel} • texto: ${formatCreditNumber(textCost)} • imagem: ${formatCreditNumber(imageCost)}`;
   statusNode.style.color = settings.isEnabled ? '#6d63ff' : '#8b92b1';
 };
 
@@ -2613,6 +2667,240 @@ const loadAdminSmtpSettings = async () => {
   }
 };
 
+const appendAdminAssistantMessage = (role, content) => {
+  const container = document.getElementById('adminAssistantConversation');
+  if (!container) return;
+  const safeRole = role === 'user' ? 'user' : 'assistant';
+  const wrapper = document.createElement('div');
+  wrapper.className = `admin-assistant-message ${safeRole}`;
+  wrapper.innerHTML = safeRole === 'assistant'
+    ? `
+      <span class="admin-assistant-avatar" aria-hidden="true">IA</span>
+      <div>
+        <strong>Assistente Criatyve</strong>
+        <p>${escapeHtml(content)}</p>
+      </div>
+    `
+    : `
+      <div>
+        <strong>Você</strong>
+        <p>${escapeHtml(content)}</p>
+      </div>
+    `;
+  container.appendChild(wrapper);
+  container.scrollTop = container.scrollHeight;
+};
+
+const setAdminAssistantStatus = (message, tone = 'neutral') => {
+  const status = document.getElementById('adminAssistantStatus');
+  if (!status) return;
+  status.textContent = message;
+  status.style.color = tone === 'error'
+    ? '#c63b3b'
+    : tone === 'success'
+      ? '#126b5c'
+      : '#7b8499';
+};
+
+const clearAdminAssistantProposal = () => {
+  adminAssistantProposalId = '';
+  const panel = document.getElementById('adminAssistantProposal');
+  if (!panel) return;
+  panel.classList.add('hidden');
+  panel.replaceChildren();
+};
+
+const renderAdminAssistantProposal = (payload) => {
+  const panel = document.getElementById('adminAssistantProposal');
+  const actions = Array.isArray(payload?.actions) ? payload.actions : [];
+  if (!panel || !payload?.proposalId || !actions.length) {
+    clearAdminAssistantProposal();
+    return;
+  }
+  adminAssistantProposalId = payload.proposalId;
+  const hasDangerousAction = actions.some((action) => action.dangerous);
+  panel.classList.remove('hidden');
+  panel.innerHTML = `
+    <div class="admin-assistant-proposal-head">
+      <div>
+        <h3>${hasDangerousAction ? 'Revise com atenção' : 'Ações prontas para confirmar'}</h3>
+        <small>${hasDangerousAction ? 'Esta proposta contém remoção ou exclusão.' : 'Nada foi alterado ainda.'}</small>
+      </div>
+      <span class="toggle-pill">${actions.length} ${actions.length === 1 ? 'ação' : 'ações'}</span>
+    </div>
+    <div class="admin-assistant-action-list">
+      ${actions.map((action, index) => `
+        <div class="admin-assistant-action ${action.dangerous ? 'dangerous' : ''}">
+          <span class="admin-assistant-action-index">${index + 1}</span>
+          <div>
+            <strong>${escapeHtml(action.label || 'Ação')}</strong>
+            <p>${escapeHtml(action.summary || '')}</p>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+    <div class="admin-assistant-proposal-actions">
+      <button type="button" class="primary-btn" data-assistant-confirm>Confirmar e executar</button>
+      <button type="button" class="secondary-btn" data-assistant-cancel>Cancelar</button>
+    </div>
+  `;
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+};
+
+const refreshAdminAfterAssistantAction = async () => {
+  await Promise.allSettled([
+    loadAdminStudents(),
+    loadAdminClasses(),
+    loadAdminCourses(),
+    loadAdminAccessRequests(),
+    loadReports(),
+    loadAdminNotifications(),
+    loadAdminChatCourses(false),
+    loadProfessorCreditsStatus()
+  ]);
+};
+
+const sendAdminAssistantMessage = async (messageValue = '') => {
+  if (adminAssistantBusy) return;
+  const input = document.getElementById('adminAssistantInput');
+  const sendButton = document.getElementById('adminAssistantSendBtn');
+  const message = String(messageValue || input?.value || '').slice(0, 2000).trim();
+  if (!message) return;
+  adminAssistantBusy = true;
+  if (input) input.value = '';
+  if (sendButton) {
+    sendButton.disabled = true;
+    sendButton.textContent = 'Analisando...';
+  }
+  clearAdminAssistantProposal();
+  appendAdminAssistantMessage('user', message);
+  setAdminAssistantStatus('Lendo os dados permitidos do painel e preparando a resposta...');
+  try {
+    const response = await authorizedFetch('/api/admin/assistant/chat', {
+      method: 'POST',
+      body: JSON.stringify({
+        message,
+        history: adminAssistantHistory.slice(-12)
+      })
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(payload?.message || 'A assistente não conseguiu responder.');
+    }
+    appendAdminAssistantMessage('assistant', payload.reply || 'Pedido analisado.');
+    adminAssistantHistory.push(
+      { role: 'user', content: message },
+      { role: 'assistant', content: payload.reply || 'Pedido analisado.' }
+    );
+    adminAssistantHistory = adminAssistantHistory.slice(-12);
+    renderAdminAssistantProposal(payload);
+    if (Number.isFinite(Number(payload.professorCreditsRemaining))) {
+      setAdminAssistantStatus(`Resposta concluída. Saldo de IA: ${formatCreditNumber(payload.professorCreditsRemaining)} créditos.`, 'success');
+      await loadProfessorCreditsStatus();
+    } else {
+      setAdminAssistantStatus(payload.requiresConfirmation
+        ? 'Revise as ações e confirme para aplicá-las.'
+        : 'Resposta concluída.', 'success');
+    }
+  } catch (error) {
+    appendAdminAssistantMessage('assistant', error.message || 'Não consegui concluir esse pedido.');
+    setAdminAssistantStatus(error.message || 'Não foi possível usar a assistente.', 'error');
+  } finally {
+    adminAssistantBusy = false;
+    if (sendButton) {
+      sendButton.disabled = false;
+      sendButton.textContent = 'Enviar';
+    }
+    input?.focus();
+  }
+};
+
+const executeAdminAssistantProposal = async () => {
+  if (!adminAssistantProposalId || adminAssistantBusy) return;
+  const proposalId = adminAssistantProposalId;
+  const panel = document.getElementById('adminAssistantProposal');
+  const confirmButton = panel?.querySelector('[data-assistant-confirm]');
+  const cancelButton = panel?.querySelector('[data-assistant-cancel]');
+  adminAssistantBusy = true;
+  if (confirmButton) {
+    confirmButton.disabled = true;
+    confirmButton.textContent = 'Executando...';
+  }
+  if (cancelButton) cancelButton.disabled = true;
+  setAdminAssistantStatus('Aplicando as ações com validação de permissão...');
+  try {
+    const response = await authorizedFetch(`/api/admin/assistant/proposals/${encodeURIComponent(proposalId)}/execute`, {
+      method: 'POST'
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(payload?.message || 'Não foi possível executar a proposta.');
+    }
+    const resultText = Array.isArray(payload?.results) && payload.results.length
+      ? payload.results.map((item) => item.result).join(' ')
+      : (payload?.message || 'Ações concluídas.');
+    appendAdminAssistantMessage('assistant', resultText);
+    adminAssistantHistory.push({ role: 'assistant', content: resultText });
+    adminAssistantHistory = adminAssistantHistory.slice(-12);
+    clearAdminAssistantProposal();
+    setAdminAssistantStatus('Ações concluídas e painel atualizado.', 'success');
+    await refreshAdminAfterAssistantAction();
+  } catch (error) {
+    appendAdminAssistantMessage('assistant', error.message || 'Não foi possível executar as ações.');
+    setAdminAssistantStatus(error.message || 'Falha ao executar a proposta.', 'error');
+    clearAdminAssistantProposal();
+  } finally {
+    adminAssistantBusy = false;
+  }
+};
+
+const initAdminAssistant = () => {
+  const form = document.getElementById('adminAssistantForm');
+  const input = document.getElementById('adminAssistantInput');
+  form?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    await sendAdminAssistantMessage();
+  });
+  input?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      form?.requestSubmit();
+    }
+  });
+  document.querySelectorAll('[data-assistant-suggestion]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      await sendAdminAssistantMessage(button.dataset.assistantSuggestion || '');
+    });
+  });
+  document.getElementById('adminAssistantProposal')?.addEventListener('click', async (event) => {
+    if (event.target.closest('[data-assistant-confirm]')) {
+      await executeAdminAssistantProposal();
+      return;
+    }
+    if (event.target.closest('[data-assistant-cancel]')) {
+      clearAdminAssistantProposal();
+      setAdminAssistantStatus('Proposta cancelada. Nenhuma alteração foi feita.');
+    }
+  });
+  document.getElementById('adminAssistantClearBtn')?.addEventListener('click', () => {
+    adminAssistantHistory = [];
+    clearAdminAssistantProposal();
+    const conversation = document.getElementById('adminAssistantConversation');
+    if (conversation) {
+      conversation.innerHTML = `
+        <div class="admin-assistant-message assistant">
+          <span class="admin-assistant-avatar" aria-hidden="true">IA</span>
+          <div>
+            <strong>Assistente Criatyve</strong>
+            <p>Conversa limpa. O que você quer resolver no painel?</p>
+          </div>
+        </div>
+      `;
+    }
+    setAdminAssistantStatus('Cada mensagem usa o custo configurado para uma chamada de IA de texto.');
+  });
+};
+
 const initAdminPage = () => {
   if (adminChatPollTimer) {
     clearInterval(adminChatPollTimer);
@@ -2629,12 +2917,15 @@ const initAdminPage = () => {
     if (aiImageCostField) aiImageCostField.remove();
   }
   renderStudentSignupLinkPanel();
+  initAdminAssistant();
   loadProfessorCreditsStatus();
   loadAdminSmtpSettings();
   const notifTarget = document.getElementById('notificationTarget');
   const studentSelector = document.getElementById('studentSelector');
+  const classSelector = document.getElementById('classSelector');
   notifTarget?.addEventListener('change', () => {
-    studentSelector.style.display = notifTarget.value === 'student' ? 'block' : 'none';
+    if (studentSelector) studentSelector.style.display = notifTarget.value === 'student' ? 'block' : 'none';
+    if (classSelector) classSelector.style.display = notifTarget.value === 'class' ? 'block' : 'none';
   });
   document.getElementById('notificationFileBtn')?.addEventListener('click', () => {
     document.getElementById('notificationFileInput')?.click();
@@ -2745,7 +3036,13 @@ const initAdminPage = () => {
   document.getElementById('notificationForm')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const targetType = document.getElementById('notificationTarget').value;
-    const targetValue = targetType === 'student' ? document.getElementById('notificationStudent').value : (targetType === 'class' ? 'Turma Master' : null);
+    const targetValue = targetType === 'student'
+      ? document.getElementById('notificationStudent')?.value
+      : (targetType === 'class' ? document.getElementById('notificationClass')?.value : null);
+    if ((targetType === 'student' || targetType === 'class') && !targetValue) {
+      alert(targetType === 'student' ? 'Selecione um aluno.' : 'Selecione uma turma.');
+      return;
+    }
     try {
       await authorizedFetch('/api/admin/notifications', {
         method: 'POST',
@@ -2759,7 +3056,10 @@ const initAdminPage = () => {
       alert('Notificação enviada com sucesso.');
       document.getElementById('notificationForm').reset();
       clearNotificationAttachment();
-      studentSelector.style.display = 'none';
+      if (studentSelector) studentSelector.style.display = 'none';
+      if (classSelector) classSelector.style.display = 'none';
+      updateNotificationClassSelect();
+      updateNotificationStudentSelect();
       loadAdminNotifications();
     } catch (error) {
       alert(error.message);
@@ -3022,6 +3322,11 @@ const initAdminPage = () => {
   });
 
   document.getElementById('reportsTableBody')?.addEventListener('click', async (event) => {
+    const moduleButton = event.target.closest('button[data-module-performance-toggle]');
+    if (moduleButton) {
+      toggleReportModulePanel(moduleButton);
+      return;
+    }
     const timelineButton = event.target.closest('button[data-progress-timeline-user]');
     if (timelineButton) {
       await loadProgressTimeline(timelineButton.dataset.progressTimelineUser, timelineButton.dataset.progressTimelineCourse);
@@ -3036,6 +3341,11 @@ const initAdminPage = () => {
     }
   });
   document.getElementById('correctedReportsTableBody')?.addEventListener('click', async (event) => {
+    const moduleButton = event.target.closest('button[data-module-performance-toggle]');
+    if (moduleButton) {
+      toggleReportModulePanel(moduleButton);
+      return;
+    }
     const timelineButton = event.target.closest('button[data-progress-timeline-user]');
     if (timelineButton) {
       await loadProgressTimeline(timelineButton.dataset.progressTimelineUser, timelineButton.dataset.progressTimelineCourse);
@@ -3399,6 +3709,7 @@ const initChatModal = () => {
 const init = () => {
   setupLogoutButtons();
   setupNotificationAttachmentClicks();
+  setupWhatsappSupportLinks();
   if (document.getElementById('loginForm')) {
     initLogin();
     return;

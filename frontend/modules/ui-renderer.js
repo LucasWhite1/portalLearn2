@@ -265,8 +265,10 @@ export const getSlideBackgroundStyles = (slide = {}) => {
     normalized.backgroundFillType === 'gradient'
       ? `linear-gradient(135deg, ${normalized.backgroundGradientStart}, ${normalized.backgroundGradientEnd})`
       : '';
+  const backgroundLayer = backgroundImage || backgroundGradient;
   return {
-    backgroundImage: backgroundImage || backgroundGradient,
+    backgroundImage: backgroundLayer || 'none',
+    hasBackgroundLayer: Boolean(backgroundLayer),
     backgroundColor: normalized.backgroundColor || '#fdfbff'
   };
 };
@@ -320,8 +322,8 @@ export const setStageBackground = (stageNode, slide, previewActive) => {
   const backgroundStyles = getSlideBackgroundStyles(slide);
   renderStageBackgroundMedia(stageNode, slide, { interactive: previewActive });
   stageNode.style.backgroundImage = backgroundStyles.backgroundImage;
-  stageNode.style.backgroundSize = backgroundStyles.backgroundImage ? 'cover' : '';
-  stageNode.style.backgroundPosition = backgroundStyles.backgroundImage ? 'center' : '';
+  stageNode.style.backgroundSize = backgroundStyles.hasBackgroundLayer ? 'cover' : '';
+  stageNode.style.backgroundPosition = backgroundStyles.hasBackgroundLayer ? 'center' : '';
   stageNode.style.backgroundColor = backgroundStyles.backgroundColor;
 };
 export const wrapMediaNodeWithCaptions = (mediaNode, element) => {

@@ -199,7 +199,8 @@
       font-weight: 700;
       color: #fff;
     }
-    .field input {
+    .field input,
+    .field select {
       width: 100%;
       min-height: 50px;
       border: 1px solid rgba(255,255,255,.12);
@@ -210,13 +211,41 @@
       font: inherit;
       outline: none;
     }
-    .field input:focus {
+    .field select {
+      cursor: pointer;
+    }
+    .field input:focus,
+    .field select:focus {
       border-color: rgba(168, 85, 247, .72);
       box-shadow: 0 0 0 4px rgba(139, 92, 246, .14);
     }
     .field small {
       color: rgba(236,232,248,.58);
       line-height: 1.5;
+    }
+    .legal-consent-box {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: .75rem;
+      align-items: flex-start;
+      border: 1px solid rgba(255,255,255,.13);
+      border-radius: 18px;
+      background: rgba(255,255,255,.055);
+      padding: .95rem 1rem;
+      color: rgba(236,232,248,.82);
+      font-size: .9rem;
+      line-height: 1.55;
+    }
+    .legal-consent-box input {
+      width: 19px;
+      height: 19px;
+      margin-top: .14rem;
+      accent-color: var(--accent);
+    }
+    .legal-consent-box a {
+      color: #ddd6fe;
+      font-weight: 800;
+      text-decoration: none;
     }
     .cta {
       margin-top: .2rem;
@@ -270,7 +299,7 @@
 </head>
 <body>
   <main class="shell">
-    <a class="back-link" href="create-account.html">Voltar para a landing</a>
+    <a class="back-link" href="create-account.html">Voltar para a página inicial</a>
 
     <div class="grid">
       <section class="card">
@@ -281,11 +310,11 @@
         <div class="highlights">
           <div class="highlight">
             <strong>Checkout seguro no Asaas</strong>
-            <p>Antes de abrir o ambiente do gateway, guardamos seu nome e email para criar o acesso do professor depois da confirmacao.</p>
+            <p>Antes de abrir o ambiente do gateway, guardamos seu nome e e-mail para criar o acesso do professor depois da confirmação.</p>
           </div>
           <div class="highlight">
-            <strong>Fluxo alinhado com o seu teste gratis</strong>
-            <p>No plano de 30 dias, o cartao fica cadastrado agora e a primeira cobranca so acontece no fim do periodo, se a assinatura continuar ativa.</p>
+            <strong>Fluxo alinhado com o seu teste grátis</strong>
+            <p>No plano de 30 dias, o cartão fica cadastrado agora e a primeira cobrança só acontece no fim do período, se a assinatura continuar ativa.</p>
           </div>
         </div>
 
@@ -308,9 +337,58 @@
 
           <div class="field">
             <label for="checkoutCpfCnpj">CPF ou CNPJ</label>
-            <input id="checkoutCpfCnpj" name="cpfCnpj" type="text" inputmode="numeric" />
-            <small>Os dados finais de pagamento serao preenchidos no checkout seguro do Asaas.</small>
+            <input id="checkoutCpfCnpj" name="cpfCnpj" type="text" inputmode="numeric" required />
+            <small>Os dados finais de pagamento serão preenchidos no checkout seguro do Asaas.</small>
           </div>
+
+          <div class="field-grid">
+            <div class="field">
+              <label for="checkoutPostalCode">CEP</label>
+              <input id="checkoutPostalCode" name="postalCode" type="text" inputmode="numeric" autocomplete="postal-code" required />
+            </div>
+            <div class="field">
+              <label for="checkoutAddressNumber">Número</label>
+              <input id="checkoutAddressNumber" name="addressNumber" type="text" autocomplete="address-line2" required />
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="checkoutAddress">Endereço</label>
+            <input id="checkoutAddress" name="address" type="text" autocomplete="address-line1" required />
+          </div>
+
+          <div class="field-grid">
+            <div class="field">
+              <label for="checkoutProvince">Bairro</label>
+              <input id="checkoutProvince" name="province" type="text" required />
+            </div>
+            <div class="field">
+              <label for="checkoutComplement">Complemento</label>
+              <input id="checkoutComplement" name="complement" type="text" autocomplete="address-line3" />
+            </div>
+          </div>
+
+          <div class="field" id="checkoutPaymentMethodField">
+            <label for="checkoutBillingType">Forma de pagamento</label>
+            <select id="checkoutBillingType" name="billingType">
+              <option value="CREDIT_CARD">Cartão de crédito - assinatura mensal automática</option>
+              <option value="PIX">Pix - pagamento mensal avulso</option>
+            </select>
+            <small id="checkoutBillingTypeHint">Para assinatura automática, use cartão. Pix é confirmado por webhook após o pagamento.</small>
+          </div>
+
+          <div class="field">
+            <label for="checkoutStudentCount">Alunos no portal</label>
+            <input id="checkoutStudentCount" name="studentCount" type="number" min="15" step="1" value="15" inputmode="numeric" />
+            <small id="checkoutStudentInfo">15 alunos inclusos. Sem cobrança extra.</small>
+          </div>
+
+          <label class="legal-consent-box checkout-legal-consent" for="checkoutTermsAccepted">
+            <input type="checkbox" id="checkoutTermsAccepted" name="termsAccepted" required />
+            <span>
+              Li e aceito os <a href="terms.html" target="_blank" rel="noopener noreferrer">Termos de Uso e Privacidade</a>. Declaro que sou responsável pelos conteúdos que criar/publicar e autorizo contato da Criatyve para suporte, avisos, cobrança, segurança e marketing.
+            </span>
+          </label>
         </form>
       </section>
 
@@ -320,12 +398,12 @@
             <h2 id="checkoutPlanName">Plano selecionado</h2>
             <p id="checkoutPlanSubtitle">Resumo da sua escolha</p>
           </div>
-          <div class="price" id="checkoutPrice">R$97,90 <small>/mes</small></div>
+          <div class="price" id="checkoutPrice">R$97,90 <small>/mês</small></div>
         </div>
 
         <ul class="bullet-list" id="checkoutBulletList"></ul>
         <div class="notice" id="checkoutNotice"></div>
-        <div class="config-flag" id="checkoutConfigFlag" hidden>O gateway ainda nao foi configurado no backend.</div>
+        <div class="config-flag" id="checkoutConfigFlag" hidden>O gateway ainda não foi configurado no backend.</div>
         <div class="flash" id="checkoutFlash"></div>
         <button class="cta" type="submit" form="checkoutForm" id="checkoutContinueBtn">Ir para o checkout seguro</button>
         <p class="footnote" id="checkoutFootnote"></p>
@@ -358,29 +436,30 @@
         description: 'Libere creator completo, IA, aulas ao vivo, recursos interativos e o seu ambiente profissional em um checkout seguro.',
         planName: 'Criatyve Pro',
         planSubtitle: 'Assinatura mensal',
-        price: 'R$97,90 <small>/mes</small>',
+        price: 'R$97,90 <small>/mês</small>',
         bullets: [
-          'Acesso completo ao editor, IA, modulos interativos e portal do aluno.',
-          'Checkout hospedado no Asaas, com menos friccao na conversao.',
-          'Fluxo pronto para assinatura recorrente mensal.'
+          'Acesso completo ao editor, IA, módulos interativos e portal do aluno.',
+          'Checkout hospedado no Asaas com Pix e cartão de crédito.',
+          'Cartão com assinatura automática ou Pix para pagamento mensal avulso.'
         ],
-        notice: 'Ao continuar, voce sera levado ao checkout do Asaas para cadastrar o pagamento e concluir a assinatura.',
-        footnote: 'Se o pagamento for concluido, o login e a senha temporaria serao enviados para o email informado aqui.'
+        notice: 'Ao continuar, você será levado ao checkout do Asaas para escolher Pix ou cartão e concluir a assinatura.',
+        footnote: 'Se o pagamento for concluído, o login e a senha temporária serão enviados para o e-mail informado aqui.'
       },
       'trial-30-dias': {
-        kicker: 'Teste gratis',
-        heading: 'Ative seus 30 dias gratis',
-        description: 'Cadastre o cartao para liberar o teste completo da Criatyve. Se cancelar antes do fim do periodo, nenhum valor sera cobrado.',
+        kicker: 'Teste grátis',
+        heading: 'Ative seus 30 dias grátis',
+        description: 'Cadastre o cartão para liberar o teste completo da Criatyve. Se cancelar antes do fim do período, nenhum valor será cobrado.',
         planName: 'Criatyve Trial 30 dias',
-        planSubtitle: 'Teste completo com cartao cadastrado',
+        planSubtitle: 'Teste completo com cartão cadastrado',
         price: 'R$0 <small>agora</small>',
         bullets: [
-          'O checkout coleta o cartao agora para ativar o seu periodo de teste.',
-          'A primeira cobranca fica programada para depois dos 30 dias, se a assinatura seguir ativa.',
-          'Cancelando antes do fim do periodo gratuito, nenhum valor sera cobrado.'
+          'O checkout coleta o cartão agora para ativar o seu período de teste.',
+          'O teste libera 10 créditos de IA para experimentar criação de texto, slides e imagens.',
+          'A primeira cobrança fica programada para depois dos 30 dias, se a assinatura seguir ativa.',
+          'Cancelando antes do fim do período gratuito, nenhum valor será cobrado.'
         ],
-        notice: 'Esse fluxo exige cartao no checkout para ativacao do teste, mas o valor nao e cobrado se o cancelamento acontecer dentro dos 30 dias.',
-        footnote: 'Depois da ativacao do teste, o login e a senha temporaria serao enviados para o email informado aqui.'
+        notice: 'Esse fluxo exige cartão no checkout para ativação do teste, mas o valor não é cobrado se o cancelamento acontecer dentro dos 30 dias.',
+        footnote: 'Depois da ativação do teste, o login e a senha temporária serão enviados para o e-mail informado aqui.'
       }
     };
 
@@ -390,6 +469,43 @@
     const submitButton = document.getElementById('checkoutContinueBtn');
     const flash = document.getElementById('checkoutFlash');
     const configFlag = document.getElementById('checkoutConfigFlag');
+    const studentCountInput = document.getElementById('checkoutStudentCount');
+    const studentInfo = document.getElementById('checkoutStudentInfo');
+    const paymentMethodField = document.getElementById('checkoutPaymentMethodField');
+    const billingTypeSelect = document.getElementById('checkoutBillingType');
+    const billingTypeHint = document.getElementById('checkoutBillingTypeHint');
+    const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
+    const basePrice = 97.90;
+    const includedStudents = 15;
+    const extraStudentPrice = 9.70;
+    const requestedStudentInitial = Math.max(includedStudents, Math.round(Number(params.get('students') || includedStudents) || includedStudents));
+
+    function getStudentCount() {
+      return Math.max(includedStudents, Math.round(Number(studentCountInput?.value || requestedStudentInitial) || requestedStudentInitial));
+    }
+
+    function getCheckoutAmount() {
+      const extraStudents = Math.max(0, getStudentCount() - includedStudents);
+      return basePrice + (extraStudents * extraStudentPrice);
+    }
+
+    function syncStudentPricing() {
+      if (!studentCountInput) return;
+      const count = getStudentCount();
+      if (String(studentCountInput.value || '') !== String(count)) {
+        studentCountInput.value = String(count);
+      }
+      const extraStudents = Math.max(0, count - includedStudents);
+      const amount = getCheckoutAmount();
+      document.getElementById('checkoutPrice').innerHTML = planKey === 'trial-30-dias'
+        ? `${brl.format(amount)} <small>/mês após teste</small>`
+        : `${brl.format(amount)} <small>/mês</small>`;
+      if (studentInfo) {
+        studentInfo.textContent = extraStudents === 0
+          ? `${includedStudents} alunos inclusos. Sem cobrança extra.`
+          : `${count} alunos no portal: ${extraStudents} extra(s) x ${brl.format(extraStudentPrice)}.`;
+      }
+    }
 
     function setFlash(message) {
       flash.textContent = message || '';
@@ -413,6 +529,21 @@
         li.textContent = item;
         bulletList.appendChild(li);
       });
+      if (paymentMethodField) {
+        const isTrial = planKey === 'trial-30-dias';
+        paymentMethodField.hidden = isTrial;
+        if (isTrial && billingTypeSelect) {
+          billingTypeSelect.value = 'CREDIT_CARD';
+        }
+      }
+      syncStudentPricing();
+    }
+
+    function syncPaymentHint() {
+      if (!billingTypeHint || !billingTypeSelect) return;
+      billingTypeHint.textContent = billingTypeSelect.value === 'PIX'
+        ? 'Pix libera o acesso depois da confirmação do pagamento pelo webhook. A renovação mensal não fica automática.'
+        : 'Cartão cria a assinatura mensal automática no Asaas.';
     }
 
     document.getElementById('checkoutForm').addEventListener('submit', async (event) => {
@@ -425,12 +556,29 @@
       const payload = {
         plan: planKey,
         name: String(formData.get('name') || '').trim(),
-        email: String(formData.get('email') || '').trim()
+        email: String(formData.get('email') || '').trim(),
+        phone: String(formData.get('phone') || '').trim(),
+        cpfCnpj: String(formData.get('cpfCnpj') || '').trim(),
+        postalCode: String(formData.get('postalCode') || '').trim(),
+        address: String(formData.get('address') || '').trim(),
+        addressNumber: String(formData.get('addressNumber') || '').trim(),
+        province: String(formData.get('province') || '').trim(),
+        complement: String(formData.get('complement') || '').trim(),
+        billingType: planKey === 'trial-30-dias' ? 'CREDIT_CARD' : String(formData.get('billingType') || 'CREDIT_CARD'),
+        studentCount: getStudentCount(),
+        termsAccepted: formData.get('termsAccepted') === 'on',
+        marketingConsent: formData.get('termsAccepted') === 'on'
       };
+      if (!payload.termsAccepted) {
+        submitButton.disabled = false;
+        submitButton.textContent = 'Ir para o checkout seguro';
+        setFlash('Para continuar, aceite os Termos de Uso e Privacidade.');
+        return;
+      }
       if (!payload.email) {
         submitButton.disabled = false;
         submitButton.textContent = 'Ir para o checkout seguro';
-        setFlash('Informe o email que recebera o login e a senha de acesso.');
+        setFlash('Informe o e-mail que receberá o login e a senha de acesso.');
         return;
       }
 
@@ -445,7 +593,7 @@
           const providerDetails = Array.isArray(data.details?.errors)
             ? data.details.errors.map((item) => item.description).filter(Boolean).join(' ')
             : '';
-          throw new Error(providerDetails || data.message || 'Nao foi possivel iniciar o checkout.');
+          throw new Error(providerDetails || data.message || 'Não foi possível iniciar o checkout.');
         }
         window.location.href = data.checkoutUrl;
       } catch (error) {
@@ -453,13 +601,24 @@
         submitButton.textContent = 'Ir para o checkout seguro';
         const isNetworkError = error instanceof TypeError && /fetch/i.test(error.message || '');
         setFlash(isNetworkError
-          ? `Nao foi possivel conectar ao servidor em ${API_ORIGIN}. Inicie o backend na porta 4000 e tente novamente.`
-          : error.message || 'Nao foi possivel iniciar o checkout agora.'
+          ? `Não foi possível conectar ao servidor em ${API_ORIGIN}. Inicie o backend na porta 4000 e tente novamente.`
+          : error.message || 'Não foi possível iniciar o checkout agora.'
         );
       }
     });
 
     applyPlanData();
+    if (billingTypeSelect) {
+      billingTypeSelect.addEventListener('change', syncPaymentHint);
+      syncPaymentHint();
+    }
+    if (studentCountInput) {
+      studentCountInput.min = String(includedStudents);
+      studentCountInput.value = String(requestedStudentInitial);
+      studentCountInput.addEventListener('input', syncStudentPricing);
+      studentCountInput.addEventListener('change', syncStudentPricing);
+      syncStudentPricing();
+    }
   </script>
 </body>
 </html>

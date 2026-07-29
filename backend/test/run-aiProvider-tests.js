@@ -239,6 +239,59 @@ const tests = [
       assert.equal(actions[0].slideId, 'slide-atual');
       assert.equal(actions[0].element.type, 'block');
       assert.equal(actions[0].element.content, 'ok');
+      assert.deepEqual(
+        __test.collectActionQualityIssues(actions, [], { width: 1280, height: 720 }, null),
+        []
+      );
+    }
+  },
+  {
+    name: 'build deterministic action for simple slide background color prompt',
+    run() {
+      const actions = __test.buildSimpleBackgroundColorActions({
+        request: 'troque a cor de fundo para verde',
+        slides: [{ id: 'slide-atual', title: 'Atual', elements: [], backgroundColor: '#ffffff' }],
+        activeSlideId: 'slide-atual'
+      });
+      assert.equal(actions.length, 1);
+      assert.equal(actions[0].type, 'update_slide');
+      assert.equal(actions[0].slideId, 'slide-atual');
+      assert.equal(actions[0].slide.backgroundColor, '#16a34a');
+      assert.equal(actions[0].slide.backgroundFillType, 'solid');
+    }
+  },
+  {
+    name: 'apply an English background color to every real slide deterministically',
+    run() {
+      const slides = [
+        { id: 'slide-1', title: 'Um', elements: [] },
+        { id: 'slide-2', title: 'Dois', elements: [] },
+        { id: 'slide-3', title: 'Tres', elements: [] }
+      ];
+      const actions = __test.buildSimpleBackgroundColorActions({
+        request: 'mude o fundo de todos os slides para Yellow',
+        slides,
+        activeSlideId: 'slide-2'
+      });
+      assert.equal(__test.extractSimpleBackgroundColorRequest('mude o fundo para Yellow'), '#facc15');
+      assert.deepEqual(actions.map((action) => action.slideId), ['slide-1', 'slide-2', 'slide-3']);
+      assert.equal(actions.every((action) => action.slide.backgroundColor === '#facc15'), true);
+      assert.equal(actions.every((action) => action.slide.backgroundFillType === 'solid'), true);
+    }
+  },
+  {
+    name: 'use deterministic simple block path even with a simple execution plan',
+    run() {
+      assert.equal(__test.shouldUseDeterministicSimpleBlock({
+        request: 'crie um bloco escrito ok',
+        attachments: [],
+        executionPlan: { mode: 'simple', simpleTask: { targetSlideId: 'slide-atual' } }
+      }), true);
+      assert.equal(__test.shouldUseDeterministicSimpleBlock({
+        request: 'crie um bloco escrito ok',
+        attachments: [],
+        executionPlan: { mode: 'deck', slides: [] }
+      }), false);
     }
   },
   {
@@ -382,6 +435,58 @@ const tests = [
     }
   },
   {
+    name: 'replace repeated planner text with distinct lesson content',
+    run() {
+      const planItem = {
+        id: 'slide-ai-impactos',
+        targetSlideId: 'slide-ai-impactos',
+        title: 'Principais areas impactadas',
+        goal: 'Mostrar visualmente os setores transformados pela IA: saude, educacao, negocios e criatividade.',
+        contentBrief: {
+          keyMessage: 'A IA muda decisoes, processos e formas de criar em diferentes setores.',
+          supportingPoints: [
+            'Na saude, modelos ajudam a identificar riscos em exames e priorizar atendimentos.',
+            'Na educacao, sistemas adaptativos ajustam atividades ao ritmo de cada aluno.',
+            'Nos negocios, a automacao reduz tarefas repetitivas e apoia previsoes.'
+          ],
+          example: 'Um professor pode adaptar exercicios a partir dos erros mais frequentes da turma.',
+          takeaway: 'O impacto depende de combinar tecnologia, criterio humano e responsabilidade.'
+        },
+        order: 2
+      };
+      const actions = __test.postProcessActions(
+        [
+          { type: 'add_slide', slide: { id: planItem.targetSlideId, title: planItem.title } },
+          {
+            type: 'add_element',
+            slideId: planItem.targetSlideId,
+            element: {
+              id: 'texto-1', type: 'block', content: planItem.goal,
+              x: 72, y: 180, width: 500, height: 180
+            }
+          },
+          {
+            type: 'add_element',
+            slideId: planItem.targetSlideId,
+            element: {
+              id: 'texto-2', type: 'block', content: planItem.goal,
+              x: 650, y: 180, width: 500, height: 180
+            }
+          }
+        ],
+        'crie 3 slides falando sobre a revolucao da IA',
+        [],
+        { currentPlanItem: planItem, disableStoryExpansion: true }
+      );
+      const texts = actions
+        .filter((action) => action.type === 'add_element' && action.element?.content)
+        .map((action) => action.element.content);
+      assert.ok(texts.length >= 2);
+      assert.equal(texts.some((text) => /mostrar visualmente/i.test(text)), false);
+      assert.equal(__test.areTextsSubstantiallyDuplicate(texts[0], texts[1]), false);
+    }
+  },
+  {
     name: 'sanitize planner instructions from quiz and action config fields',
     run() {
       const planItem = {
@@ -433,6 +538,113 @@ const tests = [
       assert.ok(element.content.length < longText.length);
       assert.ok(element.content.length <= __test.estimateTextCapacity(element));
       assert.ok(element.fontSize <= 28);
+      assert.doesNotMatch(element.content, /\.{3}|…/);
+    }
+  },
+  {
+    name: 'preserve overflowing lesson text in progressive details instead of failing',
+    run() {
+      const fullText = [
+        'A inteligencia artificial combina diferentes tecnicas para reconhecer padroes e apoiar decisoes.',
+        'Modelos de linguagem analisam contexto, sistemas de visao interpretam imagens e algoritmos preditivos estimam cenarios.',
+        'Na pratica, o resultado depende da qualidade dos dados, da supervisao humana e de criterios claros de responsabilidade.',
+        'Em uma escola, por exemplo, a tecnologia pode identificar dificuldades recorrentes sem substituir a avaliacao do professor.'
+      ].join(' ').repeat(3);
+      const planItem = {
+        id: 'slide-overflow',
+        targetSlideId: 'slide-overflow',
+        title: 'Como a IA funciona',
+        archetype: 'split-visual',
+        visualTheme: __test.inferDeckVisualTheme('aula sobre inteligencia artificial'),
+        contentBrief: { keyMessage: fullText }
+      };
+      let actions = [{
+        type: 'add_element',
+        slideId: 'slide-overflow',
+        element: {
+          id: 'conteudo-longo',
+          type: 'block',
+          layoutRole: 'body',
+          content: fullText,
+          x: 64,
+          y: 196,
+          width: 560,
+          height: 113,
+          fontSize: 21
+        }
+      }];
+      actions = __test.repairTextOverflowWithProgressiveDisclosure(
+        actions,
+        planItem,
+        { width: 1280, height: 720 }
+      );
+      const visible = actions.find((action) => action.element?.id === 'conteudo-longo')?.element;
+      const overlay = actions.find((action) => action.element?.initiallyHidden && action.element?.type === 'block')?.element;
+      const openButton = actions.find((action) => action.element?.label === 'Ver detalhes')?.element;
+      const closeButton = actions.find((action) => action.element?.label === 'Fechar detalhes')?.element;
+      assert.ok(visible.content.length < fullText.length);
+      assert.ok(overlay.content.includes(fullText));
+      assert.equal(openButton.actionConfig.targetElementId, overlay.id);
+      assert.equal(closeButton.actionConfig.targetElementId, overlay.id);
+      assert.equal(
+        __test.collectActionQualityIssues(actions, [], { width: 1280, height: 720 }, planItem)
+          .some((issue) => issue.code === 'too_much_text'),
+        false
+      );
+    }
+  },
+  {
+    name: 'post processing repairs overflow only after final grid composition',
+    run() {
+      const fullText = 'A automacao apoia o trabalho humano quando existe contexto, supervisao e responsabilidade. '.repeat(25).trim();
+      const planItem = {
+        id: 'slide-grid-overflow',
+        targetSlideId: 'slide-grid-overflow',
+        title: 'IA com responsabilidade',
+        archetype: 'split-visual',
+        interactionType: 'content',
+        visualTheme: __test.inferDeckVisualTheme('aula sobre IA responsavel'),
+        contentBrief: {
+          keyMessage: fullText,
+          supportingPoints: [
+            'Dados de qualidade reduzem conclusoes enganosas.',
+            'Revisao humana continua essencial em decisoes importantes.'
+          ]
+        }
+      };
+      const actions = __test.postProcessActions([
+        {
+          type: 'add_slide',
+          slide: { id: planItem.targetSlideId, title: planItem.title }
+        },
+        {
+          type: 'add_element',
+          slideId: planItem.targetSlideId,
+          element: {
+            id: 'mensagem-principal',
+            type: 'block',
+            layoutRole: 'body',
+            content: fullText,
+            x: 20,
+            y: 20,
+            width: 900,
+            height: 300,
+            fontSize: 24
+          }
+        }
+      ], 'Crie um slide detalhado sobre IA responsavel', [], {
+        disableStoryExpansion: true,
+        currentPlanItem: planItem,
+        executionPlan: { mode: 'deck', visualTheme: planItem.visualTheme },
+        stageSize: { width: 1280, height: 720 }
+      });
+      const overlay = actions.find((action) => action.element?.initiallyHidden && action.element?.type === 'block')?.element;
+      assert.ok(overlay?.content.includes(fullText));
+      assert.equal(
+        __test.collectActionQualityIssues(actions, [], { width: 1280, height: 720 }, planItem)
+          .some((issue) => issue.code === 'too_much_text'),
+        false
+      );
     }
   },
   {
@@ -990,6 +1202,279 @@ const tests = [
       );
       assert.ok(bullet);
       assert.equal(bullet.element.content, '*');
+    }
+  },
+  {
+    name: 'deck plan carries one design system and balanced interaction sequence',
+    run() {
+      const plan = __test.normalizeExecutionPlan(
+        {
+          mode: 'deck',
+          slides: Array.from({ length: 6 }, (_, index) => ({
+            title: `Etapa ${index + 1}`,
+            goal: `Explicar o conceito ${index + 1}.`
+          }))
+        },
+        'Crie 6 slides para uma aula completa sobre cidadania digital',
+        [{ id: 'slide-atual', title: 'Atual', elements: [] }],
+        'slide-atual'
+      );
+      assert.equal(plan.mode, 'deck');
+      assert.equal(plan.interactionStrategy.density, 'balanced');
+      assert.equal(plan.designSystem.spacing.gridColumns, 12);
+      assert.ok(plan.slides.every((slide) => slide.designSystem === plan.designSystem));
+      assert.ok(plan.slides.some((slide) => slide.interactionType === 'quiz'));
+      assert.ok(plan.slides.some((slide) => slide.interactionType === 'reveal'));
+      assert.ok(plan.slides.every((slide) => slide.archetype && slide.animationIntent));
+    }
+  },
+  {
+    name: 'template references become visual dna without copying content',
+    run() {
+      const dna = __test.summarizeTemplateDesignDna([
+        {
+          key: 'aula-referencia',
+          slides: [
+            { archetype: 'hero', palette: ['#112233', '#ffffff'] },
+            { archetype: 'quiz', palette: ['#112233', '#ffcc00'] }
+          ]
+        }
+      ]);
+      assert.deepEqual(dna.sourceKeys, ['aula-referencia']);
+      assert.deepEqual(dna.archetypes, ['hero', 'quiz']);
+      assert.equal(dna.referenceMargins.columns, 12);
+      assert.ok(dna.paletteHints.includes('#112233'));
+    }
+  },
+  {
+    name: 'design grid composes semantic elements into a split visual layout',
+    run() {
+      const planItem = {
+        targetSlideId: 'slide-1',
+        title: 'Aula visual',
+        archetype: 'split-visual',
+        animationIntent: 'staggered-entrance',
+        designSystem: __test.buildDeckDesignSystem(__test.inferDeckVisualTheme('aula criativa'))
+      };
+      const actions = __test.composeActionsWithDesignGrid([
+        {
+          type: 'add_element',
+          slideId: 'slide-1',
+          element: { id: 'titulo', type: 'text', layoutRole: 'title', content: 'Aula visual', x: 0, y: 0, width: 100, height: 30 }
+        },
+        {
+          type: 'add_element',
+          slideId: 'slide-1',
+          element: { id: 'corpo', type: 'block', layoutRole: 'body', content: 'Conteudo principal', x: 0, y: 0, width: 100, height: 30 }
+        },
+        {
+          type: 'add_element',
+          slideId: 'slide-1',
+          element: { id: 'imagem', type: 'image', layoutRole: 'visual', generationPrompt: 'imagem', x: 0, y: 0, width: 100, height: 30 }
+        }
+      ], planItem);
+      const title = actions.find((action) => action.element?.id === 'titulo').element;
+      const body = actions.find((action) => action.element?.id === 'corpo').element;
+      const image = actions.find((action) => action.element?.id === 'imagem').element;
+      assert.ok(title.x >= 56 && title.fontSize >= 42);
+      assert.ok(body.x < image.x);
+      assert.ok(image.x + image.width <= 1280);
+      assert.equal(title.animationLoop, false);
+    }
+  },
+  {
+    name: 'planned quiz recipe creates a complete functional quiz',
+    run() {
+      const planItem = {
+        targetSlideId: 'slide-quiz',
+        title: 'Seguranca digital',
+        goal: 'Explicar que senhas fortes combinam caracteres diferentes.',
+        interactionType: 'quiz',
+        visualTheme: __test.inferDeckVisualTheme('aula criativa')
+      };
+      const actions = __test.ensurePlannedInteractionRecipe([], planItem, { mode: 'deck' });
+      const quiz = actions.find((action) => action.element?.type === 'quiz')?.element;
+      assert.ok(quiz);
+      assert.equal(quiz.options.length, 3);
+      assert.equal(quiz.correctOption, 0);
+      assert.ok(quiz.successMessage && quiz.errorMessage && quiz.actionLabel);
+    }
+  },
+  {
+    name: 'planned reveal recipe links button to an existing hidden target',
+    run() {
+      const planItem = {
+        targetSlideId: 'slide-reveal',
+        title: 'Descubra o conceito',
+        goal: 'Explicar o conceito depois da tentativa do aluno.',
+        interactionType: 'reveal',
+        visualTheme: __test.inferDeckVisualTheme('aula criativa')
+      };
+      const actions = __test.ensurePlannedInteractionRecipe([], planItem, { mode: 'deck' });
+      const hidden = actions.find((action) => action.element?.initiallyHidden)?.element;
+      const button = actions.find((action) => action.element?.type === 'floatingButton')?.element;
+      assert.ok(hidden && button);
+      assert.equal(button.actionConfig.type, 'showElement');
+      assert.equal(button.actionConfig.targetElementId, hidden.id);
+    }
+  },
+  {
+    name: 'planned drag drop recipe creates aligned target detector and feedback',
+    run() {
+      const planItem = {
+        targetSlideId: 'slide-drag',
+        title: 'Classifique o conceito',
+        goal: 'Associar o conceito a categoria correta.',
+        interactionType: 'drag-drop',
+        archetype: 'drag-drop',
+        visualTheme: __test.inferDeckVisualTheme('jogo educativo'),
+        designSystem: __test.buildDeckDesignSystem(__test.inferDeckVisualTheme('jogo educativo'))
+      };
+      let actions = __test.ensurePlannedInteractionRecipe([], planItem, { mode: 'deck' });
+      actions = __test.composeActionsWithDesignGrid(actions, planItem);
+      const draggable = actions.find((action) => action.element?.studentCanDrag)?.element;
+      const target = actions.find((action) => action.element?.layoutRole === 'target' && action.element?.type === 'block')?.element;
+      const detector = actions.find((action) => action.element?.type === 'detector')?.element;
+      const feedback = actions.find((action) => action.element?.layoutRole === 'feedback')?.element;
+      assert.ok(draggable && target && detector && feedback);
+      assert.equal(detector.actionConfig.detectorAcceptedDrag, `element:${draggable.id}`);
+      assert.deepEqual(
+        [detector.x, detector.y, detector.width, detector.height],
+        [target.x, target.y, target.width, target.height]
+      );
+      assert.equal(detector.actionConfig.targetElementId, feedback.id);
+    }
+  },
+  {
+    name: 'functional design audit detects low contrast and palette drift',
+    run() {
+      const theme = __test.inferDeckVisualTheme('aula criativa');
+      const planItem = {
+        targetSlideId: 'slide-1',
+        visualTheme: theme,
+        designSystem: __test.buildDeckDesignSystem(theme),
+        slideStyle: { backgroundColor: '#f7f3ff' }
+      };
+      const issues = __test.collectFunctionalDesignIssues([
+        {
+          type: 'add_element',
+          slideId: 'slide-1',
+          element: {
+            id: 'texto',
+            type: 'block',
+            content: 'Texto sem contraste',
+            textColor: '#ffffff',
+            backgroundColor: '#ffffff',
+            solidColor: '#ffffff',
+            x: 72, y: 220, width: 400, height: 160
+          }
+        }
+      ], [], planItem);
+      assert.ok(issues.some((issue) => issue.code === 'low_contrast'));
+    }
+  },
+  {
+    name: 'safe archetype fallback passes quality audit for balanced interactive slides',
+    run() {
+      const plan = __test.normalizeExecutionPlan(
+        {
+          mode: 'deck',
+          slides: Array.from({ length: 5 }, (_, index) => ({
+            title: `Conceito ${index + 1}`,
+            goal: `Explicar e praticar o conceito ${index + 1}.`
+          }))
+        },
+        'Crie 5 slides interativos para associar e classificar conceitos',
+        [{ id: 'slide-atual', title: 'Atual', elements: [] }],
+        'slide-atual'
+      );
+      const interactiveItems = plan.slides.filter((item) => ['quiz', 'reveal', 'drag-drop'].includes(item.interactionType));
+      assert.ok(interactiveItems.length >= 2);
+      interactiveItems.forEach((planItem) => {
+        const actions = __test.buildSafeArchetypeFallbackActions(
+          [],
+          'Crie 5 slides interativos para associar e classificar conceitos',
+          [],
+          planItem,
+          plan,
+          { width: 1280, height: 720 }
+        );
+        const issues = __test.collectActionQualityIssues(actions, [], { width: 1280, height: 720 }, planItem);
+        assert.deepEqual(issues, [], `${planItem.interactionType}: ${JSON.stringify(issues)}`);
+      });
+    }
+  },
+  {
+    name: 'planned deck slide uses deterministic layout-first execution',
+    run() {
+      assert.equal(__test.shouldUseDeterministicPlannedSlide({
+        executionPlan: { mode: 'deck' },
+        currentPlanItem: {
+          targetSlideId: 'slide-ia',
+          contentBrief: { keyMessage: 'A IA amplia a capacidade de analisar e criar.' }
+        }
+      }), true);
+      assert.equal(__test.shouldUseDeterministicPlannedSlide({
+        executionPlan: { mode: 'simple' },
+        currentPlanItem: { targetSlideId: 'slide-ia', contentBrief: { keyMessage: 'Conteudo' } }
+      }), false);
+    }
+  },
+  {
+    name: 'split visual fallback keeps equal aligned columns and uniform content cards',
+    run() {
+      const plan = __test.normalizeExecutionPlan(
+        {
+          mode: 'deck',
+          slides: [{
+            title: 'A Revolucao da IA',
+            goal: 'Explicar a transformacao causada pela inteligencia artificial.',
+            archetype: 'split-visual',
+            imageIntent: 'required',
+            contentBrief: {
+              keyMessage: 'A inteligencia artificial esta redefinindo como vivemos e trabalhamos.',
+              supportingPoints: [
+                'Modelos aprendem padroes a partir de grandes volumes de dados.',
+                'Automacao e apoio a decisao mudam processos em diferentes setores.'
+              ],
+              example: 'Assistentes interpretam comandos por processamento de linguagem natural.',
+              takeaway: 'Um salto tecnologico comparavel a Revolucao Industrial.'
+            }
+          }]
+        },
+        'Crie um slide sobre a revolucao da IA',
+        [{ id: 'slide-atual', title: 'Atual', elements: [] }],
+        'slide-atual'
+      );
+      const item = plan.slides[0];
+      const actions = __test.buildSafeArchetypeFallbackActions(
+        [],
+        'Crie um slide sobre a revolucao da IA',
+        [],
+        item,
+        plan,
+        { width: 1280, height: 720 }
+      );
+      const elements = actions.filter((action) => action.type === 'add_element').map((action) => action.element);
+      const title = elements.find((element) => element.layoutRole === undefined && element.type === 'text');
+      const header = elements.find((element) => element.content?.includes('salto tecnologico'));
+      const visual = elements.find((element) => element.type === 'image');
+      const leftCards = elements.filter((element) =>
+        element.type === 'block'
+        && element.x === 64
+        && element.y >= 196
+      );
+      assert.ok(title && header && visual);
+      assert.deepEqual([title.x, title.y, title.width, title.height], [64, 64, 560, 104]);
+      assert.deepEqual([header.x, header.y, header.width, header.height], [656, 64, 560, 104]);
+      assert.deepEqual([visual.x, visual.y, visual.width, visual.height], [656, 196, 560, 396]);
+      assert.ok(leftCards.length >= 2);
+      assert.equal(new Set(leftCards.map((element) => element.width)).size, 1);
+      assert.equal(new Set(leftCards.map((element) => element.height)).size, 1);
+      assert.deepEqual(
+        __test.collectActionQualityIssues(actions, [], { width: 1280, height: 720 }, item),
+        []
+      );
     }
   }
 ];

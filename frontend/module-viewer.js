@@ -4833,6 +4833,62 @@ const buildBackgroundStyle = (element) => {
   return element.solidColor || element.backgroundColor || '#f4f6ff';
 };
 
+const DEFAULT_FLOATING_BUTTON_SHADOW = {
+  enabled: true,
+  color: '#6d63ff',
+  opacity: 0.4,
+  offsetY: 12,
+  blur: 25
+};
+
+const normalizeShadowNumber = (value, fallback, min, max) => {
+  const numericValue = Number(value);
+  return Number.isNaN(numericValue) ? fallback : Math.min(Math.max(numericValue, min), max);
+};
+
+const hexToRgb = (value, fallback = '#000000') => {
+  const hex = String(value || fallback).trim().replace(/^#/, '');
+  const normalized = hex.length === 3
+    ? hex.split('').map((char) => `${char}${char}`).join('')
+    : hex;
+  if (!/^[0-9a-f]{6}$/i.test(normalized)) {
+    return fallback === '#000000' ? { r: 0, g: 0, b: 0 } : hexToRgb(fallback, '#000000');
+  }
+  return {
+    r: parseInt(normalized.slice(0, 2), 16),
+    g: parseInt(normalized.slice(2, 4), 16),
+    b: parseInt(normalized.slice(4, 6), 16)
+  };
+};
+
+const normalizeFloatingButtonShadow = (element) => {
+  if (!element || element.type !== 'floatingButton') return;
+  element.shadowEnabled = typeof element.shadowEnabled === 'boolean'
+    ? element.shadowEnabled
+    : element.boxShadow === 'none'
+      ? false
+      : DEFAULT_FLOATING_BUTTON_SHADOW.enabled;
+  element.shadowColor = typeof element.shadowColor === 'string' && element.shadowColor
+    ? element.shadowColor
+    : DEFAULT_FLOATING_BUTTON_SHADOW.color;
+  element.shadowOpacity = normalizeShadowNumber(element.shadowOpacity, DEFAULT_FLOATING_BUTTON_SHADOW.opacity, 0, 1);
+  element.shadowOffsetY = normalizeShadowNumber(element.shadowOffsetY, DEFAULT_FLOATING_BUTTON_SHADOW.offsetY, 0, 80);
+  element.shadowBlur = normalizeShadowNumber(element.shadowBlur, DEFAULT_FLOATING_BUTTON_SHADOW.blur, 0, 120);
+};
+
+const buildFloatingButtonShadow = (element) => {
+  if (!element || element.type !== 'floatingButton') return '';
+  normalizeFloatingButtonShadow(element);
+  if (!element.shadowEnabled) return 'none';
+  const rgb = hexToRgb(element.shadowColor, DEFAULT_FLOATING_BUTTON_SHADOW.color);
+  return `0 ${Math.round(element.shadowOffsetY)}px ${Math.round(element.shadowBlur)}px rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${element.shadowOpacity})`;
+};
+
+const applyFloatingButtonShadow = (node, element) => {
+  if (!node || element?.type !== 'floatingButton') return;
+  node.style.boxShadow = buildFloatingButtonShadow(element);
+};
+
 const applyElementBackground = (node, element) => {
   const backgroundValue = buildBackgroundStyle(element);
   if (!backgroundValue) return;
@@ -7028,6 +7084,7 @@ const createRendererNode = (element, slide) => {
       node.className = 'floating-button-element';
       node.textContent = element.label || 'Ação';
       applyElementBackground(node, element);
+      applyFloatingButtonShadow(node, element);
       applyShapeStyles(node, element.shape || 'rectangle');
       {
         const module = getCurrentModule();

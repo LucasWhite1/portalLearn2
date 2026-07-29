@@ -42,7 +42,7 @@
         "name": "Criatyve Free",
         "price": "0",
         "priceCurrency": "BRL",
-        "description": "Plano gratuito para testar a criação de aulas interativas com recursos essenciais."
+        "description": "Plano gratuito para testar a criação de aulas interativas com recursos essenciais e IA limitada."
       },
       {
         "@type": "Offer",
@@ -151,19 +151,6 @@
     a { color: inherit; text-decoration: none; }
     img { max-width: 100%; height: auto; }
     ::selection { background: rgba(124, 58, 237, .55); color: #fff; }
-
-    .skip-link {
-      position: absolute;
-      top: -42px;
-      left: 1rem;
-      background: var(--cy-white);
-      color: var(--cy-dark);
-      padding: .65rem 1rem;
-      border-radius: 999px;
-      z-index: 2000;
-      transition: top .2s ease;
-    }
-    .skip-link:focus { top: 1rem; }
 
     .navbar {
       --bs-navbar-color: rgba(255,255,255,.72);
@@ -717,6 +704,49 @@
     .floating-cta strong { color: #fff; font-size: .95rem; }
     .floating-cta span { display: block; color: var(--cy-muted); font-size: .78rem; }
 
+    .whatsapp-support {
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+      z-index: 1060;
+      display: inline-flex;
+      align-items: center;
+      gap: .7rem;
+      min-height: 58px;
+      padding: .78rem 1rem;
+      border-radius: 999px;
+      color: #fff;
+      background: linear-gradient(135deg, #22c55e, #16a34a);
+      border: 1px solid rgba(255,255,255,.18);
+      box-shadow: 0 18px 42px rgba(34, 197, 94, .34);
+      font-weight: 850;
+      text-decoration: none;
+      transition: transform .18s ease, box-shadow .18s ease, filter .18s ease;
+    }
+    .whatsapp-support:hover {
+      color: #fff;
+      transform: translateY(-2px);
+      filter: saturate(1.08);
+      box-shadow: 0 22px 54px rgba(34, 197, 94, .44);
+    }
+    .whatsapp-support .whatsapp-icon {
+      width: 36px;
+      height: 36px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: rgba(255,255,255,.16);
+      font-size: 1.35rem;
+      line-height: 1;
+    }
+    .whatsapp-support small {
+      display: block;
+      margin-top: .05rem;
+      color: rgba(255,255,255,.76);
+      font-size: .72rem;
+      font-weight: 700;
+    }
+
     footer {
       border-top: 1px solid var(--cy-border);
       color: var(--cy-muted);
@@ -728,6 +758,7 @@
       .section-padding { padding: 4.5rem 0; }
       .metric-strip { grid-template-columns: 1fr; }
       .floating-cta { display: block; }
+      .whatsapp-support { bottom: 108px; }
     }
 
     @media (max-width: 575.98px) {
@@ -744,12 +775,17 @@
       .floating-cta { border-radius: 24px; }
       .floating-cta .inner { align-items: stretch; flex-direction: column; }
       .floating-cta .btn { width: 100%; }
+      .whatsapp-support {
+        right: 14px;
+        bottom: 138px;
+        min-height: 54px;
+        padding: .65rem .75rem;
+      }
+      .whatsapp-support span:not(.whatsapp-icon) { display: none; }
     }
   </style>
 </head>
 <body>
-  <a class="skip-link" href="#conteudo">Pular para o conteúdo</a>
-
   <nav class="navbar navbar-expand-lg fixed-top" aria-label="Navegação principal">
     <div class="container">
       <a class="navbar-brand" href="#topo" aria-label="Criatyve início">
@@ -1030,7 +1066,7 @@
                 <li><i class="bi bi-check-circle-fill"></i><span>Canvas básico para testar criação de aulas</span></li>
                 <li><i class="bi bi-check-circle-fill"></i><span>Prévia de aulas e estrutura de conteúdo</span></li>
                 <li><i class="bi bi-check-circle-fill"></i><span>Publicação simples para validar sua ideia</span></li>
-                <li class="disabled"><i class="bi bi-dash-circle"></i><span>Recursos avançados de IA limitados</span></li>
+                <li class="disabled"><i class="bi bi-dash-circle"></i><span>10 créditos de IA para testar</span></li>
                 <li class="disabled"><i class="bi bi-dash-circle"></i><span>Sem gestão completa de notas e desempenho</span></li>
               </ul>
               <a class="btn btn-glass w-100" href="#" data-checkout-target="trial"><i class="bi bi-stars me-2"></i>Começar 30 dias grátis</a>
@@ -1070,7 +1106,7 @@
                     <li><i class="bi bi-check-circle-fill"></i><span>100 criações mensais com IA</span></li>
                     <li><i class="bi bi-check-circle-fill"></i><span>1GB de armazenamento</span></li>
                     <li><i class="bi bi-check-circle-fill"></i><span>15 alunos inclusos no portal</span></li>
-                    <li><i class="bi bi-check-circle-fill"></i><span>Vitrine na página de cursos da Criatyve</span></li>
+                    <li><i class="bi bi-check-circle-fill"></i><span>Pagamento por Pix ou cartão de crédito</span></li>
                   </ul>
                 </div>
               </div>
@@ -1114,7 +1150,7 @@
             </thead>
             <tbody>
               <tr><td>Criação de aulas interativas</td><td><i class="bi bi-check-circle-fill me-2"></i>Básica</td><td><i class="bi bi-check-circle-fill me-2"></i>Completa</td></tr>
-              <tr><td>Criação com IA e Pincel Mágico</td><td><i class="bi bi-dash-circle me-2"></i>Limitado</td><td><i class="bi bi-check-circle-fill me-2"></i>100 criações/mês</td></tr>
+              <tr><td>Criação com IA e Pincel Mágico</td><td><i class="bi bi-dash-circle me-2"></i>10 créditos no teste</td><td><i class="bi bi-check-circle-fill me-2"></i>100 criações/mês</td></tr>
               <tr><td>Editor de vídeo, imagem e animações</td><td><i class="bi bi-dash-circle me-2"></i>Limitado</td><td><i class="bi bi-check-circle-fill me-2"></i>Liberado</td></tr>
               <tr><td>Quiz, botões e interações personalizadas</td><td><i class="bi bi-check-circle-fill me-2"></i>Essencial</td><td><i class="bi bi-check-circle-fill me-2"></i>Avançado</td></tr>
               <tr><td>Portal do aluno com notas e desempenho</td><td><i class="bi bi-dash-circle me-2"></i>Não incluso</td><td><i class="bi bi-check-circle-fill me-2"></i>15 alunos inclusos</td></tr>
@@ -1217,6 +1253,11 @@
     </div>
   </div>
 
+  <a id="whatsappSupportLink" class="whatsapp-support" href="#" target="_blank" rel="noopener noreferrer" aria-label="Falar com suporte pelo WhatsApp">
+    <span class="whatsapp-icon" aria-hidden="true"><i class="bi bi-whatsapp"></i></span>
+    <span>Precisa de ajuda?<small>Fale no WhatsApp</small></span>
+  </a>
+
   <footer>
     <div class="container">
       <div class="row g-4 align-items-center">
@@ -1226,7 +1267,7 @@
         </div>
         <div class="col-lg-6 text-lg-end">
           <p class="small mb-1">Imagens externas: Unsplash. Vídeo: arquivo de apresentação fornecido para esta página.</p>
-          <p class="small mb-0">© <span id="year"></span> Criatyve. Todos os direitos reservados.</p>
+          <p class="small mb-0"><a href="terms.html" target="_blank" rel="noopener noreferrer">Termos de Uso e Privacidade</a> · © <span id="year"></span> Criatyve. Todos os direitos reservados.</p>
         </div>
       </div>
     </div>
@@ -1251,23 +1292,25 @@
     }
 
     const API_ORIGIN = resolveApiOrigin();
+    const WHATSAPP_SUPPORT_PHONE = '5599999999999';
+    const WHATSAPP_SUPPORT_MESSAGE = 'Ola, quero falar com o suporte da Criatyve.';
     const CHECKOUT_URLS = {
       pro: 'checkout.html?plan=pro',
       trial: 'checkout.html?plan=trial-30-dias'
     };
 
+    const whatsappSupportLink = document.getElementById('whatsappSupportLink');
+    if (whatsappSupportLink) {
+      const cleanPhone = String(WHATSAPP_SUPPORT_PHONE || '').replace(/\D/g, '');
+      whatsappSupportLink.href = cleanPhone
+        ? `https://wa.me/${cleanPhone}?text=${encodeURIComponent(WHATSAPP_SUPPORT_MESSAGE)}`
+        : `https://wa.me/?text=${encodeURIComponent(WHATSAPP_SUPPORT_MESSAGE)}`;
+    }
+
     const navbar = document.querySelector('.navbar');
     const onScroll = () => navbar.classList.toggle('nav-scrolled', window.scrollY > 28);
     onScroll();
     window.addEventListener('scroll', onScroll, { passive: true });
-
-    document.querySelectorAll('[data-checkout-target]').forEach((link) => {
-      const checkoutTarget = link.getAttribute('data-checkout-target');
-      const checkoutUrl = CHECKOUT_URLS[checkoutTarget];
-      if (checkoutUrl) {
-        link.setAttribute('href', checkoutUrl);
-      }
-    });
 
     document.querySelectorAll('.navbar-nav .nav-link, .navbar-nav .btn').forEach((link) => {
       link.addEventListener('click', () => {
@@ -1297,6 +1340,23 @@
       studentInput.addEventListener('input', updatePricing);
       updatePricing();
     }
+    function getCheckoutStudentCount() {
+      return Math.max(includedStudents, Math.round(Number(studentInput?.value || includedStudents) || includedStudents));
+    }
+    function syncCheckoutLinks() {
+      document.querySelectorAll('[data-checkout-target]').forEach((link) => {
+        const checkoutTarget = link.getAttribute('data-checkout-target');
+        const checkoutUrl = CHECKOUT_URLS[checkoutTarget];
+        if (!checkoutUrl) return;
+        const url = new URL(checkoutUrl, window.location.href);
+        url.searchParams.set('students', String(getCheckoutStudentCount()));
+        link.setAttribute('href', `${url.pathname.split('/').pop()}${url.search}`);
+      });
+    }
+    if (studentInput) {
+      studentInput.addEventListener('input', syncCheckoutLinks);
+    }
+    syncCheckoutLinks();
     document.getElementById('year').textContent = new Date().getFullYear();
   </script>
 </body>

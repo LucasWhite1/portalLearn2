@@ -6,7 +6,7 @@
   <title>Administração | Portal do Curso</title>
   <link rel="stylesheet" href="style.css" />
 </head>
-<body>
+<body class="admin-page">
   <button type="button" class="mobile-sidenav-toggle" id="mobileSidenavToggle" aria-controls="mobileSidenav" aria-expanded="false">
     <span>Menu</span>
   </button>
@@ -16,6 +16,7 @@
       <h1>Criatyve</h1>
       <p>Administração do portal em uma única tela.</p>
       <ul class="nav-menu">
+        <li><button type="button" class="nav-link" data-target="adminAssistantSection">Assistente IA</button></li>
         <li><button type="button" class="nav-link" data-target="adminStudentsSection">Alunos</button></li>
         <li><button type="button" class="nav-link" data-target="adminProfessorsSection">Professores</button></li>
         <li><button type="button" class="nav-link" data-target="adminReportsSection">Relatórios</button></li>
@@ -24,6 +25,10 @@
         <li><button type="button" class="nav-link" data-target="adminNotificationsSection">Notificações</button></li>
         <li><button type="button" class="nav-link" data-target="adminSettingsSection">Configurações</button></li>
       </ul>
+      <a id="adminWhatsappSupportLink" class="sidenav-support-link" href="#" target="_blank" rel="noopener noreferrer" aria-label="Falar com suporte pelo WhatsApp">
+        <span>WhatsApp</span>
+        <strong>Tirar dúvida com suporte</strong>
+      </a>
     </aside>
     <main class="main-panel">
       <div class="panel header-panel">
@@ -31,12 +36,51 @@
           <h2>Administração em tempo real</h2>
           <p>Monitore alunos, cursos e progresso antes de liberar novos módulos.</p>
         </div>
-        <div style="display:flex; gap:0.5rem;">
+        <div class="admin-header-actions">
           <a class="primary-btn" href="interactive-creator.html">Criar aula interativa</a>
           <button class="secondary-btn logout-btn" type="button">Sair</button>
         </div>
       </div>
       <section class="admin-panel">
+        <div class="panel admin-assistant-panel" id="adminAssistantSection" data-section="adminAssistantSection">
+          <div class="admin-assistant-head">
+            <div>
+              <div class="badge">ASSISTENTE DO PAINEL</div>
+              <h2>O que você quer resolver agora?</h2>
+              <p>Peça matrículas, análises, relatórios, notificações ou ajuda com alunos e cursos. Consultas são respondidas na hora; alterações sempre pedem sua confirmação.</p>
+            </div>
+            <div class="admin-assistant-security">
+              <strong>Controle seguro</strong>
+              <span>Sem acesso a senhas, chaves, cobrança ou privilégios.</span>
+            </div>
+          </div>
+          <div class="admin-assistant-suggestions" aria-label="Sugestões de comandos">
+            <button type="button" data-assistant-suggestion="Mostre quais alunos precisam de mais atenção e explique o motivo.">Identificar alunos em risco</button>
+            <button type="button" data-assistant-suggestion="Resuma o desempenho das turmas e destaque pontos fortes e fracos.">Gerar resumo de desempenho</button>
+            <button type="button" data-assistant-suggestion="Mostre as solicitações de acesso pendentes e recomende o que devo revisar.">Revisar solicitações</button>
+            <button type="button" data-assistant-suggestion="Mostre as mensagens recentes de alunos que parecem precisar de resposta.">Priorizar respostas</button>
+          </div>
+          <div class="admin-assistant-conversation" id="adminAssistantConversation" aria-live="polite">
+            <div class="admin-assistant-message assistant">
+              <span class="admin-assistant-avatar" aria-hidden="true">IA</span>
+              <div>
+                <strong>Assistente Criatyve</strong>
+                <p>Posso encontrar alunos e cursos pelo nome, preparar ações no painel e analisar os dados de progresso. Exemplo: “Coloque João e Maria no curso Excel Básico”.</p>
+              </div>
+            </div>
+          </div>
+          <div id="adminAssistantProposal" class="admin-assistant-proposal hidden"></div>
+          <form id="adminAssistantForm" class="admin-assistant-form">
+            <label class="sr-only" for="adminAssistantInput">Comando para a assistente</label>
+            <textarea id="adminAssistantInput" rows="2" maxlength="2000" placeholder="Ex: Matricule João e Maria no curso Marketing Digital"></textarea>
+            <button id="adminAssistantSendBtn" type="submit" class="primary-btn">Enviar</button>
+          </form>
+          <div class="admin-assistant-footer">
+            <span id="adminAssistantStatus">Cada mensagem usa o custo configurado para uma chamada de IA de texto.</span>
+            <button id="adminAssistantClearBtn" type="button" class="chat-link-btn">Limpar conversa</button>
+          </div>
+        </div>
+
         <div class="panel" id="adminStudentsSection" data-section="adminStudentsSection">
           <div class="badge">CREATIVITY OPS</div>
           <h2>Cadastro rapido de alunos</h2>
@@ -97,20 +141,28 @@
             <div class="field-group">
               <label>Anexo da atividade</label>
               <input id="notificationFileInput" type="file" accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.zip,image/*" hidden />
-              <button id="notificationFileBtn" class="secondary-btn" type="button">Anexar arquivo do computador</button>
+              <button id="notificationFileBtn" class="secondary-btn" type="button">Anexar arquivo</button>
               <small id="notificationFileStatus" style="color:#8b92b1;">Nenhum arquivo anexado.</small>
             </div>
             <div class="field-group">
               <label for="notificationTarget">Destinatario</label>
               <select id="notificationTarget">
                 <option value="all">Todos</option>
-                <option value="class">Turma Master</option>
+                <option value="class">Turma específica</option>
                 <option value="student">Aluno especifico</option>
+              </select>
+            </div>
+            <div class="field-group" id="classSelector" style="display:none;">
+              <label for="notificationClass">Turma</label>
+              <select id="notificationClass">
+                <option value="">Carregando turmas...</option>
               </select>
             </div>
             <div class="field-group" id="studentSelector" style="display:none;">
               <label for="notificationStudent">Aluno</label>
-              <input id="notificationStudent" placeholder="Cole o ID do aluno" />
+              <select id="notificationStudent">
+                <option value="">Carregando alunos...</option>
+              </select>
             </div>
             <button class="primary-btn" type="submit">Agendar publicacao</button>
           </form>
@@ -121,7 +173,7 @@
 
         <div class="panel" data-section="adminStudentsSection">
           <div class="table-wrapper">
-            <table class="table" id="studentsTable">
+            <table class="table admin-responsive-table" id="studentsTable">
               <thead>
                 <tr>
                   <th>Aluno</th>
@@ -180,7 +232,8 @@
         </div>
 
         <div class="panel" id="adminCoursesSection" data-section="adminCoursesSection">
-          <h2>Gerenciar cursos</h2>
+          <h2>Criar novo curso</h2>
+
           <form id="courseForm">
             <div class="field-group">
               <label for="courseTitle">Titulo</label>
@@ -233,14 +286,48 @@
             </div>
             <button class="primary-btn" type="submit">Criar curso</button>
           </form>
-          <div class="list-panel" id="adminCourseList"></div>
-        </div>
-
-        <div class="panel" id="adminAccessRequestsSection" data-section="adminCoursesSection">
-          <h2>Solicitacoes de acesso</h2>
-          <p style="margin-top:0; color:#8b92b1; font-size:0.9rem;">Veja qual aluno pediu acesso a cada curso e aprove ou rejeite a solicitacao de forma organizada.</p>
-          <div class="list-panel access-request-list" id="adminAccessRequestList">
-            <p style="margin:0; color:#8b92b1;">Carregando solicitacoes...</p>
+          <div class="admin-subpanel admin-course-enrollment-panel">
+            <h3>Matricular alunos em cursos</h3>
+            <p style="margin-top:0; color:#8b92b1; font-size:0.9rem;">Adicione e remova cursos pelos alunos. Quando a matrícula é cancelada, o módulo desaparece do portal do aluno.</p>
+            <form id="enrollmentForm">
+              <div class="field-group">
+                <label for="enrollmentStudent">Aluno</label>
+                <select id="enrollmentStudent" required>
+                  <option value="">Carregando alunos...</option>
+                </select>
+              </div>
+              <div class="field-group">
+                <label for="enrollmentCourse">Curso</label>
+                <select id="enrollmentCourse" required>
+                  <option value="">Carregando cursos...</option>
+                </select>
+              </div>
+              <div class="form-actions" style="display:flex; gap:0.5rem;">
+                <button class="primary-btn" type="submit">Adicionar curso</button>
+                <button class="secondary-btn" type="button" id="enrollmentRemoveBtn">Remover curso</button>
+              </div>
+            </form>
+            <div class="list-panel" id="enrollmentList">
+              <p style="margin:0; color:#8b92b1;">Selecione um aluno para ver os cursos matriculados.</p>
+            </div>
+          </div>
+          <div class="admin-subpanel admin-course-list-panel">
+            <div class="admin-course-list-head">
+              <h3 class="admin-course-list-title">Cursos criados</h3>
+              <small>Role para o lado quando houver mais de 4 cursos.</small>
+            </div>
+            <div class="admin-course-scroll" id="adminCourseList"></div>
+          </div>
+          <div class="admin-subpanel admin-course-list-panel" id="adminAccessRequestsSection">
+            <div class="admin-course-list-head">
+              <div>
+                <h3 class="admin-course-list-title">Solicitacoes de acesso</h3>
+                <small>Role para o lado para revisar os pedidos dos alunos.</small>
+              </div>
+            </div>
+            <div class="access-request-list" id="adminAccessRequestList">
+              <p style="margin:0; color:#8b92b1;">Carregando solicitacoes...</p>
+            </div>
           </div>
         </div>
 
@@ -390,36 +477,11 @@
           <p id="smtpSettingsStatus" style="margin:0.75rem 0 0; color:#8b92b1; font-size:0.9rem;"></p>
         </div>
 
-        <div class="panel" data-section="adminSettingsSection">
-          <p style="margin-top:0; color:#8b92b1; font-size:0.9rem;">Adicione e remova cursos pelos alunos e o modulo desaparece quando a matricula e cancelada.</p>
-          <form id="enrollmentForm">
-            <div class="field-group">
-              <label for="enrollmentStudent">Aluno</label>
-              <select id="enrollmentStudent" required>
-                <option value="">Carregando alunos...</option>
-              </select>
-            </div>
-            <div class="field-group">
-              <label for="enrollmentCourse">Curso</label>
-              <select id="enrollmentCourse" required>
-                <option value="">Carregando cursos...</option>
-              </select>
-            </div>
-            <div class="form-actions" style="display:flex; gap:0.5rem;">
-              <button class="primary-btn" type="submit">Adicionar curso</button>
-              <button class="secondary-btn" type="button" id="enrollmentRemoveBtn">Remover curso</button>
-            </div>
-          </form>
-          <div class="list-panel" id="enrollmentList">
-            <p style="margin:0; color:#8b92b1;">Selecione um aluno para ver os cursos matriculados.</p>
-          </div>
-        </div>
-
         <div class="panel" id="adminReportsSection" data-section="adminReportsSection">
           <h2>Relatórios de progresso</h2>
           <p style="margin-top:0; color:#8b92b1; font-size:0.9rem;">Use <strong>Corrigir</strong> para mover um relatório finalizado para a área de corrigidos.</p>
           <div class="table-wrapper">
-            <table class="table progress-table">
+            <table class="table progress-table admin-responsive-table">
               <thead>
                 <tr>
                   <th>Aluno</th>
@@ -438,11 +500,11 @@
             </table>
           </div>
           <div class="table-wrapper" style="margin-top:1rem;">
-            <div style="display:flex; align-items:center; justify-content:space-between; gap:1rem; margin-bottom:0.75rem;">
+            <div class="admin-table-section-head">
               <h3 style="margin:0;">Corrigidos</h3>
               <small style="color:#8b92b1;">Relatórios marcados como revisados.</small>
             </div>
-            <table class="table progress-table">
+            <table class="table progress-table admin-responsive-table">
               <thead>
                 <tr>
                   <th>Aluno</th>

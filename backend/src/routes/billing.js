@@ -7,6 +7,7 @@ const { decryptStoredSecret } = require('../aiConfigCrypto');
 const {
   sanitizeText,
   sanitizeEmail,
+  sanitizePhone,
   createRateLimiter,
   assertSafeRemoteUrl
 } = require('../security');
@@ -23,7 +24,12 @@ const ASAAS_SANDBOX_URL = 'https://api-sandbox.asaas.com/v3';
 const ASAAS_PRODUCTION_URL = 'https://api.asaas.com/v3';
 const TRIAL_DAYS = Number.parseInt(process.env.ASAAS_TRIAL_DAYS || '30', 10) || 30;
 const PRO_MONTHLY_PRICE = Number.parseFloat(process.env.ASAAS_PRO_MONTHLY_PRICE || '97.90');
+const INCLUDED_STUDENT_LIMIT = Number.parseInt(process.env.ASAAS_INCLUDED_STUDENT_LIMIT || '15', 10) || 15;
+const EXTRA_STUDENT_MONTHLY_PRICE = Number.parseFloat(process.env.ASAAS_EXTRA_STUDENT_MONTHLY_PRICE || '9.70');
+const PRO_AI_CREDITS = Number.parseFloat(process.env.ASAAS_PRO_AI_CREDITS || '100');
+const TRIAL_AI_CREDITS = Number.parseFloat(process.env.ASAAS_TRIAL_AI_CREDITS || '10');
 const APP_NAME = sanitizeText(process.env.ASAAS_APP_NAME || 'Criatyve/1.0', 120) || 'Criatyve/1.0';
+const LEGAL_TERMS_VERSION = '2026-07-28';
 const ASAAS_API_KEY = sanitizeText(process.env.ASAAS_API_KEY || '', 255);
 const ASAAS_WEBHOOK_AUTH_TOKEN = sanitizeText(process.env.ASAAS_WEBHOOK_AUTH_TOKEN || '', 255);
 const ASAAS_ENV = String(process.env.ASAAS_ENV || 'sandbox').toLowerCase() === 'production'
@@ -48,6 +54,27 @@ const ASAAS_PRODUCTION_WEBHOOK_IPS = new Set([
   '54.94.136.112',
   '54.94.183.101'
 ]);
+const ASAAS_CHECKOUT_BILLING_TYPES = new Set(['CREDIT_CARD', 'PIX']);
+
+const normalizeCheckoutBillingTypes = (value, fallback = ['CREDIT_CARD']) => {
+  const entries = Array.isArray(value) ? value : String(value || '').split(',');
+  const billingTypes = entries
+    .map((entry) => sanitizeText(entry, 30).toUpperCase())
+    .filter((entry) => ASAAS_CHECKOUT_BILLING_TYPES.has(entry));
+
+  return billingTypes.length ? Array.from(new Set(billingTypes)) : fallback;
+};
+
+const PRO_BILLING_TYPES = normalizeCheckoutBillingTypes(
+  process.env.ASAAS_PRO_BILLING_TYPES || 'PIX,CREDIT_CARD',
+  ['PIX', 'CREDIT_CARD']
+);
+const TRIAL_BILLING_TYPES = normalizeCheckoutBillingTypes(
+  process.env.ASAAS_TRIAL_BILLING_TYPES || 'CREDIT_CARD',
+  ['CREDIT_CARD']
+);
+
+const sanitizeCpfCnpj = (value) => sanitizeText(value || '', 32).replace(/\D/g, '').slice(0, 14);
 
 const ACTIVE_PAYMENT_EVENTS = new Set(['PAYMENT_CONFIRMED', 'PAYMENT_RECEIVED']);
 const DEACTIVATION_EVENTS = new Set([
@@ -119,9 +146,10 @@ const PLANS = {
     description: 'Assinatura mensal da plataforma Criatyve Pro',
     nextDueDate: () => formatDateOnly(new Date()),
     trialDays: 0,
-    studentLimit: 15,
+    billingTypes: PRO_BILLING_TYPES,
+    studentLimit: INCLUDED_STUDENT_LIMIT,
     storageLimitBytes: 1024 * 1024 * 1024,
-    aiCredits: 100
+    aiCredits: Number.isFinite(PRO_AI_CREDITS) ? PRO_AI_CREDITS : 100
   },
   'trial-30-dias': {
     id: 'trial-30-dias',
@@ -130,13 +158,100 @@ const PLANS = {
     description: `Teste de ${TRIAL_DAYS} dias do plano Criatyve Pro`,
     nextDueDate: () => formatDateOnly(addDaysToDate(new Date(), TRIAL_DAYS)),
     trialDays: TRIAL_DAYS,
-    studentLimit: 15,
+    billingTypes: TRIAL_BILLING_TYPES,
+    studentLimit: INCLUDED_STUDENT_LIMIT,
     storageLimitBytes: 1024 * 1024 * 1024,
-    aiCredits: 100
+    aiCredits: Number.isFinite(TRIAL_AI_CREDITS) ? TRIAL_AI_CREDITS : 10
   }
 };
 
 const getPlanConfig = (planKey = '') => PLANS[planKey] || PLANS.pro;
+
+const roundCurrency = (value) => Math.round((Number(value) || 0) * 100) / 100;
+
+const getExtraStudentPrice = () =>
+  Number.isFinite(EXTRA_STUDENT_MONTHLY_PRICE) && EXTRA_STUDENT_MONTHLY_PRICE > 0
+    ? EXTRA_STUDENT_MONTHLY_PRICE
+    : 9.70;
+
+const normalizeRequestedStudentLimit = (value, plan) => {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  const baseLimit = Number(plan?.studentLimit) || INCLUDED_STUDENT_LIMIT;
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return baseLimit;
+  }
+  return Math.min(Math.max(parsed, baseLimit), 100000);
+};
+
+const buildPlanPurchase = ({ plan, requestedStudentLimit, existingStudentLimit = 0 } = {}) => {
+  const baseLimit = Number(plan?.studentLimit) || INCLUDED_STUDENT_LIMIT;
+  const resolvedStudentLimit = Math.max(
+    baseLimit,
+    normalizeRequestedStudentLimit(requestedStudentLimit, plan),
+    Number.isFinite(Number(existingStudentLimit)) ? Number(existingStudentLimit) : 0
+  );
+  const extraStudents = Math.max(0, resolvedStudentLimit - baseLimit);
+  const extraAmount = roundCurrency(extraStudents * getExtraStudentPrice());
+  const amount = roundCurrency((Number(plan?.price) || 0) + extraAmount);
+  return {
+    amount,
+    baseLimit,
+    studentLimit: resolvedStudentLimit,
+    extraStudents,
+    extraAmount,
+    extraStudentPrice: getExtraStudentPrice()
+  };
+};
+
+const resolveCheckoutPaymentMode = (plan, requestedBillingType) => {
+  const requested = sanitizeText(requestedBillingType || '', 30).toUpperCase();
+  const configuredBillingTypes = Array.isArray(plan?.billingTypes) ? plan.billingTypes : ['CREDIT_CARD'];
+  if (plan?.id === 'pro' && requested === 'PIX' && configuredBillingTypes.includes('PIX')) {
+    return {
+      billingTypes: ['PIX'],
+      chargeTypes: ['DETACHED'],
+      paymentMode: 'pix_detached',
+      subscription: null
+    };
+  }
+
+  return {
+    billingTypes: ['CREDIT_CARD'],
+    chargeTypes: ['RECURRENT'],
+    paymentMode: 'credit_card_recurrent',
+    subscription: {
+      cycle: 'MONTHLY',
+      nextDueDate: plan.nextDueDate()
+    }
+  };
+};
+
+const findExistingProfessorBillingLimit = async (email) => {
+  const normalizedEmail = sanitizeEmail(email || '');
+  if (!normalizedEmail) return 0;
+  await ensureBillingTables();
+  const { rows } = await db.query(
+    `
+      SELECT GREATEST(
+        COALESCE((
+          SELECT MAX(student_limit)
+            FROM users
+           WHERE LOWER(email) = LOWER($1)
+             AND role IN ('professor', 'admin')
+        ), 0),
+        COALESCE((
+          SELECT MAX(student_limit)
+            FROM billing_subscriptions
+           WHERE LOWER(payer_email) = LOWER($1)
+             AND provider = 'asaas'
+             AND (status = 'ACTIVE' OR user_id IS NOT NULL)
+        ), 0)
+      ) AS student_limit
+    `,
+    [normalizedEmail]
+  );
+  return Number.isFinite(Number(rows[0]?.student_limit)) ? Number(rows[0].student_limit) : 0;
+};
 
 const buildCheckoutUrl = (checkoutResponse) => {
   if (checkoutResponse?.link) {
@@ -162,6 +277,9 @@ const normalizeIpAddress = (value = '') => {
   if (!normalized) return '';
   return normalized.startsWith('::ffff:') ? normalized.slice(7) : normalized;
 };
+
+const hasRequiredLegalConsent = (source = {}) =>
+  source?.termsAccepted === true || source?.acceptTerms === true || source?.terms_accepted === true;
 
 const extractWebhookSourceIp = (req) =>
   normalizeIpAddress(req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || '');
@@ -297,6 +415,10 @@ const ensureBillingTables = async () => {
       payer_name TEXT,
       payer_email TEXT,
       amount NUMERIC(12,2),
+      student_limit INT,
+      terms_accepted_at TIMESTAMPTZ,
+      terms_version TEXT,
+      marketing_consent_at TIMESTAMPTZ,
       status TEXT NOT NULL DEFAULT 'PENDING',
       user_id UUID REFERENCES users(id) ON DELETE SET NULL,
       activated_at TIMESTAMPTZ,
@@ -326,6 +448,13 @@ const ensureBillingTables = async () => {
     )
   `);
   await db.query('ALTER TABLE asaas_webhook_events ADD COLUMN IF NOT EXISTS source_ip TEXT');
+  await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS student_limit INT');
+  await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ');
+  await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS terms_version TEXT');
+  await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS marketing_consent_at TIMESTAMPTZ');
+  await db.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ');
+  await db.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_version TEXT');
+  await db.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS marketing_consent_at TIMESTAMPTZ');
   billingTablesEnsured = true;
     })().catch((error) => {
       billingTablesEnsurePromise = null;
@@ -394,7 +523,17 @@ const sendProfessorAccessEmail = async ({ fullName, email, temporaryPassword, pl
   return true;
 };
 
-const persistCheckoutLead = async ({ externalReference, planCode, payerName, payerEmail, amount, checkoutResponse }) => {
+const persistCheckoutLead = async ({
+  externalReference,
+  planCode,
+  payerName,
+  payerEmail,
+  amount,
+  studentLimit,
+  termsAccepted,
+  marketingConsent,
+  checkoutResponse
+}) => {
   await ensureBillingTables();
   await db.query(
     `
@@ -405,11 +544,15 @@ const persistCheckoutLead = async ({ externalReference, planCode, payerName, pay
         payer_name,
         payer_email,
         amount,
+        student_limit,
+        terms_accepted_at,
+        terms_version,
+        marketing_consent_at,
         status,
         raw_payload,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, 'CHECKOUT_CREATED', $7, NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'CHECKOUT_CREATED', $11, NOW())
     `,
     [
       'asaas',
@@ -418,6 +561,10 @@ const persistCheckoutLead = async ({ externalReference, planCode, payerName, pay
       sanitizeText(payerName || '', 160) || null,
       sanitizeEmail(payerEmail || '') || null,
       Number.isFinite(Number(amount)) ? Number(amount) : null,
+      Number.isFinite(Number(studentLimit)) ? Math.max(0, Math.round(Number(studentLimit))) : null,
+      termsAccepted ? new Date() : null,
+      termsAccepted ? LEGAL_TERMS_VERSION : null,
+      marketingConsent === false ? null : new Date(),
       checkoutResponse || null
     ]
   );
@@ -434,9 +581,6 @@ const upsertBillingSubscriptionRecord = async (client, eventType, payment, custo
   const providerCheckoutSessionId = sanitizeText(payment?.checkoutSession || '', 120) || null;
   const providerCustomerId = sanitizeText(payment?.customer || '', 80) || null;
   const amount = Number.isFinite(Number(payment?.value)) ? Number(payment.value) : plan.price;
-  if (Math.abs(amount - plan.price) > 0.009) {
-    throw new Error('O valor confirmado pelo Asaas nao corresponde ao plano contratado.');
-  }
   const status = sanitizeText(payment?.status || eventType || 'PENDING', 80) || 'PENDING';
   const checkoutExternalReference = sanitizeText(payment?.externalReference || '', 160) || null;
 
@@ -462,6 +606,15 @@ const upsertBillingSubscriptionRecord = async (client, eventType, payment, custo
     [providerPaymentId, checkoutExternalReference, providerSubscriptionId, providerCheckoutSessionId]
   );
   const existingSubscription = existingRows[0] || null;
+  const expectedAmount = Number.isFinite(Number(existingSubscription?.amount))
+    ? Number(existingSubscription.amount)
+    : plan.price;
+  if (Math.abs(amount - expectedAmount) > 0.009) {
+    throw new Error('O valor confirmado pelo Asaas nao corresponde ao checkout contratado.');
+  }
+  const expectedStudentLimit = Number.isFinite(Number(existingSubscription?.student_limit))
+    ? Math.max(plan.studentLimit, Math.round(Number(existingSubscription.student_limit)))
+    : plan.studentLimit;
   const payerEmail = sanitizeEmail(
     customerDetails?.email ||
     payment?.customerEmail ||
@@ -488,9 +641,13 @@ const upsertBillingSubscriptionRecord = async (client, eventType, payment, custo
                payer_name = $7,
                payer_email = $8,
                amount = $9,
-               status = $10,
-               last_event_type = $11,
-               raw_payload = $12,
+               student_limit = GREATEST(COALESCE(student_limit, 0), $10),
+               terms_accepted_at = COALESCE(terms_accepted_at, $14),
+               terms_version = COALESCE(terms_version, $15),
+               marketing_consent_at = COALESCE(marketing_consent_at, $16),
+               status = $11,
+               last_event_type = $12,
+               raw_payload = $13,
                updated_at = NOW()
          WHERE id = $1
          RETURNING *
@@ -505,9 +662,13 @@ const upsertBillingSubscriptionRecord = async (client, eventType, payment, custo
         payerName,
         payerEmail || null,
         amount,
+        expectedStudentLimit,
         status,
         eventType,
-        payment
+        payment,
+        existingSubscription.terms_accepted_at || null,
+        existingSubscription.terms_version || null,
+        existingSubscription.marketing_consent_at || null
       ]
     );
     return rows[0];
@@ -525,12 +686,16 @@ const upsertBillingSubscriptionRecord = async (client, eventType, payment, custo
         payer_name,
         payer_email,
         amount,
+        student_limit,
+        terms_accepted_at,
+        terms_version,
+        marketing_consent_at,
         status,
         last_event_type,
         raw_payload,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, NULL, NULL, $11, $12, $13, NOW())
       RETURNING *
     `,
     [
@@ -543,6 +708,7 @@ const upsertBillingSubscriptionRecord = async (client, eventType, payment, custo
       payerName,
       payerEmail || null,
       amount,
+      expectedStudentLimit,
       status,
       eventType,
       payment
@@ -558,6 +724,10 @@ const activateProfessorFromSubscription = async (client, subscription) => {
   }
   const fullName = sanitizeText(subscription?.payer_name || 'Professor Criatyve', 160) || 'Professor Criatyve';
   const plan = getPlanConfig(subscription?.plan_code || 'pro');
+  const contractedStudentLimit = Math.max(
+    Number(plan.studentLimit) || INCLUDED_STUDENT_LIMIT,
+    Number.isFinite(Number(subscription?.student_limit)) ? Math.round(Number(subscription.student_limit)) : 0
+  );
   let temporaryPassword = null;
   temporaryPassword = buildRandomPassword();
   const passwordHash = await bcrypt.hash(temporaryPassword, 10);
@@ -566,9 +736,10 @@ const activateProfessorFromSubscription = async (client, subscription) => {
     `
       INSERT INTO users (
         id, full_name, email, phone, password_hash, role, class_name, is_active, owner_user_id,
-        ai_credits, ai_credits_updated_at, student_limit, storage_limit_bytes
+        ai_credits, ai_credits_updated_at, student_limit, storage_limit_bytes,
+        terms_accepted_at, terms_version, marketing_consent_at
       )
-      VALUES ($1, $2, $3, NULL, $4, 'professor', 'Professor', TRUE, NULL, $5, NOW(), $6, $7)
+      VALUES ($1, $2, $3, NULL, $4, 'professor', 'Professor', TRUE, NULL, $5, NOW(), $6, $7, $8, $9, $10)
       ON CONFLICT (email) DO NOTHING
       RETURNING *
     `,
@@ -578,8 +749,11 @@ const activateProfessorFromSubscription = async (client, subscription) => {
       email,
       passwordHash,
       plan.aiCredits,
-      plan.studentLimit,
-      plan.storageLimitBytes
+      contractedStudentLimit,
+      plan.storageLimitBytes,
+      subscription?.terms_accepted_at || null,
+      subscription?.terms_version || null,
+      subscription?.marketing_consent_at || null
     ]
   );
   let professor = insertResult.rows[0] || null;
@@ -605,10 +779,22 @@ const activateProfessorFromSubscription = async (client, subscription) => {
                ai_credits = GREATEST(COALESCE(ai_credits, 0), $2),
                ai_credits_updated_at = NOW(),
                student_limit = GREATEST(COALESCE(student_limit, 0), $3),
-               storage_limit_bytes = GREATEST(COALESCE(storage_limit_bytes, 0), $4)
-         WHERE id = $5
+               storage_limit_bytes = GREATEST(COALESCE(storage_limit_bytes, 0), $4),
+               terms_accepted_at = COALESCE(terms_accepted_at, $5),
+               terms_version = COALESCE(terms_version, $6),
+               marketing_consent_at = COALESCE(marketing_consent_at, $7)
+         WHERE id = $8
       `,
-      [fullName, plan.aiCredits, plan.studentLimit, plan.storageLimitBytes, professor.id]
+      [
+        fullName,
+        plan.aiCredits,
+        contractedStudentLimit,
+        plan.storageLimitBytes,
+        subscription?.terms_accepted_at || null,
+        subscription?.terms_version || null,
+        subscription?.marketing_consent_at || null,
+        professor.id
+      ]
     );
     const { rows: refreshedUsers } = await client.query('SELECT * FROM users WHERE id = $1', [professor.id]);
     professor = refreshedUsers[0];
@@ -806,39 +992,80 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
   const plan = getPlanConfig(sanitizeText(source?.plan || 'pro', 40));
   const name = sanitizeText(source?.name || '', 120);
   const email = sanitizeEmail(source?.email || '');
+  const phone = sanitizePhone(source?.phone || '');
+  const cpfCnpj = sanitizeCpfCnpj(source?.cpfCnpj || source?.document || '');
+  const postalCode = sanitizeText(source?.postalCode || source?.zipCode || '', 16).replace(/\D/g, '').slice(0, 8);
+  const address = sanitizeText(source?.address || '', 120);
+  const addressNumber = sanitizeText(source?.addressNumber || source?.number || '', 20);
+  const province = sanitizeText(source?.province || source?.neighborhood || '', 80);
+  const complement = sanitizeText(source?.complement || source?.addressComplement || '', 80);
+  if (!hasRequiredLegalConsent(source)) {
+    const message = 'Para continuar, aceite os Termos de Uso e Privacidade.';
+    return redirect ? res.status(400).send(message) : res.status(400).json({ message });
+  }
   if (!name || !email) {
     const message = 'Informe nome e email antes de iniciar o checkout. O email sera usado para enviar login e senha.';
     return redirect ? res.status(400).send(message) : res.status(400).json({ message });
   }
+  if (!cpfCnpj || !postalCode || !address || !addressNumber || !province) {
+    const message = 'Informe CPF/CNPJ, CEP, endereco, numero e bairro antes de iniciar o checkout.';
+    return redirect ? res.status(400).send(message) : res.status(400).json({ message });
+  }
+  const existingStudentLimit = await findExistingProfessorBillingLimit(email);
+  const purchase = buildPlanPurchase({
+    plan,
+    requestedStudentLimit: source?.studentCount ?? source?.students ?? source?.studentLimit,
+    existingStudentLimit
+  });
 
   const publicBaseUrl = buildPublicBaseUrl(req);
   const externalReference = `checkout:${plan.id}:${crypto.randomUUID()}`;
+  const itemDescription = purchase.extraStudents > 0
+    ? `${plan.description}. Inclui ${purchase.studentLimit} alunos no portal (${purchase.extraStudents} extras).`
+    : plan.description;
+  const paymentMode = resolveCheckoutPaymentMode(plan, source?.billingType || source?.paymentMethod);
   const payload = {
-    billingTypes: ['CREDIT_CARD'],
-    chargeTypes: ['RECURRENT'],
+    billingTypes: paymentMode.billingTypes,
+    chargeTypes: paymentMode.chargeTypes,
     minutesToExpire: 60,
     externalReference,
     items: [
       {
         externalReference: plan.id,
         name: plan.label.slice(0, 30),
-        description: plan.description.slice(0, 150),
+        description: itemDescription.slice(0, 150),
         quantity: 1,
-        value: plan.price
+        value: purchase.amount
       }
-    ],
-    subscription: {
-      cycle: 'MONTHLY',
-      nextDueDate: plan.nextDueDate()
-    }
+    ]
   };
+
+  if (paymentMode.subscription) {
+    payload.subscription = paymentMode.subscription;
+  }
+
+  payload.customerData = {
+    name,
+    email,
+    cpfCnpj,
+    postalCode,
+    address,
+    addressNumber,
+    province
+  };
+  if (phone) {
+    payload.customerData.phone = phone;
+  }
+  if (complement) {
+    payload.customerData.complement = complement;
+  }
 
   if (isPublicCallbackUrl(publicBaseUrl)) {
     const callbackBase = `${publicBaseUrl}/checkout-status.html`;
     payload.callback = {
-      successUrl: `${callbackBase}?status=success&plan=${encodeURIComponent(plan.id)}`,
-      cancelUrl: `${callbackBase}?status=cancel&plan=${encodeURIComponent(plan.id)}`,
-      expiredUrl: `${callbackBase}?status=expired&plan=${encodeURIComponent(plan.id)}`
+      successUrl: `${callbackBase}?status=success&plan=${encodeURIComponent(plan.id)}&students=${encodeURIComponent(String(purchase.studentLimit))}`,
+      cancelUrl: `${callbackBase}?status=cancel&plan=${encodeURIComponent(plan.id)}&students=${encodeURIComponent(String(purchase.studentLimit))}`,
+      expiredUrl: `${callbackBase}?status=expired&plan=${encodeURIComponent(plan.id)}&students=${encodeURIComponent(String(purchase.studentLimit))}`
     };
   }
 
@@ -882,7 +1109,10 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
       planCode: plan.id,
       payerName: name,
       payerEmail: email,
-      amount: plan.price,
+      amount: purchase.amount,
+      studentLimit: purchase.studentLimit,
+      termsAccepted: true,
+      marketingConsent: source?.marketingConsent !== false,
       checkoutResponse: responseBody
     });
 
@@ -894,6 +1124,13 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
       provider: 'asaas',
       plan: plan.id,
       trialDays: plan.trialDays,
+      amount: purchase.amount,
+      studentLimit: purchase.studentLimit,
+      extraStudents: purchase.extraStudents,
+      extraStudentPrice: purchase.extraStudentPrice,
+      billingTypes: paymentMode.billingTypes,
+      chargeTypes: paymentMode.chargeTypes,
+      paymentMode: paymentMode.paymentMode,
       checkoutId: responseBody.id || null,
       checkoutUrl
     });
