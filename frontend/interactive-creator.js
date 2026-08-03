@@ -19,6 +19,12 @@ import {
 } from './modules/live-stage.js';
 import { createBuilderCameraModule } from './modules/camera-runtime.js';
 import {
+  createThreeDStageController,
+  getThreeDAttachmentPixelLimits,
+  normalizeThreeDAttachment,
+  normalizeThreeDScene
+} from './modules/three-d-stage.js';
+import {
   deepClone,
   escapeHtml,
   escapeAttribute,
@@ -28,6 +34,16 @@ import {
   renderPlainTextHtml,
   getYouTubeEmbedUrl
 } from './modules/utils.js';
+import {
+  SLIDE_EXPORT_BACKGROUND_MEDIA_ID,
+  SLIDE_EXPORT_QUIZ_DELAY,
+  SLIDE_EXPORT_QUIZ_FEEDBACK_DURATION,
+  estimateSlideExportDuration,
+  findSlideExportCompatibilityIssue,
+  formatSlideExportDuration,
+  getSlideExportAnimationProgress,
+  interpolateSlideExportNumber
+} from './modules/slide-export-runtime.mjs';
 
 const backgroundRemovalModulePromise = import('./image-background-removal.js');
 const eraserUtilsPromise = import('./eraser-utils.js');
@@ -50,6 +66,59 @@ const saveCurrentUserData = (nextData) => {
     ...getCurrentUserData(),
     ...nextData
   }));
+};
+const getCreatorThemeContrastColor = (color = '') => {
+  const match = String(color).trim().match(/^#([0-9a-f]{6})$/i);
+  if (!match) return '#ffffff';
+  const value = Number.parseInt(match[1], 16);
+  const red = (value >> 16) & 255;
+  const green = (value >> 8) & 255;
+  const blue = value & 255;
+  return ((red * 299 + green * 587 + blue * 114) / 1000) >= 150 ? '#111827' : '#ffffff';
+};
+const applyCreatorPortalTheme = (theme = {}) => {
+  const colors = {
+    background: theme.portalBackgroundColor || '#f4f6ff',
+    pageText: theme.portalTextColor || '#101426',
+    cardText: theme.portalCardTextColor || '#101426',
+    cardBackground: theme.portalCardBackgroundColor || '#ffffff',
+    sidebarBackground: theme.portalSidebarBackgroundColor || '#070a1f',
+    sidebarText: theme.portalSidebarTextColor || '#ffffff',
+    button: theme.portalButtonColor || theme.portalAccentColor || '#6d63ff'
+  };
+  [document.documentElement, document.body].forEach((target) => {
+    target.style.setProperty('--portal-bg', colors.background);
+    target.style.setProperty('--portal-page-text', colors.pageText);
+    target.style.setProperty('--portal-text', colors.cardText);
+    target.style.setProperty('--portal-card-text', colors.cardText);
+    target.style.setProperty('--portal-card-bg', colors.cardBackground);
+    target.style.setProperty('--portal-sidebar-bg', colors.sidebarBackground);
+    target.style.setProperty('--portal-sidebar-text', colors.sidebarText);
+    target.style.setProperty('--portal-accent', colors.button);
+    target.style.setProperty('--portal-button', colors.button);
+    target.style.setProperty('--portal-button-text', getCreatorThemeContrastColor(colors.button));
+  });
+  const backgroundImage = typeof theme.portalBackgroundImage === 'string'
+    ? theme.portalBackgroundImage.trim()
+    : '';
+  document.body.style.color = colors.pageText;
+  document.body.style.backgroundColor = colors.background;
+  document.body.style.backgroundImage = backgroundImage
+    ? `linear-gradient(135deg, color-mix(in srgb, ${colors.background} 22%, transparent), color-mix(in srgb, ${colors.background} 8%, transparent)), url("${backgroundImage}")`
+    : '';
+  document.body.style.backgroundSize = backgroundImage ? 'cover' : '';
+  document.body.style.backgroundPosition = backgroundImage ? 'center' : '';
+  document.body.style.backgroundAttachment = backgroundImage ? 'fixed' : '';
+};
+const loadCreatorPortalTheme = async () => {
+  try {
+    const response = await authorizedFetch('/api/student/profile');
+    if (!response.ok) return;
+    const profile = await response.json();
+    applyCreatorPortalTheme(profile?.theme || {});
+  } catch (error) {
+    console.warn('Tema do criador nao pode ser carregado', error);
+  }
 };
 const formatCreditNumber = (value) => {
   const numeric = Number(value);
@@ -81,6 +150,8 @@ const MIN_ELEMENT_SIZE = 40;
 const BUILDER_PANEL_COLLAPSE_BREAKPOINT = 1480;
 const BUILDER_PANEL_STAGE_GAP = 24;
 const BUILDER_PANEL_COLLAPSED_WIDTH = 64;
+const ELEMENT_LAYERS_PANEL_STORAGE_KEY = 'criador-element-layers-collapsed';
+const ELEMENT_LAYER_NAME_MAX_LENGTH = 60;
 
 const builderState = {
   slides: [],
@@ -88,16 +159,28 @@ const builderState = {
   stageSize: { width: 0, height: 0 },
   moduleSettings: {
     lockNextModuleUntilCompleted: false,
+    requireQuizCompletion: false,
     isPublic: false,
     coverImage: '',
     allowStudentPen: false,
-    allowLiveCursors: true
+    allowLiveCursors: true,
+    faceVerification: {
+      enabled: false,
+      verifyOnEntry: true,
+      verifyDuringModule: false,
+      verifyOnCompletion: false,
+      schemaVersion: 1
+    }
   }
 };
 
 let slideList;
 let slideCanvas;
 let slideCanvasViewport;
+let elementLayersPanel;
+let elementLayersList;
+let elementLayersToggleBtn;
+let elementLayersStatus;
 let builderMain;
 let builderPanel;
 let builderPanelToggleBtn;
@@ -118,6 +201,11 @@ let moduleCoverPreviewMeta;
 let moduleLockNextToggle;
 let moduleRequireQuizToggle;
 let modulePublicToggle;
+let moduleFaceVerificationToggle;
+let moduleFaceVerificationOptions;
+let moduleFaceEntryToggle;
+let moduleFacePeriodicToggle;
+let moduleFaceCompletionToggle;
 let modulePublicLinkInput;
 let copyPublicModuleLinkBtn;
 let openPublicModuleLinkBtn;
@@ -126,6 +214,7 @@ let toggleLiveStageShareBtn;
 let publishLiveStageShareBtn;
 let manualLivePublishToggle;
 let allowLiveCursorsToggle;
+let allowLiveStudentPenToggle;
 let liveStageShareLinkInput;
 let copyLiveStageShareLinkBtn;
 let openLiveStageShareLinkBtn;
@@ -176,6 +265,9 @@ let backgroundGradientStartInput;
 let backgroundGradientEndInput;
 let stageBgColorInput;
 let selectedElementId = null;
+let renamingLayerElementId = null;
+let elementLayerDragState = null;
+let suppressElementLayerRowClick = false;
 let lastPublicModuleLink = null;
 let draggingSlideId = null;
 let slideDropTargetId = null;
@@ -342,7 +434,6 @@ let floatingReplaceModeSelect;
 let floatingReplaceCounterStartInput;
 let floatingReplaceCounterStepInput;
 let floatingActionUrlInput;
-let floatingAudioVisibleToggle;
 let floatingAudioLoopToggle;
 let floatingTextColorInput;
 let floatingTextBgColorInput;
@@ -391,7 +482,6 @@ let videoTriggerActionTextInput;
 let videoTriggerReplaceModeSelect;
 let videoTriggerReplaceCounterStartInput;
 let videoTriggerReplaceCounterStepInput;
-let videoTriggerAudioVisibleToggle;
 let videoTriggerAudioLoopToggle;
 let videoTriggerTextColorInput;
 let videoTriggerTextBgColorInput;
@@ -424,7 +514,11 @@ let videoTriggerQuizButtonBackgroundColorInput;
 let videoTriggerQuizPointsInput;
 let videoTriggerQuizLockOnWrongToggle;
 let videoTriggerQuizPlaySourceVideoToggle;
+let videoTriggerQuizHideOnCorrectToggle;
 let videoCaptionEnabledToggle;
+let videoCaptionToolsPanel;
+let videoCaptionManualToggleBtn;
+let videoCaptionSegmentEditorFields;
 let videoCaptionPositionSelect;
 let videoCaptionWidthInput;
 let videoCaptionFontSizeInput;
@@ -447,7 +541,6 @@ let videoApplySourceBtn;
 let audioElementWidthInput;
 let audioElementHeightInput;
 let audioElementRotationInput;
-let audioElementVisibleToggle;
 let audioElementLoopToggle;
 let audioCollectStudentAudioToggle;
 let audioCaptionEnabledToggle;
@@ -550,6 +643,8 @@ let selectedVideoTriggerId = null;
 let floatingKeyboardConfigOpen = false;
 let selectedVideoCaptionSegmentIndex = 0;
 let selectedAudioCaptionSegmentIndex = 0;
+let videoCaptionToolsExpanded = false;
+let videoCaptionManualExpanded = false;
 
 const FLOATING_INSERT_ACTIONS = ['addText', 'addImage', 'addAudio', 'addVideo', 'addQuiz'];
 const FLOATING_TARGET_ACTIONS = ['moveElement', 'playAnimation', 'replaceText', 'playAudio', 'playVideo', 'pauseVideo', 'seekVideo', 'showElement', 'hideElement'];
@@ -612,6 +707,7 @@ const previewState = {
   timedVideoTriggers: new Map(),
   blockBranchExpanded: new Map()
 };
+const builderMediaState = new Map();
 const previewAnimationState = new Map();
 let lastPreviewAnimationSlideId = null;
 const liveStageShareState = createLiveStageShareState();
@@ -655,6 +751,17 @@ const getCurrentLiveCursorIdentity = () => {
 };
 
 const moduleAllowsLiveCursorsInCreator = () => builderState.moduleSettings?.allowLiveCursors !== false;
+
+const getSecurityStudentPenEnabled = () =>
+  allowLiveStudentPenToggle
+    ? Boolean(allowLiveStudentPenToggle.checked)
+    : Boolean(builderState.moduleSettings?.allowStudentPen);
+
+const syncSecurityStudentPenToggle = () => {
+  if (allowLiveStudentPenToggle) {
+    allowLiveStudentPenToggle.checked = Boolean(builderState.moduleSettings?.allowStudentPen);
+  }
+};
 
 const clearCreatorLiveCursorOverlay = () => {
   if (liveCursorRuntime.overlay) {
@@ -782,6 +889,15 @@ const startCreatorLiveCursorSync = () => {
 };
 
 let liveStageShareController = null;
+let threeDStageController = null;
+let threeDAssetLibrary = [];
+let threeDCatalogItems = [];
+let threeDCatalogPreviewController = null;
+let threeDCatalogPreviewItem = null;
+const threeDCatalogThumbnailObjectUrls = new Set();
+let liveThreeDTransformTimer = null;
+let liveThreeDTransformLastSentAt = 0;
+let liveThreeDTransformSequence = 0;
 const stopLiveStageShare = (...args) => liveStageShareController?.stopShare(...args);
 const flushLiveStageShareSync = (...args) => liveStageShareController?.flushSync(...args);
 const scheduleLiveStageShareSync = (...args) => liveStageShareController?.scheduleSync(...args);
@@ -975,6 +1091,26 @@ const renderCaptionSegmentEditor = (type, element) => {
   state.startInput.value = selectedEntry ? String(Number(selectedEntry.start || 0).toFixed(1)) : '0';
   state.endInput.value = selectedEntry ? String(Number(selectedEntry.end || 0).toFixed(1)) : '1';
   syncTextInputValue(state.textInput, selectedEntry?.text || '');
+};
+
+const syncVideoCaptionEditorVisibility = (element = null) => {
+  const hasCaptions = Boolean(Array.isArray(element?.captions) && element.captions.length);
+  if (videoCaptionToolsPanel) {
+    videoCaptionToolsPanel.classList.toggle('hidden', !videoCaptionToolsExpanded);
+  }
+  const segmentPanel = document.getElementById('videoCaptionSegmentPanel');
+  if (segmentPanel) {
+    segmentPanel.classList.toggle('hidden', !videoCaptionManualExpanded);
+  }
+  if (videoCaptionSegmentEditorFields) {
+    videoCaptionSegmentEditorFields.classList.toggle('hidden', !videoCaptionManualExpanded);
+  }
+  if (videoCaptionManualToggleBtn) {
+    videoCaptionManualToggleBtn.classList.toggle('active', videoCaptionManualExpanded);
+    videoCaptionManualToggleBtn.textContent = videoCaptionManualExpanded
+      ? 'Ocultar legenda manual'
+      : (hasCaptions ? 'Editar legenda manualmente' : 'Adicionar legenda manualmente');
+  }
 };
 
 const applyCaptionSegmentFieldChanges = (type) => {
@@ -1285,9 +1421,6 @@ const createMediaCaptionOverlayNode = (element, mediaNode, options = {}) => {
 const wrapMediaNodeWithCaptions = (mediaNode, element) => {
   const shell = document.createElement('div');
   shell.className = 'builder-media-shell';
-  if (element?.type === 'audio' && !element.audioVisible && !element.captionsEnabled) {
-    shell.style.display = 'none';
-  }
   shell.appendChild(mediaNode);
   return shell;
 };
@@ -1470,7 +1603,7 @@ const normalizeAudioElement = (element) => {
     return;
   }
   normalizeMediaCaptionConfig(element, 'audio');
-  element.audioVisible = typeof element.audioVisible === 'boolean' ? element.audioVisible : true;
+  element.audioVisible = true;
   element.audioLoop = Boolean(element.audioLoop);
   element.width = Math.max(180, Number(element.width) || 260);
   element.height = Math.max(54, Number(element.height) || 70);
@@ -1799,7 +1932,8 @@ const normalizeElementAnimation = (element) => {
         width: Math.max(MIN_ELEMENT_SIZE, Number(frame?.width) || Number(element.width) || MIN_ELEMENT_SIZE),
         height: Math.max(MIN_ELEMENT_SIZE, Number(frame?.height) || Number(element.height) || MIN_ELEMENT_SIZE),
         rotation: Number.isFinite(Number(frame?.rotation)) ? ((Number(frame.rotation) % 360) + 360) % 360 : Number(element.rotation) || 0,
-        opacity: Number.isFinite(Number(frame?.opacity)) ? clamp(Number(frame.opacity), 0, 1) : DEFAULT_MOTION_FRAME.opacity
+        opacity: Number.isFinite(Number(frame?.opacity)) ? clamp(Number(frame.opacity), 0, 1) : DEFAULT_MOTION_FRAME.opacity,
+        attachment3d: normalizeThreeDAttachment(frame?.attachment3d)
       }))
       .filter((frame) => Number.isFinite(frame.x) && Number.isFinite(frame.y));
   } else if (Array.isArray(element.motionFrames) && !element.motionFrames.length) {
@@ -1809,14 +1943,18 @@ const normalizeElementAnimation = (element) => {
 
 const supportsRecordedMotion = (element) => ['image', 'block', 'text', 'floatingButton'].includes(element?.type);
 
-const getMotionFrameSnapshot = (element) => ({
-  x: Number(element?.x) || 0,
-  y: Number(element?.y) || 0,
-  width: Math.max(MIN_ELEMENT_SIZE, Number(element?.width) || MIN_ELEMENT_SIZE),
-  height: Math.max(MIN_ELEMENT_SIZE, Number(element?.height) || MIN_ELEMENT_SIZE),
-  rotation: ((Number(element?.rotation) || 0) % 360 + 360) % 360,
-  opacity: getElementBaseOpacity(element)
-});
+const getMotionFrameSnapshot = (element) => {
+  const attachment3d = normalizeThreeDAttachment(element?.attachment3d);
+  return {
+    x: Number(element?.x) || 0,
+    y: Number(element?.y) || 0,
+    width: Math.max(MIN_ELEMENT_SIZE, Number(element?.width) || MIN_ELEMENT_SIZE),
+    height: Math.max(MIN_ELEMENT_SIZE, Number(element?.height) || MIN_ELEMENT_SIZE),
+    rotation: ((Number(element?.rotation) || 0) % 360 + 360) % 360,
+    opacity: getElementBaseOpacity(element),
+    attachment3d: attachment3d ? structuredClone(attachment3d) : null
+  };
+};
 
 const getElementRenderState = (element) => {
   normalizeElementAnimation(element);
@@ -1897,6 +2035,9 @@ const applyElementAnimationStyles = (node, element, options = {}) => {
 
   if (animationType === MOTION_ANIMATION_TYPE) {
     node.style.animation = '';
+    if (typeof options.preservedElapsedSeconds === 'number') {
+      node.dataset.motionElapsedSeconds = String(options.preservedElapsedSeconds);
+    }
     if (node.dataset.elementId && !previewState.active) {
       node.style.opacity = String(getElementBaseOpacity(element));
       node.style.transform = rotation ? `rotate(${rotation}deg)` : '';
@@ -1991,7 +2132,8 @@ const syncPublicModuleLinkUi = () => {
   if (!modulePublicLinkInput || !copyPublicModuleLinkBtn || !openPublicModuleLinkBtn || !modulePublicLinkStatus) {
     return;
   }
-  const hasLink = Boolean(lastPublicModuleLink?.url);
+  const modulePublicEnabled = Boolean(builderState.moduleSettings?.isPublic);
+  const hasLink = modulePublicEnabled && Boolean(lastPublicModuleLink?.url);
   modulePublicLinkInput.value = hasLink ? lastPublicModuleLink.url : '';
   copyPublicModuleLinkBtn.disabled = !hasLink;
   openPublicModuleLinkBtn.disabled = !hasLink;
@@ -1999,14 +2141,14 @@ const syncPublicModuleLinkUi = () => {
     modulePublicLinkStatus.textContent = `Link público pronto para compartilhar${lastPublicModuleLink.title ? `: ${lastPublicModuleLink.title}.` : '.'}`;
     return;
   }
-  modulePublicLinkStatus.textContent = builderState.moduleSettings?.isPublic
+  modulePublicLinkStatus.textContent = modulePublicEnabled
     ? 'Salve este módulo para gerar o link público.'
     : 'Ative a opção de link público e salve o módulo para gerar um link compartilhável.';
 };
 
 const copyPublicModuleLink = async () => {
   const url = lastPublicModuleLink?.url;
-  if (!url) {
+  if (!url || !builderState.moduleSettings?.isPublic) {
     syncPublicModuleLinkUi();
     return;
   }
@@ -2251,6 +2393,8 @@ const applyImportedTemplate = (templatePayload) => {
   if (modulePublicToggle) {
     modulePublicToggle.checked = Boolean(builderState.moduleSettings.isPublic);
   }
+  hydrateFaceVerificationInputs();
+  syncSecurityStudentPenToggle();
   if (moduleCoverUrlInput) {
     moduleCoverUrlInput.value = builderState.moduleSettings.coverImage || '';
   }
@@ -2523,8 +2667,11 @@ const updateSlideExportUi = () => {
         ? `imagens ${imageFormat.toUpperCase()}`
         : mode === 'pdf'
           ? 'um PDF'
-          : `um vídeo ${videoFormat.toUpperCase()} com ${secondsPerSlide}s por slide`;
-    slideExportSummary.innerHTML = `<small class="muted">O exportador vai gerar ${formatLabel} usando ${scopeLabel} no tamanho do palco.</small>`;
+          : `um vídeo ${videoFormat.toUpperCase()} com no mínimo ${secondsPerSlide}s por slide`;
+    const durationNote = mode === 'video'
+      ? ' Mídias, animações e gatilhos podem prolongar automaticamente cada slide.'
+      : '';
+    slideExportSummary.innerHTML = `<small class="muted">O exportador vai gerar ${formatLabel} usando ${scopeLabel} no tamanho do palco.${durationNote}</small>`;
   }
 };
 
@@ -2749,7 +2896,7 @@ const renderSlideToExportStage = async (slide) => {
         node = createExportVideoPlaceholderNode(element);
       }
       stageNode.appendChild(node);
-      if (['audio', 'video'].includes(element.type)) {
+      if (!attachedToThreeD && ['audio', 'video'].includes(element.type)) {
         const mediaNode = getPreviewMediaNode(node);
         if (mediaNode instanceof HTMLVideoElement) {
           mediaNode.controls = false;
@@ -2928,7 +3075,7 @@ const drawExportPlaceholder = (context, label, width, height) => {
   context.restore();
 };
 
-const drawExportQuizElement = (context, element, width, height) => {
+const drawExportQuizElement = (context, element, width, height, quizState = null) => {
   context.save();
   context.fillStyle = element.quizBackgroundColor || '#ffffff';
   drawRoundedRectPath(context, 0, 0, width, height, 18);
@@ -2947,9 +3094,20 @@ const drawExportQuizElement = (context, element, width, height) => {
   let optionY = padding + Math.min(height * 0.28, questionLines.length * ((Number(element.fontSize) || 18) * 1.28) + 10);
   (Array.isArray(element.options) ? element.options : []).slice(0, 4).forEach((option, index) => {
     const optionHeight = Math.min(34, Math.max(24, (height - optionY - 52) / 4));
-    context.fillStyle = element.quizOptionBackgroundColor || '#f4f6ff';
+    const isSelected = quizState?.selectedOption === index;
+    const isCorrect = quizState?.answered && Number(element.correctOption) === index;
+    context.fillStyle = isCorrect
+      ? '#dcfce7'
+      : isSelected
+        ? '#dbeafe'
+        : element.quizOptionBackgroundColor || '#f4f6ff';
     drawRoundedRectPath(context, padding, optionY, width - padding * 2, optionHeight, 10);
     context.fill();
+    if (isCorrect || isSelected) {
+      context.strokeStyle = isCorrect ? '#16a34a' : '#2563eb';
+      context.lineWidth = 2;
+      context.stroke();
+    }
     context.fillStyle = element.quizOptionTextColor || '#25284c';
     context.font = `500 ${Math.max(11, Number(element.fontSize) - 2 || 14)}px ${element.fontFamily || 'Inter, Arial, sans-serif'}`;
     context.textAlign = 'left';
@@ -2965,6 +3123,12 @@ const drawExportQuizElement = (context, element, width, height) => {
   context.textAlign = 'center';
   context.textBaseline = 'middle';
   context.fillText(element.actionLabel || 'Validar resposta', padding + Math.min(190, width - padding * 2) / 2, Math.max(optionY, height - 48) + 17);
+  if (quizState?.answered) {
+    context.fillStyle = '#15803d';
+    context.font = '700 13px Inter, Arial, sans-serif';
+    context.textAlign = 'right';
+    context.fillText(element.successMessage || 'Resposta correta!', width - padding, Math.max(optionY, height - 48) + 17, Math.max(80, width - 230));
+  }
   context.restore();
 };
 
@@ -2986,8 +3150,8 @@ const drawExportDetectorElement = (context, element, width, height) => {
   context.restore();
 };
 
-const drawExportElement = async (context, element, slide, scale) => {
-  const renderState = getElementRenderState(element);
+const drawExportElement = async (context, element, slide, scale, options = {}) => {
+  const renderState = options.renderState || getElementRenderState(element);
   const width = Math.max(1, Number(renderState.width) || Number(element.width) || MIN_ELEMENT_SIZE);
   const height = Math.max(1, Number(renderState.height) || Number(element.height) || MIN_ELEMENT_SIZE);
   const x = Number(renderState.x) || 0;
@@ -2997,7 +3161,8 @@ const drawExportElement = async (context, element, slide, scale) => {
   context.globalAlpha = clamp(Number(renderState.opacity ?? 1), 0, 1);
   context.translate((x + width / 2) * scale, (y + height / 2) * scale);
   context.rotate(rotation);
-  context.scale(scale, scale);
+  const animationScale = Math.max(0.01, Number(renderState.animationScale) || 1);
+  context.scale(scale * animationScale, scale * animationScale);
   context.translate(-width / 2, -height / 2);
   switch (element.type) {
     case 'text':
@@ -3011,7 +3176,7 @@ const drawExportElement = async (context, element, slide, scale) => {
       break;
     case 'image': {
       try {
-        const image = await loadImageElement(element.src || IMAGE_FALLBACK_SRC);
+        const image = options.imageAsset || await loadImageElement(element.src || IMAGE_FALLBACK_SRC);
         drawExportImage(context, image, 0, 0, width, height, getElementMediaObjectFit(element), { radius: 16, clip: true });
       } catch (error) {
         drawExportPlaceholder(context, 'Imagem', width, height);
@@ -3024,7 +3189,7 @@ const drawExportElement = async (context, element, slide, scale) => {
       break;
     }
     case 'quiz':
-      drawExportQuizElement(context, element, width, height);
+      drawExportQuizElement(context, element, width, height, options.quizState);
       break;
     case 'input':
       drawExportBlockLikeElement(context, {
@@ -3042,9 +3207,15 @@ const drawExportElement = async (context, element, slide, scale) => {
     case 'audio':
       drawExportPlaceholder(context, 'Audio', width, height);
       break;
-    case 'video':
-      drawExportPlaceholder(context, element.provider === 'youtube' ? 'Video do YouTube' : 'Video', width, height);
+    case 'video': {
+      const videoNode = options.mediaEntry?.node;
+      if (videoNode instanceof HTMLVideoElement && videoNode.readyState >= 2 && videoNode.videoWidth > 0) {
+        drawExportImage(context, videoNode, 0, 0, width, height, getElementMediaObjectFit(element), { radius: 16, clip: true });
+      } else {
+        drawExportPlaceholder(context, 'Carregando vídeo', width, height);
+      }
       break;
+    }
     case 'camera':
     case 'screenShare':
       drawExportPlaceholder(context, element.type === 'screenShare' ? 'Tela' : 'Camera', width, height);
@@ -3100,12 +3271,35 @@ const renderSlideToCanvasDirect = async (slide, options = {}) => {
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = 'high';
   await drawExportSlideBackground(context, slide, stageSize.width, stageSize.height, scale);
+  const canCaptureActiveThreeDScene = Boolean(
+    slide?.threeDScene?.enabled
+    && slide.id === builderState.activeSlideId
+    && threeDStageController
+  );
+  let attachmentExportLayouts = new Map();
+  if (canCaptureActiveThreeDScene) {
+    const threeDCanvas = threeDStageController.captureCanvas();
+    if (threeDCanvas) {
+      context.drawImage(threeDCanvas, 0, 0, canvas.width, canvas.height);
+    }
+    attachmentExportLayouts = threeDStageController.getAttachmentExportLayouts?.() || new Map();
+  }
   const elements = (slide?.elements || [])
     .filter((element) => !element?.initiallyHidden)
     .slice()
     .sort((a, b) => (Number(a.zIndex) || 0) - (Number(b.zIndex) || 0));
   for (const element of elements) {
-    await drawExportElement(context, element, slide, scale);
+    const projectedLayout = attachmentExportLayouts.get(element.id);
+    const exportElement = projectedLayout
+      ? {
+          ...element,
+          ...projectedLayout,
+          attachment3d: null,
+          animation: null,
+          entranceAnimation: null
+        }
+      : element;
+    await drawExportElement(context, exportElement, slide, scale);
   }
   return canvas;
 };
@@ -3251,57 +3445,835 @@ const getSupportedSlideExportVideoMimeType = () => {
   if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') {
     return '';
   }
-  return ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
+  return [
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs=vp8,opus',
+    'video/webm;codecs=vp9',
+    'video/webm;codecs=vp8',
+    'video/webm'
+  ]
     .find((candidate) => MediaRecorder.isTypeSupported(candidate)) || '';
 };
 
-const exportSlidesAsVideo = async (slides, canvases, options = {}) => {
+const SLIDE_EXPORT_FPS = 30;
+const SLIDE_EXPORT_MEDIA_TIMEOUT = 20000;
+const getSlideExportTriggerMediaKey = (elementId, triggerId) => `__trigger_media__:${elementId}:${triggerId}`;
+
+const getSlideExportMediaSource = (element) => String(element?.src || element?.url || '').trim();
+
+const assertSlideExportCompatibility = (slides = []) => {
+  const issue = findSlideExportCompatibilityIssue(slides);
+  if (!issue) return;
+  const slideNumber = issue.slideIndex + 1;
+  if (issue.kind === 'embedded-background-video') {
+    throw new Error(`O slide ${slideNumber} usa vídeo incorporado. Substitua por um arquivo local ou URL direta antes de exportar.`);
+  }
+  throw new Error(`O slide ${slideNumber} contém YouTube/iframe. Substitua esse vídeo por um arquivo local ou URL direta antes de exportar.`);
+};
+
+const waitForSlideExportMedia = (node, label) =>
+  new Promise((resolve, reject) => {
+    let timeoutId;
+    const cleanup = () => {
+      window.clearTimeout(timeoutId);
+      node.removeEventListener('loadedmetadata', handleReady);
+      node.removeEventListener('canplay', handleReady);
+      node.removeEventListener('error', handleError);
+    };
+    const handleReady = () => {
+      if (node.readyState < 1) return;
+      cleanup();
+      resolve();
+    };
+    const handleError = () => {
+      cleanup();
+      reject(new Error(`Não foi possível carregar ${label}. Verifique o arquivo ou a URL.`));
+    };
+    timeoutId = window.setTimeout(() => {
+      cleanup();
+      reject(new Error(`O carregamento de ${label} excedeu o tempo limite.`));
+    }, SLIDE_EXPORT_MEDIA_TIMEOUT);
+    node.addEventListener('loadedmetadata', handleReady);
+    node.addEventListener('canplay', handleReady);
+    node.addEventListener('error', handleError);
+    if (node.readyState >= 1) {
+      handleReady();
+      return;
+    }
+    node.load();
+  });
+
+const assertSlideExportRemoteMediaCors = async (source, label) => {
+  let parsed;
+  try {
+    parsed = new URL(source, window.location.href);
+  } catch (error) {
+    return;
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.origin === window.location.origin) {
+    return;
+  }
+  try {
+    const response = await fetch(parsed.toString(), { method: 'GET', mode: 'cors', credentials: 'omit' });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    await response.body?.cancel?.();
+  } catch (error) {
+    throw new Error(`${label} não permite exportação por CORS. Use um arquivo local ou uma URL direta que autorize leitura pelo portal.`);
+  }
+};
+
+const validateSlideExportVideoFrame = (entry) => {
+  if (!(entry?.node instanceof HTMLVideoElement) || entry.node.videoWidth <= 0 || entry.node.videoHeight <= 0) {
+    return;
+  }
+  const probe = document.createElement('canvas');
+  probe.width = 1;
+  probe.height = 1;
+  const probeContext = probe.getContext('2d', { willReadFrequently: true });
+  try {
+    probeContext.drawImage(entry.node, 0, 0, 1, 1);
+    probeContext.getImageData(0, 0, 1, 1);
+  } catch (error) {
+    throw new Error(`${entry.label} bloqueou a leitura dos quadros por CORS. Use um arquivo local ou uma URL direta compatível.`);
+  }
+};
+
+const createSlideExportMediaEntry = async ({
+  id,
+  type,
+  source,
+  label,
+  loop = false,
+  hidden = false,
+  autoplay = true,
+  audioContext,
+  audioDestination
+}) => {
+  if (!source) return null;
+  await assertSlideExportRemoteMediaCors(source, label);
+  const node = document.createElement(type === 'video' ? 'video' : 'audio');
+  node.preload = 'auto';
+  node.crossOrigin = 'anonymous';
+  node.playsInline = true;
+  node.controls = false;
+  node.loop = Boolean(loop);
+  node.src = source;
+  node.style.position = 'fixed';
+  node.style.left = '-20000px';
+  node.style.width = '2px';
+  node.style.height = '2px';
+  node.style.opacity = '0';
+  node.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(node);
+  try {
+    await waitForSlideExportMedia(node, label);
+    if (node instanceof HTMLVideoElement) {
+      if (node.readyState < 2) {
+        await new Promise((resolve, reject) => {
+          const timeoutId = window.setTimeout(() => reject(new Error(`Não foi possível ler os quadros de ${label}.`)), SLIDE_EXPORT_MEDIA_TIMEOUT);
+          node.addEventListener('canplay', () => {
+            window.clearTimeout(timeoutId);
+            resolve();
+          }, { once: true });
+        });
+      }
+      validateSlideExportVideoFrame({ node, label });
+    }
+    const sourceNode = audioContext.createMediaElementSource(node);
+    sourceNode.connect(audioDestination);
+    return {
+      id,
+      type,
+      node,
+      sourceNode,
+      label,
+      source,
+      hidden: Boolean(hidden),
+      autoplay: Boolean(autoplay),
+      desiredPlaying: Boolean(autoplay) && !hidden,
+      duration: Number.isFinite(node.duration) ? Math.max(0, node.duration) : 0,
+      loop: Boolean(loop)
+    };
+  } catch (error) {
+    node.pause();
+    node.removeAttribute('src');
+    node.load();
+    node.remove();
+    throw error;
+  }
+};
+
+const getSlideExportRenderState = (element, state, elapsedSeconds) => {
+  const base = getElementRenderState(element);
+  const baseOpacity = Number.isFinite(Number(base.opacity)) ? Number(base.opacity) : 1;
+  const result = { ...base, animationScale: 1 };
+  const type = String(element.animationType || 'none');
+  if (type !== 'none') {
+    const rawProgress = getSlideExportAnimationProgress(
+      element,
+      state.animationStarts.get(element.id) ?? 0,
+      elapsedSeconds
+    );
+    const progress = type === 'pulse' || type === 'float'
+      ? rawProgress
+      : rawProgress * rawProgress * (3 - (2 * rawProgress));
+    if (type === MOTION_ANIMATION_TYPE && Array.isArray(element.motionFrames) && element.motionFrames.length >= 2) {
+      const segmentValue = progress * (element.motionFrames.length - 1);
+      const segmentIndex = Math.min(element.motionFrames.length - 2, Math.floor(segmentValue));
+      const frameProgress = segmentValue - segmentIndex;
+      const from = element.motionFrames[segmentIndex];
+      const to = element.motionFrames[segmentIndex + 1];
+      ['x', 'y', 'width', 'height', 'rotation', 'opacity'].forEach((key) => {
+        result[key] = interpolateSlideExportNumber(from[key], to[key], frameProgress);
+      });
+    } else if (type === 'fade-in') {
+      result.opacity = baseOpacity * progress;
+      result.y += 18 * (1 - progress);
+    } else if (type === 'fade-out') {
+      result.opacity = baseOpacity * (1 - (0.92 * progress));
+      result.y -= 10 * progress;
+    } else if (type === 'slide-left') {
+      result.opacity = baseOpacity * progress;
+      result.x -= 48 * (1 - progress);
+    } else if (type === 'slide-right') {
+      result.opacity = baseOpacity * progress;
+      result.x += 48 * (1 - progress);
+    } else if (type === 'rotate-in') {
+      result.opacity = baseOpacity * progress;
+      result.rotation -= 135 * (1 - progress);
+      result.animationScale = 0.72 + (0.28 * progress);
+    } else if (type === 'zoom-in') {
+      result.opacity = baseOpacity * progress;
+      result.animationScale = 0.7 + (0.3 * progress);
+    } else if (type === 'pulse') {
+      result.animationScale = 1 + (0.04 * Math.sin(Math.PI * progress));
+    } else if (type === 'float') {
+      result.y -= 12 * Math.sin(Math.PI * progress);
+    }
+  }
+  const move = state.moves.get(element.id);
+  if (move) {
+    const moveProgress = clamp((elapsedSeconds - move.startedAt) / Math.max(0.1, move.duration), 0, 1);
+    const eased = moveProgress * moveProgress * (3 - (2 * moveProgress));
+    result.x = interpolateSlideExportNumber(move.fromX, move.toX, eased);
+    result.y = interpolateSlideExportNumber(move.fromY, move.toY, eased);
+    if (moveProgress >= 1) {
+      element.x = move.toX;
+      element.y = move.toY;
+      state.moves.delete(element.id);
+    }
+  }
+  return result;
+};
+
+const drawSlideExportCaption = (context, element, mediaEntry, renderState, scale, stageSize) => {
+  if (!element?.captionsEnabled || !(element.captions || []).length || !mediaEntry?.node) return;
+  const segment = getMediaCaptionSegmentAtTime(element, mediaEntry.node.currentTime);
+  if (!segment) return;
+  const style = normalizeCaptionStyle(element.captionStyle, element.type);
+  const fontSize = Math.max(12, Number(style.fontSize) || 24);
+  const maxWidth = Math.min(
+    stageSize.width - 40,
+    Math.max(120, Number(style.width) || Number(renderState.width) || 360)
+  );
+  context.save();
+  context.font = `700 ${fontSize}px Inter, Arial, sans-serif`;
+  const text = style.uppercase ? segment.text.toUpperCase() : segment.text;
+  const lines = wrapCanvasText(context, text, maxWidth - 28);
+  const lineHeight = fontSize * 1.25;
+  const boxHeight = Math.max(lineHeight + 20, lines.length * lineHeight + 20);
+  let x = style.freePosition && Number.isFinite(style.stageX)
+    ? style.stageX
+    : (Number(renderState.x) || 0) + ((Number(renderState.width) || maxWidth) - maxWidth) / 2;
+  let y;
+  if (style.freePosition && Number.isFinite(style.stageY)) {
+    y = style.stageY;
+  } else if (style.position === 'top') {
+    y = Number(renderState.y) || 0;
+  } else if (style.position === 'center') {
+    y = (Number(renderState.y) || 0) + ((Number(renderState.height) || boxHeight) - boxHeight) / 2;
+  } else {
+    y = (Number(renderState.y) || 0) + (Number(renderState.height) || boxHeight) - boxHeight - 12;
+  }
+  x = clamp(x, 12, Math.max(12, stageSize.width - maxWidth - 12));
+  y = clamp(y, 12, Math.max(12, stageSize.height - boxHeight - 12));
+  context.scale(scale, scale);
+  context.fillStyle = style.backgroundColor || '#0f172acc';
+  drawRoundedRectPath(context, x, y, maxWidth, boxHeight, 12);
+  context.fill();
+  context.fillStyle = style.accentColor || '#facc15';
+  context.fillRect(x, y, 5, boxHeight);
+  drawExportTextLines(context, lines, x + 16, y + 10, maxWidth - 28, boxHeight - 20, {
+    color: style.textColor || '#ffffff',
+    fontSize,
+    fontFamily: 'Inter, Arial, sans-serif',
+    fontWeight: '700',
+    align: 'center'
+  });
+  context.restore();
+};
+
+const prepareSlideExportThreeD = async (state) => {
+  if (!state?.slide?.threeDScene?.enabled) return;
+  const stageNode = document.createElement('div');
+  stageNode.style.position = 'fixed';
+  stageNode.style.left = '-20000px';
+  stageNode.style.top = '0';
+  stageNode.style.width = `${state.stageSize.width}px`;
+  stageNode.style.height = `${state.stageSize.height}px`;
+  stageNode.style.pointerEvents = 'none';
+  stageNode.style.overflow = 'hidden';
+  document.body.appendChild(stageNode);
+  const controller = createThreeDStageController({
+    mode: 'viewer',
+    loadAssetBuffer: async (assetId, variant) => {
+      const response = await authorizedFetch(
+        `/api/admin/3d-assets/${encodeURIComponent(assetId)}/file?variant=${encodeURIComponent(variant)}`
+      );
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.message || 'Não foi possível carregar o modelo 3D para exportação.');
+      }
+      return response.arrayBuffer();
+    },
+    canControl: () => false,
+    shouldAnimateAttachedElement: () => true
+  });
+  try {
+    await controller.mount(stageNode, {
+      id: state.slide.id,
+      stageWidth: state.stageSize.width,
+      stageHeight: state.stageSize.height,
+      threeDScene: deepClone(state.slide.threeDScene)
+    });
+    (state.slide.elements || []).forEach((element) => {
+      if (!normalizeThreeDAttachment(element?.attachment3d)) return;
+      const placeholder = document.createElement('div');
+      placeholder.style.width = `${Math.max(1, Number(element.width) || 160)}px`;
+      placeholder.style.height = `${Math.max(1, Number(element.height) || 80)}px`;
+      controller.attachElement(placeholder, element);
+    });
+    controller.requestRender();
+    await waitForNextFrame();
+    state.threeDController = controller;
+    state.threeDStageNode = stageNode;
+  } catch (error) {
+    controller.destroy?.();
+    stageNode.remove();
+    throw error;
+  }
+};
+
+const createSlideExportRuntime = async (slide, slideIndex, options) => {
+  const runtimeSlide = deepClone(slide);
+  const mediaEntries = [];
+  const mediaMap = new Map();
+  const imageMap = new Map();
+  let runtimeState = null;
+  const stageSize = getStageDimensions();
+  const scale = options.scale;
+  const backgroundCanvas = document.createElement('canvas');
+  backgroundCanvas.width = Math.max(1, Math.round(stageSize.width * scale));
+  backgroundCanvas.height = Math.max(1, Math.round(stageSize.height * scale));
+  const backgroundContext = backgroundCanvas.getContext('2d');
+  try {
+  if (!backgroundContext) {
+    throw new Error('Não foi possível preparar o fundo do vídeo.');
+  }
+  await drawExportSlideBackground(backgroundContext, { ...runtimeSlide, backgroundVideo: null }, stageSize.width, stageSize.height, scale);
+  const triggerControlledMediaIds = new Set();
+  (runtimeSlide.elements || []).forEach((element) => {
+    const triggers = element?.type === 'video' ? element.videoTriggers : element?.interactionTriggers;
+    (triggers || []).forEach((trigger) => {
+      if (['playAudio', 'playVideo'].includes(trigger?.actionConfig?.type) && trigger.actionConfig.targetElementId) {
+        triggerControlledMediaIds.add(trigger.actionConfig.targetElementId);
+      }
+    });
+  });
+
+  for (const element of runtimeSlide.elements || []) {
+    if (element?.type === 'image' && element.src) {
+      try {
+        imageMap.set(element.id, await loadImageElement(element.src));
+      } catch (error) {
+        console.warn(`Imagem ignorada na exportação do slide ${slideIndex + 1}.`, error);
+      }
+    }
+    if (!['video', 'audio'].includes(element?.type) || !getSlideExportMediaSource(element)) continue;
+    const entry = await createSlideExportMediaEntry({
+      id: element.id,
+      type: element.type,
+      source: getSlideExportMediaSource(element),
+      label: `${element.type === 'video' ? 'o vídeo' : 'o áudio'} do slide ${slideIndex + 1}`,
+      loop: element.type === 'audio' && element.audioLoop,
+      hidden: Boolean(element.initiallyHidden),
+      autoplay: !triggerControlledMediaIds.has(element.id),
+      audioContext: options.audioContext,
+      audioDestination: options.audioDestination
+    });
+    if (entry) {
+      mediaEntries.push(entry);
+      mediaMap.set(entry.id, entry);
+    }
+  }
+  for (const element of runtimeSlide.elements || []) {
+    const triggers = element?.type === 'video' ? element.videoTriggers : element?.interactionTriggers;
+    for (const trigger of triggers || []) {
+      const actionType = trigger?.actionConfig?.type;
+      const source = String(trigger?.actionConfig?.url || '').trim();
+      if (!['addAudio', 'addVideo'].includes(actionType) || !source) continue;
+      const entryId = getSlideExportTriggerMediaKey(element.id, trigger.id);
+      const entry = await createSlideExportMediaEntry({
+        id: entryId,
+        type: actionType === 'addVideo' ? 'video' : 'audio',
+        source,
+        label: `${actionType === 'addVideo' ? 'o vídeo' : 'o áudio'} acionado no slide ${slideIndex + 1}`,
+        loop: actionType === 'addAudio' && Boolean(trigger.actionConfig.audioLoop),
+        hidden: true,
+        autoplay: false,
+        audioContext: options.audioContext,
+        audioDestination: options.audioDestination
+      });
+      if (entry) {
+        mediaEntries.push(entry);
+        mediaMap.set(entry.id, entry);
+      }
+    }
+  }
+  if (runtimeSlide.backgroundVideo) {
+    const entry = await createSlideExportMediaEntry({
+      id: SLIDE_EXPORT_BACKGROUND_MEDIA_ID,
+      type: 'video',
+      source: runtimeSlide.backgroundVideo,
+      label: `o vídeo de fundo do slide ${slideIndex + 1}`,
+      loop: false,
+      hidden: false,
+      audioContext: options.audioContext,
+      audioDestination: options.audioDestination
+    });
+    if (entry) {
+      mediaEntries.push(entry);
+      mediaMap.set(entry.id, entry);
+    }
+  }
+  const hidden = new Set((runtimeSlide.elements || []).filter((element) => element?.initiallyHidden).map((element) => element.id));
+  const animationStarts = new Map(
+    (runtimeSlide.elements || []).filter((element) => !hidden.has(element.id)).map((element) => [element.id, 0])
+  );
+  const quizzes = new Map(
+    (runtimeSlide.elements || [])
+      .filter((element) => element?.type === 'quiz' && !hidden.has(element.id))
+      .map((element) => [element.id, { shownAt: 0, answered: false, selectedOption: null, hideAt: null }])
+  );
+  const state = {
+    slide: runtimeSlide,
+    slideIndex,
+    stageSize,
+    scale,
+    backgroundCanvas,
+    mediaEntries,
+    mediaMap,
+    imageMap,
+    hidden,
+    animationStarts,
+    quizzes,
+    moves: new Map(),
+    replaceCounters: new Map(),
+    firedTimedTriggers: new Set(),
+    firedVideoTriggers: new Set(),
+    duration: 0,
+    navigationRequestedAt: null
+  };
+  runtimeState = state;
+  state.duration = estimateSlideExportDuration(runtimeSlide, mediaEntries, options.minimumSeconds);
+  await prepareSlideExportThreeD(state);
+  return state;
+  } catch (error) {
+    cleanupSlideExportRuntime(runtimeState || { mediaEntries, mediaMap, imageMap });
+    throw error;
+  }
+};
+
+const setSlideExportMediaPlaying = async (entry, shouldPlay) => {
+  if (!entry?.node) return;
+  entry.desiredPlaying = Boolean(shouldPlay);
+  if (!shouldPlay) {
+    entry.node.pause();
+    return;
+  }
+  if (!entry.loop && Number.isFinite(entry.node.duration) && entry.node.currentTime >= entry.node.duration - 0.03) {
+    entry.node.currentTime = 0;
+  }
+  try {
+    await entry.node.play();
+  } catch (error) {
+    throw new Error(`O navegador bloqueou a reprodução de ${entry.label}. Tente iniciar a exportação novamente.`);
+  }
+};
+
+const executeSlideExportAction = async (state, sourceElement, config = {}, elapsedSeconds) => {
+  const type = String(config?.type || 'none');
+  const target = (state.slide.elements || []).find((element) => element?.id === config.targetElementId);
+  const targetMedia = state.mediaMap.get(config.targetElementId);
+  if (type === 'showElement' && target) {
+    state.hidden.delete(target.id);
+    state.animationStarts.set(target.id, elapsedSeconds);
+    if (target.type === 'quiz') {
+      state.quizzes.set(target.id, { shownAt: elapsedSeconds, answered: false, selectedOption: null, hideAt: null });
+    }
+    if (targetMedia) await setSlideExportMediaPlaying(targetMedia, true);
+    return;
+  }
+  if (type === 'hideElement' && target) {
+    state.hidden.add(target.id);
+    if (targetMedia) await setSlideExportMediaPlaying(targetMedia, false);
+    return;
+  }
+  if (type === 'playAnimation' && target) {
+    state.animationStarts.set(target.id, elapsedSeconds);
+    if (!target.animationLoop) {
+      state.duration = Math.max(
+        state.duration,
+        elapsedSeconds + Math.max(0, Number(target.animationDelay) || 0) + Math.max(0.2, Number(target.animationDuration) || 1.2)
+      );
+    }
+    return;
+  }
+  if (type === 'moveElement' && target) {
+    const current = getSlideExportRenderState(target, state, elapsedSeconds);
+    const duration = Math.max(0.1, Number(config.moveDuration) || 0.8);
+    state.moves.set(target.id, {
+      startedAt: elapsedSeconds,
+      duration,
+      fromX: current.x,
+      fromY: current.y,
+      toX: current.x + (Number(config.moveByX) || 0),
+      toY: current.y + (Number(config.moveByY) || 0)
+    });
+    state.duration = Math.max(state.duration, elapsedSeconds + duration);
+    return;
+  }
+  if (type === 'replaceText' && target) {
+    const mode = getReplaceTextMode(config.replaceMode);
+    if (mode === REPLACE_COUNTER_MODE) {
+      const counterKey = `${sourceElement?.id || 'source'}:${target.id}`;
+      const currentValue = state.replaceCounters.has(counterKey)
+        ? state.replaceCounters.get(counterKey)
+        : Number(config.replaceCounterStart) || 1;
+      setElementTextualContent(target, `${config.replaceText || ''}${currentValue}`);
+      state.replaceCounters.set(counterKey, currentValue + (Number(config.replaceCounterStep) || 1));
+    } else {
+      setElementTextualContent(target, String(config.replaceText || config.text || ''));
+    }
+    return;
+  }
+  if (type === 'playAudio' && targetMedia) {
+    await setSlideExportMediaPlaying(targetMedia, true);
+    if (!targetMedia.loop) state.duration = Math.max(state.duration, elapsedSeconds + targetMedia.duration);
+    return;
+  }
+  if (type === 'playVideo' && targetMedia) {
+    await setSlideExportMediaPlaying(targetMedia, true);
+    if (!targetMedia.loop) state.duration = Math.max(state.duration, elapsedSeconds + Math.max(0, targetMedia.duration - targetMedia.node.currentTime));
+    return;
+  }
+  if (type === 'pauseVideo' && targetMedia) {
+    await setSlideExportMediaPlaying(targetMedia, false);
+    return;
+  }
+  if (type === 'seekVideo' && targetMedia) {
+    targetMedia.node.currentTime = clamp(Number(config.videoTime) || 0, 0, Math.max(0, targetMedia.duration || 0));
+    await setSlideExportMediaPlaying(targetMedia, true);
+    state.duration = Math.max(state.duration, elapsedSeconds + Math.max(0, targetMedia.duration - targetMedia.node.currentTime));
+    return;
+  }
+  if (['addText', 'addImage', 'addQuiz'].includes(type)) {
+    const typeMap = { addText: 'text', addImage: 'image', addQuiz: 'quiz' };
+    const runtimeElement = createPreviewRuntimeElement(typeMap[type], {
+      ...config,
+      runtimeSourceId: sourceElement?.id || '',
+      runtimeActionType: type,
+      sourceVideoElementId: sourceElement?.type === 'video' ? sourceElement.id : ''
+    }, state.slide);
+    state.slide.elements.push(runtimeElement);
+    state.animationStarts.set(runtimeElement.id, elapsedSeconds);
+    if (runtimeElement.type === 'quiz') {
+      state.quizzes.set(runtimeElement.id, { shownAt: elapsedSeconds, answered: false, selectedOption: null, hideAt: null });
+      state.duration = Math.max(state.duration, elapsedSeconds + SLIDE_EXPORT_QUIZ_DELAY + SLIDE_EXPORT_QUIZ_FEEDBACK_DURATION);
+    } else if (runtimeElement.type === 'image' && runtimeElement.src) {
+      state.imageMap.set(runtimeElement.id, await loadImageElement(runtimeElement.src));
+    }
+    return;
+  }
+  if (['addAudio', 'addVideo'].includes(type)) {
+    const runtimeElement = createPreviewRuntimeElement(type === 'addVideo' ? 'video' : 'audio', {
+      ...config,
+      runtimeSourceId: sourceElement?.id || '',
+      runtimeActionType: type
+    }, state.slide);
+    const mediaEntry = state.mediaMap.get(config._exportMediaKey);
+    if (!mediaEntry) return;
+    runtimeElement.id = mediaEntry.id;
+    state.slide.elements.push(runtimeElement);
+    state.hidden.delete(runtimeElement.id);
+    state.animationStarts.set(runtimeElement.id, elapsedSeconds);
+    mediaEntry.hidden = false;
+    await setSlideExportMediaPlaying(mediaEntry, true);
+    if (!mediaEntry.loop) state.duration = Math.max(state.duration, elapsedSeconds + mediaEntry.duration);
+    return;
+  }
+  if (['nextSlide', 'jumpSlide'].includes(type)) {
+    state.navigationRequestedAt = elapsedSeconds;
+    state.duration = Math.min(state.duration, elapsedSeconds + (1 / SLIDE_EXPORT_FPS));
+  }
+};
+
+const processSlideExportTimeline = async (state, elapsedSeconds) => {
+  for (const element of state.slide.elements || []) {
+    if (element?.type === 'timedTrigger') {
+      for (const trigger of element.interactionTriggers || []) {
+        const key = `${element.id}:${trigger.id}`;
+        if (
+          state.firedTimedTriggers.has(key)
+          || trigger?.enabled === false
+          || (trigger.actionConfig?.type || 'none') === 'none'
+          || elapsedSeconds < Math.max(0, Number(trigger.time) || 0)
+        ) continue;
+        state.firedTimedTriggers.add(key);
+        await executeSlideExportAction(state, element, {
+          ...trigger.actionConfig,
+          _exportMediaKey: getSlideExportTriggerMediaKey(element.id, trigger.id)
+        }, elapsedSeconds);
+      }
+    }
+    if (element?.type === 'video') {
+      const mediaEntry = state.mediaMap.get(element.id);
+      if (!mediaEntry) continue;
+      for (const trigger of element.videoTriggers || []) {
+        const key = `${element.id}:${trigger.id}`;
+        if (
+          state.firedVideoTriggers.has(key)
+          || trigger?.enabled === false
+          || (trigger.actionConfig?.type || 'none') === 'none'
+          || mediaEntry.node.currentTime < Math.max(0, Number(trigger.time) || 0)
+        ) continue;
+        state.firedVideoTriggers.add(key);
+        await executeSlideExportAction(state, element, {
+          ...trigger.actionConfig,
+          _exportMediaKey: getSlideExportTriggerMediaKey(element.id, trigger.id)
+        }, elapsedSeconds);
+      }
+    }
+  }
+  for (const [elementId, quizState] of state.quizzes.entries()) {
+    const quiz = (state.slide.elements || []).find((element) => element?.id === elementId);
+    if (!quiz || state.hidden.has(elementId)) continue;
+    if (!quizState.answered && elapsedSeconds >= quizState.shownAt + SLIDE_EXPORT_QUIZ_DELAY) {
+      quizState.answered = true;
+      quizState.selectedOption = Math.max(0, Number(quiz.correctOption) || 0);
+      quizState.hideAt = quiz.hideOnCorrect ? elapsedSeconds + SLIDE_EXPORT_QUIZ_FEEDBACK_DURATION : null;
+      if (quiz.playSourceVideoOnValidate && quiz.sourceVideoElementId) {
+        await setSlideExportMediaPlaying(state.mediaMap.get(quiz.sourceVideoElementId), true);
+      }
+    }
+    if (quizState.hideAt !== null && elapsedSeconds >= quizState.hideAt) {
+      state.hidden.add(elementId);
+    }
+  }
+};
+
+const syncSlideExportMedia = async (state) => {
+  for (const entry of state.mediaEntries) {
+    const isBackground = entry.id === SLIDE_EXPORT_BACKGROUND_MEDIA_ID;
+    const shouldBeVisible = isBackground || !state.hidden.has(entry.id);
+    if (!shouldBeVisible && !entry.node.paused) {
+      entry.node.pause();
+      continue;
+    }
+    if (shouldBeVisible && entry.desiredPlaying && entry.node.paused && (!entry.node.ended || entry.loop)) {
+      await setSlideExportMediaPlaying(entry, true);
+    }
+  }
+};
+
+const renderSlideExportRuntimeFrame = async (state, outputContext, outputCanvas, elapsedSeconds) => {
+  outputContext.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
+  outputContext.drawImage(state.backgroundCanvas, 0, 0, outputCanvas.width, outputCanvas.height);
+  const backgroundMedia = state.mediaMap.get(SLIDE_EXPORT_BACKGROUND_MEDIA_ID);
+  if (backgroundMedia?.node instanceof HTMLVideoElement && backgroundMedia.node.readyState >= 2) {
+    drawExportImage(outputContext, backgroundMedia.node, 0, 0, outputCanvas.width, outputCanvas.height, 'cover');
+  }
+  let attachmentExportLayouts = new Map();
+  const exportThreeDController = state.threeDController
+    || (state.slide?.threeDScene?.enabled && state.slide.id === builderState.activeSlideId ? threeDStageController : null);
+  if (exportThreeDController) {
+    exportThreeDController.requestRender?.();
+    const threeDCanvas = exportThreeDController.captureCanvas();
+    if (threeDCanvas) {
+      outputContext.drawImage(threeDCanvas, 0, 0, outputCanvas.width, outputCanvas.height);
+    }
+    attachmentExportLayouts = exportThreeDController.getAttachmentExportLayouts?.() || new Map();
+  }
+  const elements = (state.slide.elements || [])
+    .filter((element) => !state.hidden.has(element?.id))
+    .slice()
+    .sort((left, right) => (Number(left.zIndex) || 0) - (Number(right.zIndex) || 0));
+  for (const element of elements) {
+    const projectedLayout = attachmentExportLayouts.get(element.id);
+    const exportElement = projectedLayout ? { ...element, ...projectedLayout, attachment3d: null } : element;
+    const animatedState = getSlideExportRenderState(element, state, elapsedSeconds);
+    const renderState = projectedLayout
+      ? {
+          ...projectedLayout,
+          opacity: animatedState.opacity,
+          animationScale: animatedState.animationScale
+        }
+      : animatedState;
+    const mediaEntry = state.mediaMap.get(element.id);
+    await drawExportElement(outputContext, exportElement, state.slide, state.scale, {
+      renderState,
+      mediaEntry,
+      imageAsset: state.imageMap.get(element.id),
+      quizState: state.quizzes.get(element.id)
+    });
+    if (mediaEntry) {
+      drawSlideExportCaption(outputContext, element, mediaEntry, renderState, state.scale, state.stageSize);
+    }
+  }
+};
+
+const cleanupSlideExportRuntime = (state) => {
+  (state?.mediaEntries || []).forEach((entry) => {
+    try {
+      entry.node.pause();
+      entry.sourceNode?.disconnect();
+      entry.node.removeAttribute('src');
+      entry.node.load();
+      entry.node.remove();
+    } catch (error) { }
+  });
+  state?.mediaMap?.clear?.();
+  state?.imageMap?.clear?.();
+  try {
+    state?.threeDController?.destroy?.();
+    state?.threeDStageNode?.remove?.();
+  } catch (error) { }
+};
+
+const exportSlidesAsVideo = async (slides, options = {}) => {
   if (typeof MediaRecorder === 'undefined') {
     throw new Error('Este navegador nao suporta exportacao de video.');
   }
-  const firstCanvas = canvases[0];
-  if (!(firstCanvas instanceof HTMLCanvasElement)) {
-    throw new Error('Nao foi possivel preparar os slides para o video.');
-  }
-  const secondsPerSlide = Math.max(1, Number(options.secondsPerSlide) || 3);
-  const fps = 30;
-  const frameDelay = Math.max(16, Math.round(1000 / fps));
+  assertSlideExportCompatibility(slides);
+  const minimumSeconds = Math.max(1, Number(options.secondsPerSlide) || 3);
+  const scale = Math.max(1, Math.min(3, Number(options.scale) || 2));
+  const stageSize = getStageDimensions();
   const outputCanvas = document.createElement('canvas');
-  outputCanvas.width = firstCanvas.width;
-  outputCanvas.height = firstCanvas.height;
+  outputCanvas.width = Math.max(1, Math.round(stageSize.width * scale));
+  outputCanvas.height = Math.max(1, Math.round(stageSize.height * scale));
   const context = outputCanvas.getContext('2d');
   if (!context) {
     throw new Error('Nao foi possivel criar o video.');
   }
-  const stream = outputCanvas.captureStream(fps);
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) {
+    throw new Error('Este navegador não suporta a mixagem de áudio necessária para exportar o vídeo.');
+  }
+  const audioContext = new AudioContextClass();
+  const audioDestination = audioContext.createMediaStreamDestination();
+  await audioContext.resume();
+  const canvasStream = outputCanvas.captureStream(SLIDE_EXPORT_FPS);
+  const stream = new MediaStream([
+    ...canvasStream.getVideoTracks(),
+    ...audioDestination.stream.getAudioTracks()
+  ]);
   const mimeType = getSupportedSlideExportVideoMimeType();
   const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
   const chunks = [];
+  let activeRuntime = null;
   recorder.addEventListener('dataavailable', (event) => {
     if (event.data?.size) {
       chunks.push(event.data);
     }
   });
-  const stopped = new Promise((resolve, reject) => {
-    recorder.addEventListener('stop', () => resolve(), { once: true });
-    recorder.addEventListener('error', (event) => reject(event.error || new Error('Falha ao gravar o video.')), { once: true });
+  const stopped = new Promise((resolve) => {
+    recorder.addEventListener('stop', () => resolve(null), { once: true });
+    recorder.addEventListener('error', (event) => resolve(event.error || new Error('Falha ao gravar o vídeo.')), { once: true });
   });
-  recorder.start();
-  for (let slideIndex = 0; slideIndex < canvases.length; slideIndex += 1) {
-    const canvas = canvases[slideIndex];
-    const startedAt = performance.now();
-    while (performance.now() - startedAt < secondsPerSlide * 1000) {
-      context.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
-      context.drawImage(canvas, 0, 0, outputCanvas.width, outputCanvas.height);
-      await waitForDelay(frameDelay);
+  try {
+    let estimatedTotal = slides.length * minimumSeconds;
+    const initialLongWarning = estimatedTotal > 1800 ? ' A exportação ultrapassa 30 minutos.' : '';
+    setSlideExportStatus(`Duração mínima estimada: ${formatSlideExportDuration(estimatedTotal)}.${initialLongWarning}`);
+    let processedSeconds = 0;
+    for (let slideIndex = 0; slideIndex < slides.length; slideIndex += 1) {
+      if (recorder.state === 'recording') {
+        recorder.pause();
+      }
+      cleanupSlideExportRuntime(activeRuntime);
+      activeRuntime = null;
+      setSlideExportStatus(`Preparando mídias do slide ${slideIndex + 1} de ${slides.length}...`);
+      const state = await createSlideExportRuntime(slides[slideIndex], slideIndex, {
+        scale,
+        minimumSeconds,
+        audioContext,
+        audioDestination
+      });
+      activeRuntime = state;
+      estimatedTotal = processedSeconds + state.duration + ((slides.length - slideIndex - 1) * minimumSeconds);
+      const longWarning = estimatedTotal > 1800 ? ' A exportação estimada ultrapassa 30 minutos.' : '';
+      setSlideExportStatus(`Duração estimada até agora: ${formatSlideExportDuration(estimatedTotal)}.${longWarning}`);
+      state.mediaEntries.forEach((entry) => {
+        entry.node.currentTime = 0;
+      });
+      await processSlideExportTimeline(state, 0);
+      await renderSlideExportRuntimeFrame(state, context, outputCanvas, 0);
+      if (recorder.state === 'inactive') {
+        recorder.start(1000);
+      } else if (recorder.state === 'paused') {
+        recorder.resume();
+      }
+      await syncSlideExportMedia(state);
+      const startedAt = performance.now();
+      let lastStatusAt = 0;
+      let frameIndex = 0;
+      while ((performance.now() - startedAt) / 1000 < state.duration) {
+        const elapsedSeconds = Math.max(0, (performance.now() - startedAt) / 1000);
+        await processSlideExportTimeline(state, elapsedSeconds);
+        await syncSlideExportMedia(state);
+        await renderSlideExportRuntimeFrame(state, context, outputCanvas, elapsedSeconds);
+        if (elapsedSeconds - lastStatusAt >= 0.5) {
+          lastStatusAt = elapsedSeconds;
+          const currentTotal = processedSeconds + elapsedSeconds;
+          setSlideExportStatus(
+            `Gravando slide ${slideIndex + 1} de ${slides.length}: ${formatSlideExportDuration(elapsedSeconds)} / ${formatSlideExportDuration(state.duration)}. Total processado: ${formatSlideExportDuration(currentTotal)}.`
+          );
+        }
+        frameIndex += 1;
+        const nextFrameAt = startedAt + ((frameIndex * 1000) / SLIDE_EXPORT_FPS);
+        await waitForDelay(Math.max(0, nextFrameAt - performance.now()));
+      }
+      processedSeconds += state.duration;
+      state.mediaEntries.forEach((entry) => entry.node.pause());
     }
+    await waitForDelay(150);
+    recorder.stop();
+    const recorderError = await stopped;
+    if (recorderError) throw recorderError;
+    downloadBlobFile(new Blob(chunks, { type: mimeType || 'video/webm' }), `${formatSlideExportFileBase()}.webm`);
+  } finally {
+    if (recorder.state !== 'inactive') {
+      try {
+        recorder.stop();
+      } catch (error) { }
+    }
+    cleanupSlideExportRuntime(activeRuntime);
+    stream.getTracks().forEach((track) => track.stop());
+    canvasStream.getTracks().forEach((track) => track.stop());
+    audioDestination.stream.getTracks().forEach((track) => track.stop());
+    await audioContext.close().catch(() => {});
   }
-  await waitForDelay(120);
-  recorder.stop();
-  await stopped;
-  stream.getTracks().forEach((track) => track.stop());
-  const extension = mimeType.includes('vp9') || mimeType.includes('vp8') || mimeType.includes('webm') ? 'webm' : 'webm';
-  downloadBlobFile(new Blob(chunks, { type: mimeType || 'video/webm' }), `${formatSlideExportFileBase()}.${extension}`);
 };
 
 const exportSlidesAsImages = async (slides, canvases, options = {}) => {
@@ -3341,23 +4313,25 @@ const startSlideExport = async () => {
     return;
   }
   try {
-    setSlideExportBusy(true, 'Preparando slides para exportacao...');
-    const canvases = [];
-    for (let index = 0; index < slides.length; index += 1) {
-      setSlideExportStatus(`Renderizando slide ${index + 1} de ${slides.length}...`);
-      canvases.push(await renderSlideToExportCanvas(slides[index], { scale }));
-    }
-    if (mode === 'image') {
-      setSlideExportStatus('Gerando imagens...');
-      await exportSlidesAsImages(slides, canvases, { format: imageFormat });
-    } else if (mode === 'pdf') {
-      setSlideExportStatus('Gerando PDF...');
-      await exportSlidesAsPdf(slides, canvases);
+    setSlideExportBusy(true, 'Preparando slides para exportação...');
+    if (mode === 'video') {
+      setSlideExportStatus('Preparando linha do tempo, mídias e áudio...');
+      await exportSlidesAsVideo(slides, { secondsPerSlide, scale });
     } else {
-      setSlideExportStatus('Gerando video...');
-      await exportSlidesAsVideo(slides, canvases, { secondsPerSlide });
+      const canvases = [];
+      for (let index = 0; index < slides.length; index += 1) {
+        setSlideExportStatus(`Renderizando slide ${index + 1} de ${slides.length}...`);
+        canvases.push(await renderSlideToExportCanvas(slides[index], { scale }));
+      }
+      if (mode === 'image') {
+        setSlideExportStatus('Gerando imagens...');
+        await exportSlidesAsImages(slides, canvases, { format: imageFormat });
+      } else {
+        setSlideExportStatus('Gerando PDF...');
+        await exportSlidesAsPdf(slides, canvases);
+      }
     }
-    setSlideExportBusy(false, 'Exportacao concluida.');
+    setSlideExportBusy(false, 'Exportação concluída.');
     closeSlideExportModal();
   } catch (error) {
     console.error('Falha ao exportar slides', error);
@@ -3401,6 +4375,18 @@ const applyStageConstraints = (element) => {
   }
   const targetWidth = Number(element.width) || 0;
   const targetHeight = Number(element.height) || 0;
+  const attachmentLimits = getActiveSlide()?.threeDScene?.enabled
+    ? getThreeDAttachmentPixelLimits(element.attachment3d)
+    : null;
+  if (attachmentLimits) {
+    if (targetWidth > 0) {
+      element.width = Math.min(targetWidth, attachmentLimits.width);
+    }
+    if (targetHeight > 0) {
+      element.height = Math.min(targetHeight, attachmentLimits.height);
+    }
+    return;
+  }
   if (targetWidth > 0) {
     element.width = Math.min(targetWidth, stageWidth);
   }
@@ -3596,7 +4582,7 @@ const getStageRelativeCaptionBox = (element) => {
 };
 
 const expandElementToRenderedContent = (element, node) => {
-  if (!element || !node || !['text', 'block', 'floatingButton'].includes(element.type)) {
+  if (!element || !node || element.isRuntimeGenerated || !['text', 'block', 'floatingButton'].includes(element.type)) {
     return false;
   }
   const innerNode = node.querySelector('.builder-block-element, .floating-button-element, .builder-text-element') || node;
@@ -3784,7 +4770,7 @@ const normalizeRuntimeActionConfig = (config = {}) => ({
   fontWeight: typeof config.fontWeight === 'string' && config.fontWeight ? config.fontWeight : DEFAULT_INSERT_TEXT_STYLE.fontWeight,
   fontSize: Number.isFinite(Number(config.fontSize)) ? Number(config.fontSize) : DEFAULT_INSERT_TEXT_STYLE.fontSize,
   videoTime: Number.isFinite(Number(config.videoTime)) ? Number(config.videoTime) : 0,
-  audioVisible: typeof config.audioVisible === 'boolean' ? config.audioVisible : true,
+  audioVisible: true,
   audioLoop: Boolean(config.audioLoop),
   ...(() => {
     const flags = getTextDecorationFlags(config, DEFAULT_INSERT_TEXT_STYLE);
@@ -3842,6 +4828,7 @@ const createDefaultActionConfig = () => ({
   points: 1,
   lockOnWrong: false,
   playSourceVideoOnValidate: false,
+  hideOnCorrect: false,
   audioVisible: true,
   audioLoop: false
 });
@@ -4079,15 +5066,14 @@ const buildLiveStageSharePayload = () => {
       stageSize: currentStageSize,
       moduleSettings: {
         lockNextModuleUntilCompleted: Boolean(builderState.moduleSettings?.lockNextModuleUntilCompleted),
+        requireQuizCompletion: Boolean(builderState.moduleSettings?.requireQuizCompletion),
         isPublic: Boolean(builderState.moduleSettings?.isPublic),
         coverImage: getModuleCoverValue(),
-        allowStudentPen:
-          document.getElementById('allowLiveStudentPenToggle')?.checked === true ||
-          Boolean(builderState.moduleSettings?.allowStudentPen) ||
-          moduleHasStudentPaintEnabled(builderState.slides || []),
+        allowStudentPen: getSecurityStudentPenEnabled(),
         allowLiveCursors:
-          document.getElementById('allowLiveCursorsToggle')?.checked !== false &&
-          builderState.moduleSettings?.allowLiveCursors !== false
+          allowLiveCursorsToggle?.checked !== false &&
+          builderState.moduleSettings?.allowLiveCursors !== false,
+        faceVerification: getFaceVerificationSettingsFromInputs()
       },
       liveCameraPeerId: liveStageShareState.liveCameraPeerId || null,
       liveScreenPeerId: liveStageShareState.liveScreenPeerId || null,
@@ -4728,6 +5714,7 @@ const normalizeQuizElement = (element) => {
   element.quizButtonBackgroundColor = element.quizButtonBackgroundColor || '#6d63ff';
   element.points = Math.max(1, Number(element.points) || 1);
   element.lockOnWrong = Boolean(element.lockOnWrong);
+  element.hideOnCorrect = Boolean(element.hideOnCorrect);
   const rawQuizWidth = Number(element.width);
   element.width = (!Number.isNaN(rawQuizWidth) && rawQuizWidth > 0) ? rawQuizWidth : 420;
   element.height = Math.max(getQuizMinimumHeight(element.options), Number(element.height) || 0);
@@ -4753,7 +5740,7 @@ const normalizeFloatingActionConfig = (element) => {
       config.requireAllButtonsInGroup = Boolean(config.requireAllButtonsInGroup);
       config.text = config.text || 'Novo texto';
       config.url = config.url || '';
-      config.audioVisible = typeof config.audioVisible === 'boolean' ? config.audioVisible : true;
+      config.audioVisible = true;
       config.audioLoop = Boolean(config.audioLoop);
       config.textColor = config.textColor || DEFAULT_INSERT_TEXT_STYLE.textColor;
       config.backgroundColor = config.backgroundColor || DEFAULT_INSERT_TEXT_STYLE.backgroundColor;
@@ -4913,8 +5900,7 @@ const normalizeVideoTriggerConfig = (element) => {
         typeof normalized.actionConfig.targetElementId === 'string' ? normalized.actionConfig.targetElementId : '';
       normalized.actionConfig.url = typeof normalized.actionConfig.url === 'string' ? normalized.actionConfig.url : '';
       normalized.actionConfig.text = normalized.actionConfig.text || 'Novo texto';
-      normalized.actionConfig.audioVisible =
-        typeof normalized.actionConfig.audioVisible === 'boolean' ? normalized.actionConfig.audioVisible : true;
+      normalized.actionConfig.audioVisible = true;
       normalized.actionConfig.audioLoop = Boolean(normalized.actionConfig.audioLoop);
       normalized.actionConfig.textColor = normalized.actionConfig.textColor || DEFAULT_INSERT_TEXT_STYLE.textColor;
       normalized.actionConfig.backgroundColor = normalized.actionConfig.backgroundColor || DEFAULT_INSERT_TEXT_STYLE.backgroundColor;
@@ -4981,6 +5967,7 @@ const normalizeVideoTriggerConfig = (element) => {
       normalized.actionConfig.points = Math.max(1, Number(normalized.actionConfig.points) || 1);
       normalized.actionConfig.lockOnWrong = Boolean(normalized.actionConfig.lockOnWrong);
       normalized.actionConfig.playSourceVideoOnValidate = Boolean(normalized.actionConfig.playSourceVideoOnValidate);
+      normalized.actionConfig.hideOnCorrect = Boolean(normalized.actionConfig.hideOnCorrect);
       return normalized;
     });
   element.videoTriggers = normalizedTriggers.filter((trigger) => trigger.enabled || trigger.time > 0 || trigger.actionConfig.type !== 'none');
@@ -5187,6 +6174,7 @@ const getPreviewReplaceCounterKey = (slideId, sourceId, targetId) =>
 
 const executePreviewReplaceTextAction = (sourceElement, safeConfig, slide) => {
   if (!slide) {
+    threeDStageController?.unmount();
     return false;
   }
   const target = slide.elements?.find((item) => item?.id === safeConfig.targetElementId);
@@ -5649,14 +6637,39 @@ const updateFloatingPlacementPreview = () => {
     isPickingFloatingTargetElement = false;
   }
   if (FLOATING_INSERT_ACTIONS.includes(actionType)) {
-    const preview = document.createElement('div');
-    const rect = getFloatingInsertPreviewRect(selectedTrigger?.actionConfig);
-    preview.className = `floating-placement-preview${isPickingFloatingInsertPosition ? ' picking' : ''}`;
+    let preview;
+    const actionConfig = selectedTrigger?.actionConfig || {};
+    const rect = getFloatingInsertPreviewRect(actionConfig);
+    if (actionType === 'addQuiz') {
+      const previewElement = createPreviewRuntimeElement('quiz', actionConfig, getActiveSlide() || { elements: [] });
+      preview = createQuizNode(previewElement);
+      preview.style.pointerEvents = isPickingFloatingInsertPosition ? 'none' : 'auto';
+    } else {
+      preview = document.createElement('div');
+    }
+    preview.className = actionType === 'addQuiz'
+      ? `floating-placement-preview quiz-placement-preview${isPickingFloatingInsertPosition ? ' picking' : ''}`
+      : `floating-placement-preview${isPickingFloatingInsertPosition ? ' picking' : ''}`;
     preview.dataset.label = `Prévia ${rect.width}x${rect.height}`;
     preview.style.left = `${rect.x}px`;
     preview.style.top = `${rect.y}px`;
     preview.style.width = `${rect.width}px`;
     preview.style.height = `${rect.height}px`;
+    if (actionType === 'addText') {
+      const content = document.createElement('div');
+      content.className = 'floating-placement-preview-content';
+      content.textContent = actionConfig.text || 'Novo texto';
+      content.style.color = actionConfig.textColor || DEFAULT_INSERT_TEXT_STYLE.textColor;
+      content.style.backgroundColor = actionConfig.hasTextBackground
+        ? actionConfig.backgroundColor || DEFAULT_INSERT_TEXT_STYLE.backgroundColor
+        : 'transparent';
+      content.style.border = actionConfig.hasTextBorder ? '1px solid rgba(15, 23, 56, 0.2)' : 'none';
+      content.style.fontFamily = actionConfig.fontFamily || DEFAULT_INSERT_TEXT_STYLE.fontFamily;
+      content.style.fontWeight = actionConfig.fontWeight || DEFAULT_INSERT_TEXT_STYLE.fontWeight;
+      content.style.fontSize = `${Math.max(10, Number(actionConfig.fontSize) || DEFAULT_INSERT_TEXT_STYLE.fontSize)}px`;
+      content.style.textAlign = actionConfig.textAlign || DEFAULT_INSERT_TEXT_STYLE.textAlign;
+      preview.appendChild(content);
+    }
     slideCanvas.appendChild(preview);
   }
   const candidateIds = getFloatingTargetCandidateIds(actionType, element);
@@ -5685,14 +6698,25 @@ const updateVideoPlacementPreview = () => {
     updateVideoPlacementControls(element);
     return;
   }
-  const preview = document.createElement('div');
-  const rect = getFloatingInsertPreviewRect(selectedTrigger?.actionConfig);
-  preview.className = `floating-placement-preview video-placement-preview${isPickingFloatingInsertPosition ? ' picking' : ''}`;
+  const actionConfig = selectedTrigger?.actionConfig || {};
+  const rect = getFloatingInsertPreviewRect(actionConfig);
+  const preview = actionType === 'addQuiz'
+    ? createQuizNode(createPreviewRuntimeElement('quiz', {
+      ...actionConfig,
+      sourceVideoElementId: element.id
+    }, getActiveSlide() || { elements: [] }))
+    : document.createElement('div');
+  preview.className = actionType === 'addQuiz'
+    ? `floating-placement-preview video-placement-preview quiz-placement-preview${isPickingFloatingInsertPosition ? ' picking' : ''}`
+    : `floating-placement-preview video-placement-preview${isPickingFloatingInsertPosition ? ' picking' : ''}`;
   preview.dataset.label = `Prévia ${rect.width}x${rect.height}`;
   preview.style.left = `${rect.x}px`;
   preview.style.top = `${rect.y}px`;
   preview.style.width = `${rect.width}px`;
   preview.style.height = `${rect.height}px`;
+  if (actionType === 'addQuiz') {
+    preview.style.pointerEvents = isPickingFloatingInsertPosition ? 'none' : 'auto';
+  }
   slideCanvas.appendChild(preview);
   updateVideoPlacementControls(element);
 };
@@ -5713,8 +6737,8 @@ const createPreviewRuntimeElement = (type, source, slide) => {
     return {
       ...base,
       content: source.text || 'Novo texto',
-      width: Math.max(240, Number(source.insertWidth) || 320),
-      height: Math.max(100, Number(source.insertHeight) || 140),
+      width: Math.max(MIN_ELEMENT_SIZE, Number(source.insertWidth) || 320),
+      height: Math.max(MIN_ELEMENT_SIZE, Number(source.insertHeight) || 140),
       fontSize: Math.max(10, Number(source.fontSize) || DEFAULT_INSERT_TEXT_STYLE.fontSize),
       fontFamily: source.fontFamily || DEFAULT_INSERT_TEXT_STYLE.fontFamily,
       fontWeight: source.fontWeight || DEFAULT_INSERT_TEXT_STYLE.fontWeight,
@@ -5740,7 +6764,7 @@ const createPreviewRuntimeElement = (type, source, slide) => {
       src: source.url || '',
       width: Math.max(180, Number(source.insertWidth) || 260),
       height: Math.max(54, Number(source.insertHeight) || 70),
-      audioVisible: typeof source.audioVisible === 'boolean' ? source.audioVisible : true,
+      audioVisible: true,
       audioLoop: Boolean(source.audioLoop)
     };
   }
@@ -5763,6 +6787,7 @@ const createPreviewRuntimeElement = (type, source, slide) => {
     points: Math.max(1, Number(source.points) || 1),
     lockOnWrong: Boolean(source.lockOnWrong),
     playSourceVideoOnValidate: Boolean(source.playSourceVideoOnValidate),
+    hideOnCorrect: Boolean(source.hideOnCorrect),
     sourceVideoElementId: source.sourceVideoElementId || '',
     width: Number.isFinite(Number(source.insertWidth)) ? Number(source.insertWidth) : 420,
     height: Number.isFinite(Number(source.insertHeight)) ? Number(source.insertHeight) : 280
@@ -5793,8 +6818,8 @@ const findPreviewNodeByElementId = (elementId) =>
 const getPreviewMediaStateKey = (slideId = '', elementId = '') => `${slideId}::${elementId}`;
 const getPreviewTimedVideoTriggerKey = (slideId = '', elementId = '') => `${slideId}::${elementId}`;
 
-const snapshotPreviewMediaState = (slide) => {
-  if (!previewState.active || !slide?.id || !slideCanvas) {
+const snapshotMediaState = (slide, mediaStateMap) => {
+  if (!slide?.id || !slideCanvas || !(mediaStateMap instanceof Map)) {
     return;
   }
   slideCanvas.querySelectorAll('[data-element-id]').forEach((node) => {
@@ -5804,26 +6829,51 @@ const snapshotPreviewMediaState = (slide) => {
     }
     const mediaNode = getPreviewMediaNode(node);
     if (mediaNode instanceof HTMLVideoElement || mediaNode instanceof HTMLAudioElement) {
-      previewState.mediaState.set(getPreviewMediaStateKey(slide.id, elementId), {
+      mediaStateMap.set(getPreviewMediaStateKey(slide.id, elementId), {
         currentTime: Math.max(0, Number(mediaNode.currentTime) || 0),
-        paused: mediaNode.paused
+        paused: mediaNode.paused,
+        playbackRate: Number(mediaNode.playbackRate) || 1,
+        volume: Number(mediaNode.volume),
+        muted: Boolean(mediaNode.muted),
+        src: mediaNode.currentSrc || mediaNode.src || ''
       });
     }
   });
 };
 
-const restorePreviewMediaState = (slide, element, node) => {
-  if (!previewState.active || !slide?.id || !element?.id) {
+const snapshotPreviewMediaState = (slide) => {
+  if (!previewState.active) return;
+  snapshotMediaState(slide, previewState.mediaState);
+};
+
+const snapshotBuilderMediaState = (slide) => {
+  if (previewState.active) return;
+  snapshotMediaState(slide, builderMediaState);
+};
+
+const restoreMediaState = (slide, element, node, mediaStateMap) => {
+  if (!slide?.id || !element?.id || !(mediaStateMap instanceof Map)) {
     return;
   }
   const mediaNode = getPreviewMediaNode(node);
   if (!(mediaNode instanceof HTMLVideoElement) && !(mediaNode instanceof HTMLAudioElement)) {
     return;
   }
-  const state = previewState.mediaState.get(getPreviewMediaStateKey(slide.id, element.id));
+  const state = mediaStateMap.get(getPreviewMediaStateKey(slide.id, element.id));
   if (!state) {
     return;
   }
+  if (!element.src && state.src) {
+    element.src = state.src;
+    mediaNode.src = state.src;
+  }
+  if (Number.isFinite(state.playbackRate) && state.playbackRate > 0) {
+    mediaNode.playbackRate = state.playbackRate;
+  }
+  if (Number.isFinite(state.volume)) {
+    mediaNode.volume = clamp(state.volume, 0, 1);
+  }
+  mediaNode.muted = Boolean(state.muted);
   const applyState = () => {
     if (Number.isFinite(state.currentTime) && state.currentTime > 0) {
       try {
@@ -5841,6 +6891,16 @@ const restorePreviewMediaState = (slide, element, node) => {
   }
 };
 
+const restorePreviewMediaState = (slide, element, node) => {
+  if (!previewState.active) return;
+  restoreMediaState(slide, element, node, previewState.mediaState);
+};
+
+const restoreBuilderMediaState = (slide, element, node) => {
+  if (previewState.active) return;
+  restoreMediaState(slide, element, node, builderMediaState);
+};
+
 const applyPreviewAudioPresentation = (node, element, { authoring = false } = {}) => {
   normalizeAudioElement(element);
   if (!(node instanceof HTMLAudioElement)) {
@@ -5851,12 +6911,12 @@ const applyPreviewAudioPresentation = (node, element, { authoring = false } = {}
   if (authoring) {
     node.controls = true;
     node.style.display = '';
-    node.style.opacity = element.audioVisible ? '1' : '0.62';
-    node.style.outline = element.audioVisible ? '' : '1px dashed rgba(255, 123, 83, 0.7)';
+    node.style.opacity = '1';
+    node.style.outline = '';
     return;
   }
-  node.controls = Boolean(element.audioVisible);
-  node.style.display = element.audioVisible ? '' : 'none';
+  node.controls = true;
+  node.style.display = '';
   node.style.opacity = '';
   node.style.outline = '';
 };
@@ -6269,7 +7329,8 @@ const createEditorSnapshot = () =>
     selectedElementId,
     moduleTitle: moduleTitleInput?.value || '',
     moduleDescription: moduleDescriptionInput?.value || '',
-    selectedCourseId: moduleCourseSelect?.value || ''
+    selectedCourseId: moduleCourseSelect?.value || '',
+    moduleSettings: deepClone(builderState.moduleSettings || {})
   });
 
 const createBuilderDraftPayload = () => ({
@@ -6333,9 +7394,12 @@ const persistBuilderDraftRemotely = async () => {
               : { ...DEFAULT_STAGE_SIZE },
           moduleSettings: {
             lockNextModuleUntilCompleted: Boolean(builderState.moduleSettings?.lockNextModuleUntilCompleted),
+            requireQuizCompletion: Boolean(builderState.moduleSettings?.requireQuizCompletion),
             isPublic: Boolean(builderState.moduleSettings?.isPublic),
             coverImage: getModuleCoverValue(),
-            allowStudentPen: moduleHasStudentPaintEnabled(builderState.slides || [])
+            allowStudentPen: getSecurityStudentPenEnabled(),
+            allowLiveCursors: builderState.moduleSettings?.allowLiveCursors !== false,
+            faceVerification: getFaceVerificationSettingsFromInputs()
           }
         }
       })
@@ -6409,6 +7473,8 @@ const restoreBuilderDraftIfAvailable = () => {
     if (modulePublicToggle) {
       modulePublicToggle.checked = Boolean(builderState.moduleSettings.isPublic);
     }
+    hydrateFaceVerificationInputs();
+    syncSecurityStudentPenToggle();
     setPublicModuleLinkState(
       editingModuleId && builderState.moduleSettings.isPublic
         ? { moduleId: editingModuleId, title: draft.moduleTitle || '' }
@@ -6455,9 +7521,11 @@ const applyEditorSnapshot = (snapshot) => {
   if (modulePublicToggle) {
     modulePublicToggle.checked = Boolean(builderState.moduleSettings.isPublic);
   }
+  hydrateFaceVerificationInputs();
   if (allowLiveCursorsToggle) {
     allowLiveCursorsToggle.checked = builderState.moduleSettings.allowLiveCursors !== false;
   }
+  syncSecurityStudentPenToggle();
   syncModuleCoverPreview();
   syncPublicModuleLinkUi();
   if (moduleCourseSelect && state.selectedCourseId) {
@@ -7094,7 +8162,6 @@ const syncAudioEditorControls = (element) => {
   if (audioElementWidthInput) audioElementWidthInput.value = isAudio ? String(element.width || '') : '';
   if (audioElementHeightInput) audioElementHeightInput.value = isAudio ? String(element.height || '') : '';
   if (audioElementRotationInput) audioElementRotationInput.value = isAudio ? String(element.rotation || 0) : '0';
-  if (audioElementVisibleToggle) audioElementVisibleToggle.checked = isAudio ? Boolean(element.audioVisible) : true;
   if (audioElementLoopToggle) audioElementLoopToggle.checked = isAudio ? Boolean(element.audioLoop) : false;
   if (audioCollectStudentAudioToggle) audioCollectStudentAudioToggle.checked = isAudio ? Boolean(element.collectStudentAudio) : false;
   if (audioCaptionEnabledToggle) audioCaptionEnabledToggle.checked = isAudio ? Boolean(element.captionsEnabled) : false;
@@ -7165,13 +8232,21 @@ const updateVideoEditorVisibility = (element, options = {}) => {
       currentStageEditor = 'none';
     }
     isPickingFloatingInsertPosition = false;
+    videoCaptionToolsExpanded = false;
+    videoCaptionManualExpanded = false;
     videoEditorCard.classList.add('hidden');
     updateVideoPlacementControls(null);
+    syncVideoCaptionEditorVisibility(null);
     updateStageEditorState();
     return;
   }
+  const wasVideoEditorOpen = currentStageEditor === 'video' && !videoEditorCard.classList.contains('hidden');
   currentStageEditor = 'video';
   lastStageEditorOpenedAt = Date.now();
+  if (!wasVideoEditorOpen) {
+    videoCaptionToolsExpanded = false;
+    videoCaptionManualExpanded = false;
+  }
   normalizeVideoTriggerConfig(element);
   const selectedTrigger = getSelectedVideoTrigger(element);
   videoEditorCard.classList.remove('hidden');
@@ -7220,6 +8295,7 @@ const updateVideoEditorVisibility = (element, options = {}) => {
   if (videoCaptionAccentColorInput) videoCaptionAccentColorInput.value = element.captionStyle?.accentColor || '#facc15';
   if (videoCaptionUppercaseToggle) videoCaptionUppercaseToggle.checked = Boolean(element.captionStyle?.uppercase);
   renderCaptionSegmentEditor('video', element);
+  syncVideoCaptionEditorVisibility(element);
   if (videoTriggerTargetSlideSelect) {
     videoTriggerTargetSlideSelect.innerHTML = (builderState.slides || [])
       .filter((slide) => slide?.id)
@@ -7281,7 +8357,6 @@ const updateVideoEditorVisibility = (element, options = {}) => {
   if (videoTriggerReplaceCounterStepInput) {
     videoTriggerReplaceCounterStepInput.value = String(selectedTrigger?.actionConfig?.replaceCounterStep ?? 1);
   }
-  if (videoTriggerAudioVisibleToggle) videoTriggerAudioVisibleToggle.checked = Boolean(selectedTrigger?.actionConfig?.audioVisible);
   if (videoTriggerAudioLoopToggle) videoTriggerAudioLoopToggle.checked = Boolean(selectedTrigger?.actionConfig?.audioLoop);
   if (videoTriggerTextColorInput) videoTriggerTextColorInput.value = selectedTrigger?.actionConfig?.textColor || DEFAULT_INSERT_TEXT_STYLE.textColor;
   if (videoTriggerTextBgColorInput) videoTriggerTextBgColorInput.value = selectedTrigger?.actionConfig?.backgroundColor || DEFAULT_INSERT_TEXT_STYLE.backgroundColor;
@@ -7313,6 +8388,9 @@ const updateVideoEditorVisibility = (element, options = {}) => {
   if (videoTriggerQuizPlaySourceVideoToggle) {
     videoTriggerQuizPlaySourceVideoToggle.checked = Boolean(selectedTrigger?.actionConfig?.playSourceVideoOnValidate);
   }
+  if (videoTriggerQuizHideOnCorrectToggle) {
+    videoTriggerQuizHideOnCorrectToggle.checked = Boolean(selectedTrigger?.actionConfig?.hideOnCorrect);
+  }
   if (videoTriggerQuizCorrectSelect) {
     const quizOptions = selectedTrigger?.actionConfig?.quizOptions || createDefaultQuizOptions();
     videoTriggerQuizCorrectSelect.innerHTML = quizOptions
@@ -7340,7 +8418,6 @@ const updateVideoEditorVisibility = (element, options = {}) => {
   document.getElementById('videoTriggerTextBgColorField')?.classList.toggle('hidden', actionType !== 'addText');
   document.getElementById('videoTriggerTextBackgroundToggleField')?.classList.toggle('hidden', actionType !== 'addText');
   document.getElementById('videoTriggerTextBorderToggleField')?.classList.toggle('hidden', actionType !== 'addText');
-  document.getElementById('videoTriggerAudioVisibleField')?.classList.toggle('hidden', actionType !== 'addAudio');
   document.getElementById('videoTriggerAudioLoopField')?.classList.toggle('hidden', actionType !== 'addAudio');
   const insertMode = ['addText', 'addImage', 'addAudio', 'addVideo', 'addQuiz'].includes(actionType);
   document.getElementById('videoTriggerInsertXField')?.classList.toggle('hidden', !insertMode);
@@ -7366,6 +8443,7 @@ const updateVideoEditorVisibility = (element, options = {}) => {
   document.getElementById('videoTriggerQuizPointsField')?.classList.toggle('hidden', !quizMode);
   document.getElementById('videoTriggerQuizLockOnWrongField')?.classList.toggle('hidden', !quizMode);
   document.getElementById('videoTriggerQuizPlaySourceVideoField')?.classList.toggle('hidden', !quizMode);
+  document.getElementById('videoTriggerQuizHideOnCorrectField')?.classList.toggle('hidden', !quizMode);
   updateVideoPlacementPreview();
   requestAnimationFrame(() => positionStageEditorCard('video'));
   updateStageEditorState();
@@ -7422,7 +8500,7 @@ const syncVideoEditor = () => {
     selectedTrigger.actionConfig.type === 'replaceText'
       ? (Number.isFinite(Number(videoTriggerReplaceCounterStepInput?.value)) ? Number(videoTriggerReplaceCounterStepInput.value) : 1)
       : 1;
-  selectedTrigger.actionConfig.audioVisible = Boolean(videoTriggerAudioVisibleToggle?.checked);
+  selectedTrigger.actionConfig.audioVisible = true;
   selectedTrigger.actionConfig.audioLoop = Boolean(videoTriggerAudioLoopToggle?.checked);
   selectedTrigger.actionConfig.textColor = videoTriggerTextColorInput?.value || DEFAULT_INSERT_TEXT_STYLE.textColor;
   selectedTrigger.actionConfig.backgroundColor = videoTriggerTextBgColorInput?.value || DEFAULT_INSERT_TEXT_STYLE.backgroundColor;
@@ -7467,6 +8545,7 @@ const syncVideoEditor = () => {
   selectedTrigger.actionConfig.points = Math.max(1, Number(videoTriggerQuizPointsInput?.value) || 1);
   selectedTrigger.actionConfig.lockOnWrong = Boolean(videoTriggerQuizLockOnWrongToggle?.checked);
   selectedTrigger.actionConfig.playSourceVideoOnValidate = Boolean(videoTriggerQuizPlaySourceVideoToggle?.checked);
+  selectedTrigger.actionConfig.hideOnCorrect = Boolean(videoTriggerQuizHideOnCorrectToggle?.checked);
   element.videoTriggers.sort((first, second) => (Number(first.time) || 0) - (Number(second.time) || 0));
   element.videoTriggerTime = element.videoTriggers[0]?.time || 0;
   element.videoTriggerAction = element.videoTriggers[0]?.actionConfig?.type || 'none';
@@ -7624,7 +8703,11 @@ const renderMotionFrameList = (element) => {
   }
   elementMotionFrameList.innerHTML = frames
     .map((frame, index) => {
-      const label = `Q${index + 1} · X:${Math.round(frame.x)} Y:${Math.round(frame.y)} · ${Math.round(frame.width)}x${Math.round(frame.height)}`;
+      const attachmentPosition = normalizeThreeDAttachment(frame?.attachment3d)?.position;
+      const positionLabel = attachmentPosition
+        ? `3D:${attachmentPosition.map((value) => Number(value).toFixed(2)).join(',')}`
+        : `X:${Math.round(frame.x)} Y:${Math.round(frame.y)}`;
+      const label = `Q${index + 1} · ${positionLabel} · ${Math.round(frame.width)}x${Math.round(frame.height)}`;
       return `<button type="button" class="motion-frame-chip${index === selectedMotionFrameIndex ? ' active' : ''}" data-motion-frame-index="${index}">${escapeHtml(label)}</button>`;
     })
     .join('');
@@ -9457,22 +10540,29 @@ const populateFloatingTargetSlides = (selectedId = '') => {
   }
 };
 
-const getFloatingTargetElementLabel = (element) => {
+const ELEMENT_TYPE_DISPLAY = {
+  text: { label: 'Texto', icon: 'T' },
+  block: { label: 'Bloco', icon: 'BL' },
+  image: { label: 'Imagem', icon: 'IM' },
+  camera: { label: 'Câmera', icon: 'CA' },
+  floatingButton: { label: 'Botão', icon: 'BT' },
+  key: { label: 'Tecla', icon: 'TC' },
+  input: { label: 'Input', icon: 'IN' },
+  detector: { label: 'Detector', icon: 'DT' },
+  timedTrigger: { label: 'Gatilho', icon: 'GT' },
+  quiz: { label: 'Quiz', icon: 'QZ' },
+  video: { label: 'Vídeo', icon: 'VD' },
+  audio: { label: 'Áudio', icon: 'AU' },
+  pen: { label: 'Desenho', icon: 'PN' },
+  animatedArrow: { label: 'Seta', icon: 'ST' }
+};
+
+const getElementTypeDisplay = (element) =>
+  ELEMENT_TYPE_DISPLAY[element?.type] || { label: 'Elemento', icon: 'EL' };
+
+const getElementLayerFallbackName = (element) => {
   if (!element) return 'Elemento';
-  const typeLabels = {
-    text: 'Texto',
-    block: 'Bloco',
-    image: 'Imagem',
-    camera: 'Camera',
-    floatingButton: 'Botão',
-    key: 'Tecla',
-    input: 'Input',
-    detector: 'Detector',
-    quiz: 'Quiz',
-    video: 'Vídeo',
-    audio: 'Áudio'
-  };
-  const typeLabel = typeLabels[element.type] || 'Elemento';
+  const typeLabel = getElementTypeDisplay(element).label;
   const contentPreview =
     element.type === 'floatingButton'
       ? String(element.label || '').trim()
@@ -9480,9 +10570,23 @@ const getFloatingTargetElementLabel = (element) => {
         ? formatKeyBindingSummary(getTriggerKeyBindings((element.interactionTriggers || [])[0] || {}))
         : ['text', 'block'].includes(element.type)
           ? stripHtml(element.content || '')
-          : '';
+          : element.type === 'quiz'
+            ? String(element.question || '').trim()
+            : '';
   const preview = contentPreview ? contentPreview.replace(/\s+/g, ' ').trim().slice(0, 36) : '';
-  return preview ? `${typeLabel}: ${preview}` : `${typeLabel} (${element.id.slice(-6)})`;
+  const idSuffix = String(element.id || '').slice(-6);
+  return preview
+    ? `${typeLabel}: ${preview}${idSuffix ? ` (${idSuffix})` : ''}`
+    : `${typeLabel}${idSuffix ? ` (${idSuffix})` : ''}`;
+};
+
+const getElementLayerDisplayName = (element) => {
+  const editorName = String(element?.editorName || '').trim();
+  return editorName || getElementLayerFallbackName(element);
+};
+
+const getFloatingTargetElementLabel = (element) => {
+  return getElementLayerDisplayName(element);
 };
 
 const populateFloatingTargetElements = (selectedId = '', actionType = 'none', sourceElement = null) => {
@@ -9779,7 +10883,6 @@ const updateFloatingButtonEditorVisibility = (element, options = {}) => {
         ? 'Cole a URL do site para abrir quando o gatilho for acionado'
         : 'Cole a URL da imagem, áudio ou vídeo';
   }
-  if (floatingAudioVisibleToggle) floatingAudioVisibleToggle.checked = Boolean(config.audioVisible);
   if (floatingAudioLoopToggle) floatingAudioLoopToggle.checked = Boolean(config.audioLoop);
   if (floatingTextColorInput) floatingTextColorInput.value = config.textColor || DEFAULT_INSERT_TEXT_STYLE.textColor;
   if (floatingTextBgColorInput) floatingTextBgColorInput.value = config.backgroundColor || DEFAULT_INSERT_TEXT_STYLE.backgroundColor;
@@ -9831,7 +10934,6 @@ const updateFloatingButtonEditorVisibility = (element, options = {}) => {
   document.getElementById('floatingTextBackgroundToggleField')?.classList.toggle('hidden', actionType !== 'addText');
   document.getElementById('floatingTextBorderToggleField')?.classList.toggle('hidden', actionType !== 'addText');
   document.getElementById('floatingActionUrlField')?.classList.toggle('hidden', !['redirect', 'addImage', 'addAudio', 'addVideo'].includes(actionType));
-  document.getElementById('floatingAudioVisibleField')?.classList.toggle('hidden', actionType !== 'addAudio');
   document.getElementById('floatingAudioLoopField')?.classList.toggle('hidden', actionType !== 'addAudio');
   const insertMode = ['addText', 'addImage', 'addAudio', 'addVideo', 'addQuiz'].includes(actionType);
   document.getElementById('floatingInsertXField')?.classList.toggle('hidden', !insertMode);
@@ -9870,7 +10972,7 @@ const updateFloatingButtonEditorVisibility = (element, options = {}) => {
   updateStageEditorState();
 };
 
-const syncFloatingButtonEditor = () => {
+const syncFloatingButtonEditor = (event = null) => {
   const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId);
   if (!element || !ACTION_TRIGGER_ELEMENT_TYPES.includes(element.type)) {
     return;
@@ -9960,7 +11062,7 @@ const syncFloatingButtonEditor = () => {
   config.replaceCounterStep =
     config.type === 'replaceText' ? (Number.isFinite(Number(floatingReplaceCounterStepInput?.value)) ? Number(floatingReplaceCounterStepInput.value) : 1) : 1;
   config.url = floatingActionUrlInput?.value?.trim() || '';
-  config.audioVisible = Boolean(floatingAudioVisibleToggle?.checked);
+  config.audioVisible = true;
   config.audioLoop = Boolean(floatingAudioLoopToggle?.checked);
   config.textColor = floatingTextColorInput?.value || DEFAULT_INSERT_TEXT_STYLE.textColor;
   config.backgroundColor = floatingTextBgColorInput?.value || DEFAULT_INSERT_TEXT_STYLE.backgroundColor;
@@ -9973,8 +11075,16 @@ const syncFloatingButtonEditor = () => {
   config.hasTextBlock = false;
   config.insertX = Math.max(0, Number(floatingInsertXInput?.value) || 120);
   config.insertY = Math.max(0, Number(floatingInsertYInput?.value) || 120);
-  config.insertWidth = Number.isFinite(Number(floatingInsertWidthInput?.value)) ? Number(floatingInsertWidthInput.value) : 280;
-  config.insertHeight = Math.max(40, Number(floatingInsertHeightInput?.value) || 180);
+  const widthValue = Number(floatingInsertWidthInput?.value);
+  const heightValue = Number(floatingInsertHeightInput?.value);
+  const isTypingWidth = event?.type === 'input' && event.target === floatingInsertWidthInput;
+  const isTypingHeight = event?.type === 'input' && event.target === floatingInsertHeightInput;
+  config.insertWidth = Number.isFinite(widthValue)
+    ? Math.max(isTypingWidth ? 1 : MIN_ELEMENT_SIZE, widthValue)
+    : (isTypingWidth ? config.insertWidth : 280);
+  config.insertHeight = Number.isFinite(heightValue)
+    ? Math.max(isTypingHeight ? 1 : MIN_ELEMENT_SIZE, heightValue)
+    : (isTypingHeight ? config.insertHeight : 180);
   config.moveByX = Number.isFinite(Number(floatingMoveXInput?.value)) ? Number(floatingMoveXInput.value) : 160;
   config.moveByY = Number.isFinite(Number(floatingMoveYInput?.value)) ? Number(floatingMoveYInput.value) : 0;
   config.moveDuration = Math.max(0.1, Number(floatingMoveDurationInput?.value) || 0.8);
@@ -10207,6 +11317,10 @@ const applyMotionFrameSnapshotToElement = (element, frame) => {
   element.width = Math.max(MIN_ELEMENT_SIZE, Number(frame.width) || Number(element.width) || MIN_ELEMENT_SIZE);
   element.height = Math.max(MIN_ELEMENT_SIZE, Number(frame.height) || Number(element.height) || MIN_ELEMENT_SIZE);
   element.rotation = ((Number(frame.rotation) || 0) % 360 + 360) % 360;
+  const attachment3d = normalizeThreeDAttachment(frame.attachment3d);
+  if (attachment3d) {
+    element.attachment3d = structuredClone(attachment3d);
+  }
   applyStageConstraints(element);
 };
 
@@ -10698,21 +11812,14 @@ const syncProfessorCreditsFromPayload = (payload = null) => {
     return;
   }
   const nextData = {};
-  if (Number.isFinite(Number(payload.aiCredits))) {
-    nextData.aiCredits = Math.max(0, Number(Number(payload.aiCredits).toFixed(2)));
+  if (Number.isFinite(Number(payload.platformCredits))) {
+    nextData.platformCredits = Number(Number(payload.platformCredits).toFixed(2));
   }
-  if (Number.isFinite(Number(payload.professorCreditsRemaining))) {
-    nextData.aiCredits = Math.max(0, Number(Number(payload.professorCreditsRemaining).toFixed(2)));
+  if (Number.isFinite(Number(payload.platformCreditsRemaining))) {
+    nextData.platformCredits = Number(Number(payload.platformCreditsRemaining).toFixed(2));
   }
-  if (Number.isFinite(Number(payload.aiCreditCostPerCall))) {
-    nextData.aiCreditCostPerCall = Math.max(0.01, Number(Number(payload.aiCreditCostPerCall).toFixed(2)));
-  }
-  if (Number.isFinite(Number(payload.aiTextCreditCostPerCall))) {
-    nextData.aiTextCreditCostPerCall = Math.max(0.01, Number(Number(payload.aiTextCreditCostPerCall).toFixed(2)));
-    nextData.aiCreditCostPerCall = nextData.aiTextCreditCostPerCall;
-  }
-  if (Number.isFinite(Number(payload.aiImageCreditCostPerCall))) {
-    nextData.aiImageCreditCostPerCall = Math.max(0.01, Number(Number(payload.aiImageCreditCostPerCall).toFixed(2)));
+  if (payload.costs) {
+    nextData.platformCreditCosts = payload.costs;
   }
   if (payload.studentLimit !== undefined) {
     nextData.studentLimit = payload.studentLimit;
@@ -10724,6 +11831,12 @@ const syncProfessorCreditsFromPayload = (payload = null) => {
     nextData.storageUsedBytes = payload.storageUsedBytes;
   }
   saveCurrentUserData(nextData);
+  if (Number.isFinite(Number(nextData.platformCredits))) {
+    localStorage.setItem('curso-platform-credit-sync', JSON.stringify({
+      balance: nextData.platformCredits,
+      at: Date.now()
+    }));
+  }
   renderBuilderProfessorCreditsStatus();
 };
 
@@ -10735,18 +11848,23 @@ const renderBuilderProfessorCreditsStatus = () => {
     return;
   }
   const user = getCurrentUserData();
-  const credits = Number.isFinite(Number(user.aiCredits)) ? Math.max(0, Number(user.aiCredits)) : 0;
-  const textCost = Number.isFinite(Number(user.aiTextCreditCostPerCall || user.aiCreditCostPerCall))
-    ? Math.max(0.01, Number(user.aiTextCreditCostPerCall || user.aiCreditCostPerCall))
-    : 0.5;
-  const imageCost = Number.isFinite(Number(user.aiImageCreditCostPerCall))
-    ? Math.max(0.01, Number(user.aiImageCreditCostPerCall))
-    : 1.0;
+  const credits = Number.isFinite(Number(user.platformCredits)) ? Number(user.platformCredits) : 0;
+  const textCost = Number(user.platformCreditCosts?.text || 0.5);
+  const imageCost = Number(user.platformCreditCosts?.image || 1);
+  const threeDCost = Number(user.platformCreditCosts?.threeDImport || 5);
   const storageText = user.storageLimitBytes
     ? ` | espaço: ${formatStorageAmount(user.storageUsedBytes || 0)} / ${formatStorageAmount(user.storageLimitBytes)}`
     : '';
-  builderProfessorCreditsStatus.textContent = `Saldo: ${formatCreditNumber(credits)} credito(s) | texto: ${formatCreditNumber(textCost)} | imagem: ${formatCreditNumber(imageCost)}${storageText}`;
-  builderProfessorCreditsStatus.style.color = credits > 0 ? '#6d63ff' : '#ff6b6b';
+  builderProfessorCreditsStatus.textContent = `Saldo: ${formatCreditNumber(credits)} crédito(s) | texto: ${formatCreditNumber(textCost)} | imagem: ${formatCreditNumber(imageCost)} | 3D: ${formatCreditNumber(threeDCost)}${storageText}`;
+  builderProfessorCreditsStatus.style.color = credits > 10 ? '#16835d' : credits >= 0 ? '#d47a0a' : '#c63838';
+  const card = document.getElementById('creatorPlatformCreditsCard');
+  const value = document.getElementById('creatorPlatformCreditsValue');
+  card?.classList.remove('hidden', 'is-low', 'is-negative');
+  card?.classList.toggle('is-low', credits >= 0 && credits <= 10);
+  card?.classList.toggle('is-negative', credits < 0);
+  if (value) value.textContent = formatCreditNumber(credits);
+  const costLabel = document.getElementById('threeDImportCreditCostLabel');
+  if (costLabel) costLabel.textContent = formatCreditNumber(threeDCost);
 };
 
 const loadBuilderProfessorCreditsStatus = async () => {
@@ -10756,7 +11874,7 @@ const loadBuilderProfessorCreditsStatus = async () => {
     return;
   }
   try {
-    const response = await authorizedFetch('/api/admin/me/professor-credits');
+    const response = await authorizedFetch('/api/admin/me/platform-credits');
     const payload = await response.json().catch(() => null);
     if (!response.ok) {
       throw new Error(payload?.message || 'Não foi possível carregar os créditos.');
@@ -10765,6 +11883,102 @@ const loadBuilderProfessorCreditsStatus = async () => {
   } catch (error) {
     renderBuilderProfessorCreditsStatus();
   }
+};
+
+const openCreatorCreditTopup = async ({ notice = '' } = {}) => {
+  if (localStorage.getItem(USER_ROLE_KEY) !== 'professor') return;
+  const modal = document.getElementById('creatorCreditTopupModal');
+  const container = document.getElementById('creatorCreditPackageList');
+  const status = document.getElementById('creatorCreditTopupStatus');
+  modal?.classList.remove('hidden');
+  modal?.setAttribute('aria-hidden', 'false');
+  const balance = document.getElementById('creatorCreditTopupBalance');
+  if (balance) {
+    balance.textContent = formatCreditNumber(getCurrentUserData().platformCredits ?? 0);
+  }
+  if (status) status.textContent = 'Carregando pacotes...';
+  try {
+    const response = await authorizedFetch('/api/admin/credit-packages');
+    const packages = await response.json().catch(() => []);
+    if (!response.ok) throw new Error(packages?.message || 'Não foi possível carregar os pacotes.');
+    if (container) {
+      const bestPackage = packages.reduce((best, item) => {
+        const unitPrice = Number(item.price) / Math.max(Number(item.credits), 0.01);
+        const bestUnitPrice = best
+          ? Number(best.price) / Math.max(Number(best.credits), 0.01)
+          : Number.POSITIVE_INFINITY;
+        return unitPrice < bestUnitPrice ? item : best;
+      }, null);
+      container.innerHTML = packages.map((item) => `
+        <article class="credit-package-card${bestPackage?.id === item.id ? ' is-featured' : ''}">
+          ${bestPackage?.id === item.id ? '<span class="credit-package-ribbon">Melhor escolha</span>' : ''}
+          <span class="credit-package-kicker">Recarga avulsa</span>
+          <span>${escapeHtml(item.name)}</span>
+          <strong>${formatCreditNumber(item.credits)} créditos</strong>
+          <p>${Number(item.price).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</p>
+          <small class="credit-package-unit-price">${(Number(item.price) / Math.max(Number(item.credits), 0.01)).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })} por crédito</small>
+          <button class="primary-btn" type="button" data-creator-credit-package="${escapeAttribute(item.id)}">Escolher pacote <span aria-hidden="true">→</span></button>
+        </article>
+      `).join('') || '<p class="muted">Nenhum pacote disponível.</p>';
+    }
+    if (status) {
+      status.textContent = notice || 'O saldo será liberado somente após a confirmação do pagamento.';
+    }
+  } catch (error) {
+    if (status) status.textContent = error.message;
+  }
+};
+
+const handlePlatformCreditsExhausted = async (payload = {}) => {
+  syncProfessorCreditsFromPayload(payload);
+  if (payload.code !== 'PLATFORM_CREDITS_EXHAUSTED') return false;
+  const required = Number.isFinite(Number(payload.requiredCredits))
+    ? formatCreditNumber(payload.requiredCredits)
+    : formatCreditNumber(getCurrentUserData().platformCreditCosts?.threeDImport || 5);
+  await openCreatorCreditTopup({
+    notice: `Saldo insuficiente para continuar. Esta importação precisa de ${required} crédito(s). Escolha um pacote para recarregar.`
+  });
+  return true;
+};
+
+const initCreatorPlatformCredits = () => {
+  if (localStorage.getItem(USER_ROLE_KEY) === 'professor') {
+    document.getElementById('creatorPlatformCreditsCard')?.classList.remove('hidden');
+  }
+  document.getElementById('creatorPlatformCreditsCard')?.addEventListener('click', openCreatorCreditTopup);
+  document.getElementById('creatorCreditTopupModal')?.addEventListener('click', async (event) => {
+    if (event.target.closest('[data-creator-credit-close]')) {
+      const modal = document.getElementById('creatorCreditTopupModal');
+      modal?.classList.add('hidden');
+      modal?.setAttribute('aria-hidden', 'true');
+      return;
+    }
+    const button = event.target.closest('[data-creator-credit-package]');
+    if (!button) return;
+    button.disabled = true;
+    const status = document.getElementById('creatorCreditTopupStatus');
+    try {
+      const response = await authorizedFetch('/api/admin/credit-topups/checkout', {
+        method: 'POST',
+        body: JSON.stringify({ packageId: button.dataset.creatorCreditPackage })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.message || 'Não foi possível criar o checkout.');
+      window.location.assign(payload.order.checkoutUrl);
+    } catch (error) {
+      button.disabled = false;
+      if (status) status.textContent = error.message;
+    }
+  });
+  window.addEventListener('storage', (event) => {
+    if (event.key !== 'curso-platform-credit-sync' || !event.newValue) return;
+    try {
+      saveCurrentUserData({ platformCredits: JSON.parse(event.newValue).balance });
+      renderBuilderProfessorCreditsStatus();
+    } catch {
+      // Ignore malformed synchronization events.
+    }
+  });
 };
 
 const getAiAssistantWorkingState = () => {
@@ -11135,9 +12349,7 @@ const loadAiAssistantSettings = async () => {
     }
     aiAssistantState.settings = await response.json();
     syncProfessorCreditsFromPayload({
-      aiCreditCostPerCall: aiAssistantState.settings?.aiCreditCostPerCall,
-      aiTextCreditCostPerCall: aiAssistantState.settings?.aiTextCreditCostPerCall,
-      aiImageCreditCostPerCall: aiAssistantState.settings?.aiImageCreditCostPerCall
+      costs: aiAssistantState.settings?.platformCreditCosts
     });
     if (aiAssistantState.settings?.connected && aiAssistantState.settings?.isEnabled) {
       const imageProvider = aiAssistantState.settings?.imageProvider;
@@ -11181,6 +12393,7 @@ const setActiveSlide = (slideId) => {
   builderState.activeSlideId = slideId;
   renderSlideList();
   renderSlide();
+  syncThreeDPanel();
 };
 
 const getActiveSlide = () => builderState.slides.find((slide) => slide.id === builderState.activeSlideId);
@@ -11244,6 +12457,774 @@ const syncSlideDropVisualState = () => {
   });
 };
 
+const getActiveThreeDScene = () => {
+  const slide = previewState.active ? getPreviewActiveSlide() : getActiveSlide();
+  return normalizeThreeDScene(slide?.threeDScene);
+};
+
+const formatThreeDAssetStats = (asset) => {
+  const stats = asset?.stats?.desktop || asset?.stats?.original || {};
+  const parts = [];
+  if (Number.isFinite(Number(stats.triangles))) parts.push(`${Number(stats.triangles).toLocaleString('pt-BR')} triângulos`);
+  if (Number.isFinite(Number(stats.textures))) parts.push(`${Number(stats.textures)} textura(s)`);
+  if (Number.isFinite(Number(asset?.size))) parts.push(formatStorageAmount(asset.size));
+  return parts.join(' · ') || 'Modelo validado e pronto para uso.';
+};
+
+const renderThreeDAssetLibrary = () => {
+  const select = document.getElementById('threeDAssetSelect');
+  if (!select) return;
+  const currentValue = getActiveThreeDScene().assetId;
+  select.innerHTML = [
+    '<option value="">Usar forma básica</option>',
+    ...threeDAssetLibrary.map(
+      (asset) => `<option value="${escapeAttribute(asset.id)}">${escapeHtml(asset.originalName || 'Modelo 3D')}</option>`
+    )
+  ].join('');
+  select.value = threeDAssetLibrary.some((asset) => asset.id === currentValue) ? currentValue : '';
+};
+
+const syncThreeDAnimationOptions = () => {
+  const select = document.getElementById('threeDAnimationSelect');
+  if (!select || !threeDStageController) return;
+  const scene = getActiveThreeDScene();
+  const animations = threeDStageController.getAnimationNames();
+  select.innerHTML = [
+    '<option value="-1">Nenhuma animação</option>',
+    ...animations.map((animation) => `<option value="${animation.index}">${escapeHtml(animation.name)}</option>`)
+  ].join('');
+  select.value = animations.some((animation) => animation.index === scene.animationIndex)
+    ? String(scene.animationIndex)
+    : '-1';
+  document.getElementById('threeDAnimationPlayBtn')?.toggleAttribute('disabled', !animations.length);
+  document.getElementById('threeDAnimationPauseBtn')?.toggleAttribute('disabled', !animations.length);
+};
+
+const syncThreeDAttachmentControls = (element) => {
+  const field = document.getElementById('element3dAttachmentField');
+  const status = document.getElementById('element3dAttachmentStatus');
+  const attachButton = document.getElementById('element3dAttachBtn');
+  const repositionButton = document.getElementById('element3dRepositionBtn');
+  const detachButton = document.getElementById('element3dDetachBtn');
+  const sceneEnabled = Boolean(getActiveSlide()?.threeDScene?.enabled);
+  const attachable = Boolean(element && !['detector', 'timedTrigger'].includes(element.type));
+  field?.classList.toggle('hidden', !sceneEnabled || !attachable);
+  const attachment = normalizeThreeDAttachment(element?.attachment3d);
+  attachButton?.classList.toggle('hidden', Boolean(attachment));
+  repositionButton?.classList.toggle('hidden', !attachment);
+  detachButton?.classList.toggle('hidden', !attachment);
+  if (status) {
+    status.textContent = attachment
+      ? 'Arraste o elemento pela superfície e use as alças para redimensionar.'
+      : 'Clique em “Fixar no 3D” e depois escolha um ponto no objeto.';
+  }
+};
+
+const syncThreeDPanel = () => {
+  const slide = getActiveSlide();
+  const scene = normalizeThreeDScene(slide?.threeDScene);
+  const enabledToggle = document.getElementById('threeDSceneEnabledToggle');
+  if (enabledToggle) enabledToggle.checked = scene.enabled;
+  document.getElementById('threeDSceneControls')?.classList.toggle('hidden', !scene.enabled);
+  const primitiveSelect = document.getElementById('threeDPrimitiveSelect');
+  const assetSelect = document.getElementById('threeDAssetSelect');
+  const controlSelect = document.getElementById('threeDControlModeSelect');
+  const positionXInput = document.getElementById('threeDPositionXInput');
+  const positionYInput = document.getElementById('threeDPositionYInput');
+  if (primitiveSelect) primitiveSelect.value = scene.primitiveType;
+  if (assetSelect) assetSelect.value = scene.assetId;
+  if (controlSelect) controlSelect.value = scene.controlMode;
+  if (positionXInput) positionXInput.value = String(Math.round(scene.position[0] * 100));
+  if (positionYInput) positionYInput.value = String(Math.round(scene.position[1] * 100));
+  const selectedAsset = threeDAssetLibrary.find((asset) => asset.id === scene.assetId);
+  const stats = document.getElementById('threeDAssetStats');
+  const deleteButton = document.getElementById('threeDDeleteSelectedAssetBtn');
+  if (stats) {
+    stats.textContent = selectedAsset
+      ? formatThreeDAssetStats(selectedAsset)
+      : scene.assetId
+        ? 'Carregando informações do modelo...'
+        : 'Forma básica selecionada. Não consome armazenamento.';
+  }
+  if (deleteButton) {
+    deleteButton.disabled = !selectedAsset;
+    deleteButton.textContent = 'Excluir modelo da biblioteca';
+  }
+  syncThreeDAnimationOptions();
+  syncThreeDAttachmentControls(slide?.elements?.find((element) => element.id === selectedElementId) || null);
+};
+
+const updateActiveThreeDScene = (patch, { commit = true, rerender = true, transformPhase = '' } = {}) => {
+  const slide = getActiveSlide();
+  if (!slide) return;
+  const wasEnabled = Boolean(slide.threeDScene?.enabled);
+  slide.threeDScene = normalizeThreeDScene({ ...(slide.threeDScene || {}), ...patch });
+  if (wasEnabled && !slide.threeDScene.enabled) {
+    (slide.elements || []).forEach((element) => {
+      const fallback = normalizeThreeDAttachment(element.attachment3d)?.fallback2d;
+      if (!fallback) return;
+      element.x = Number(fallback.x) || 0;
+      element.y = Number(fallback.y) || 0;
+      applyStageConstraints(element);
+    });
+  }
+  syncThreeDPanel();
+  if (rerender) {
+    renderSlide();
+  } else {
+    threeDStageController?.setSceneState(slide.threeDScene);
+    threeDStageController?.requestRender();
+  }
+  if (transformPhase) {
+    sendLiveThreeDTransform(transformPhase, slide.threeDScene);
+  }
+  if (commit) commitHistoryState();
+};
+
+const clearThreeDCatalogThumbnailObjectUrls = () => {
+  threeDCatalogThumbnailObjectUrls.forEach((url) => URL.revokeObjectURL(url));
+  threeDCatalogThumbnailObjectUrls.clear();
+};
+
+const hydrateThreeDCatalogThumbnails = async () => {
+  const images = [...document.querySelectorAll('#threeDCatalogGrid [data-catalog-thumbnail-url]')];
+  await Promise.all(images.map(async (image) => {
+    const source = image.dataset.catalogThumbnailUrl;
+    if (!source || !image.isConnected) return;
+    try {
+      const response = await authorizedFetch(source);
+      if (!response.ok) return;
+      const blob = await response.blob();
+      if (!blob.type.startsWith('image/') || !blob.size || !image.isConnected) return;
+      const objectUrl = URL.createObjectURL(blob);
+      threeDCatalogThumbnailObjectUrls.add(objectUrl);
+      image.src = objectUrl;
+      image.hidden = false;
+      image.closest('.three-d-catalog-preview')?.querySelector('.three-d-catalog-preview-placeholder')?.setAttribute('hidden', '');
+    } catch {
+      // The neutral placeholder remains visible when a source has no usable thumbnail.
+    }
+  }));
+};
+
+const renderThreeDCatalog = () => {
+  const grid = document.getElementById('threeDCatalogGrid');
+  if (!grid) return;
+  clearThreeDCatalogThumbnailObjectUrls();
+  if (!threeDCatalogItems.length) {
+    grid.innerHTML = '<p class="three-d-catalog-empty">Nenhum modelo encontrado. Tente pesquisar por carro, avião, animal ou objeto.</p>';
+    return;
+  }
+  grid.innerHTML = threeDCatalogItems.map((item) => {
+    const desktopStats = item.stats?.desktop || item.stats?.original || {};
+    const details = [
+      item.category,
+      Number.isFinite(Number(desktopStats.triangles))
+        ? `${Number(desktopStats.triangles).toLocaleString('pt-BR')} triângulos`
+        : '',
+      formatStorageAmount(item.size)
+    ].filter(Boolean).join(' · ');
+    const importCost = Number(getCurrentUserData().platformCreditCosts?.threeDImport || 5);
+    const primaryLabel = item.externalOpenUrl
+      ? 'Ver modelo'
+      : `Importar por ${formatCreditNumber(importCost)} créditos`;
+    const primaryAction = item.installed
+      ? 'use'
+      : item.externalOpenUrl
+        ? 'external-open'
+        : 'external-import';
+    return `
+      <article class="three-d-catalog-card">
+        <div class="three-d-catalog-preview">
+          <span class="three-d-catalog-preview-placeholder" aria-hidden="true">3D</span>
+          ${item.thumbnailUrl
+            ? `<img data-catalog-thumbnail-url="${escapeAttribute(item.thumbnailUrl)}" alt="" loading="lazy" hidden>`
+            : ''}
+          ${(item.external && item.preview3d !== false) || item.installed
+            ? `<button type="button" class="three-d-catalog-preview-button"
+                data-catalog-action="preview" data-catalog-item="${escapeAttribute(item.id)}">Prévia 3D</button>`
+            : ''}
+          <span class="three-d-catalog-exclusive">Catálogo online</span>
+        </div>
+        <div class="three-d-catalog-copy">
+          <div class="three-d-catalog-title">
+            <strong>${escapeHtml(item.title)}</strong>
+            <span>${item.externalOpenUrl ? 'Visualização externa' : `${formatCreditNumber(importCost)} créditos`}</span>
+          </div>
+          <p>${escapeHtml(item.description || '')}</p>
+          <small>${escapeHtml(details)}</small>
+          <div class="three-d-catalog-actions">
+            <button class="primary-btn small" type="button"
+              data-catalog-action="${primaryAction}" data-catalog-item="${escapeAttribute(item.id)}">${escapeHtml(primaryLabel)}</button>
+          </div>
+        </div>
+      </article>
+    `;
+  }).join('');
+  hydrateThreeDCatalogThumbnails();
+};
+
+const loadThreeDCatalog = async () => {
+  const grid = document.getElementById('threeDCatalogGrid');
+  if (grid) {
+    grid.innerHTML = '<p class="three-d-catalog-empty">Buscando modelos 3D...</p>';
+  }
+  const query = document.getElementById('threeDCatalogSearchInput')?.value.trim() || '';
+  const categorySelect = document.getElementById('threeDCatalogCategorySelect');
+  const category = categorySelect?.value || '';
+  const params = new URLSearchParams();
+  if (query) params.set('q', query);
+  if (category) params.set('category', category);
+  const externalParams = new URLSearchParams();
+  if (query) externalParams.set('q', query);
+  const externalResponse = await authorizedFetch(
+    `/api/admin/3d-catalog/search${externalParams.size ? `?${externalParams.toString()}` : ''}`
+  );
+  const externalPayload = await externalResponse.json().catch(() => ({}));
+  if (!externalResponse.ok) throw new Error(externalPayload.message || 'O catálogo online não respondeu.');
+  threeDCatalogItems = Array.isArray(externalPayload.items) ? externalPayload.items : [];
+  if (categorySelect && !category && !query) {
+    const categories = Array.from(new Set(threeDCatalogItems.map((item) => item.category).filter(Boolean)))
+      .sort((left, right) => left.localeCompare(right, 'pt-BR'));
+    categorySelect.innerHTML = [
+      '<option value="">Todas as categorias</option>',
+      ...categories.map((entry) => `<option value="${escapeAttribute(entry)}">${escapeHtml(entry)}</option>`)
+    ].join('');
+  }
+  renderThreeDCatalog();
+};
+
+const setThreeDCatalogStatus = (message) => {
+  const status = document.getElementById('threeDCatalogStatus');
+  if (status) status.textContent = message;
+};
+
+const closeThreeDCatalogPreview = () => {
+  threeDCatalogPreviewController?.destroy();
+  threeDCatalogPreviewController = null;
+  threeDCatalogPreviewItem = null;
+  const modal = document.getElementById('threeDCatalogPreviewModal');
+  modal?.classList.add('hidden');
+  modal?.setAttribute('aria-hidden', 'true');
+};
+
+const ensureThreeDCatalogPreviewController = () => {
+  if (threeDCatalogPreviewController) return threeDCatalogPreviewController;
+  threeDCatalogPreviewController = createThreeDStageController({
+    mode: 'viewer',
+    canControl: () => true,
+    loadAssetBuffer: async (assetId, variant) => {
+      const isExternal = String(assetId).startsWith('external:');
+      const id = isExternal ? String(assetId).slice('external:'.length) : assetId;
+      const url = isExternal
+        ? `/api/admin/3d-catalog/${encodeURIComponent(id)}/preview`
+        : `/api/admin/3d-assets/${encodeURIComponent(id)}/file?variant=${encodeURIComponent(variant)}`;
+      const response = await authorizedFetch(url);
+      if (!response.ok) throw new Error('Não foi possível carregar a prévia deste modelo.');
+      return response.arrayBuffer();
+    }
+  });
+  return threeDCatalogPreviewController;
+};
+
+const openThreeDCatalogPreview = async (itemId) => {
+  const item = threeDCatalogItems.find((entry) => entry.id === itemId);
+  if (!item || (!item.external && !item.installed)) {
+    throw new Error('Instale o modelo para abrir a prévia interativa.');
+  }
+  const modal = document.getElementById('threeDCatalogPreviewModal');
+  const stage = document.getElementById('threeDCatalogPreviewStage');
+  const title = document.getElementById('threeDCatalogPreviewTitle');
+  const status = document.getElementById('threeDCatalogPreviewStatus');
+  const useButton = document.getElementById('threeDCatalogPreviewUseBtn');
+  if (!modal || !stage) return;
+  threeDCatalogPreviewItem = item;
+  if (title) title.textContent = item.title || 'Modelo 3D';
+  if (status) status.textContent = 'Arraste para girar e use o scroll para aproximar.';
+  if (useButton) useButton.textContent = item.external ? 'Importar e usar' : 'Usar neste slide';
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+  const assetId = item.external ? `external:${item.id}` : item.assetId;
+  await ensureThreeDCatalogPreviewController().mount(stage, {
+    id: `catalog-preview-${item.id}`,
+    stageWidth: 1280,
+    stageHeight: 720,
+    threeDScene: {
+      enabled: true,
+      assetId,
+      controlMode: 'student',
+      quaternion: [0, 0, 0, 1],
+      position: [0, 0],
+      zoom: 1
+    }
+  });
+};
+
+const importExternalThreeDCatalogItem = async (externalId) => {
+  setThreeDCatalogStatus('Baixando, validando e otimizando o modelo...');
+  const response = await authorizedFetch(
+    `/api/admin/3d-catalog/${encodeURIComponent(externalId)}/import`,
+    { method: 'POST', body: JSON.stringify({}) }
+  );
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    await handlePlatformCreditsExhausted(payload);
+    throw new Error(payload.message || 'Não foi possível importar este modelo.');
+  }
+  syncProfessorCreditsFromPayload(payload);
+  await loadThreeDAssetLibrary();
+  updateActiveThreeDScene({ assetId: payload.asset?.id || '', enabled: true });
+  setThreeDCatalogStatus('Modelo importado, otimizado e aplicado ao slide atual.');
+};
+
+const loadThreeDAssetLibrary = async () => {
+  try {
+    const response = await authorizedFetch('/api/admin/3d-assets');
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.message || 'Não foi possível listar os modelos 3D.');
+    threeDAssetLibrary = Array.isArray(payload.assets) ? payload.assets : [];
+    renderThreeDAssetLibrary();
+    syncThreeDPanel();
+  } catch (error) {
+    const status = document.getElementById('threeDUploadStatus');
+    if (status) status.textContent = error.message;
+  }
+};
+
+const deleteSelectedThreeDAsset = async () => {
+  const scene = getActiveThreeDScene();
+  const asset = threeDAssetLibrary.find((entry) => entry.id === scene.assetId);
+  if (!asset) return;
+  if (!window.confirm('Deseja excluir permanentemente este modelo? Modelos usados em módulos publicados não podem ser removidos.')) return;
+  const response = await authorizedFetch(`/api/admin/3d-assets/${encodeURIComponent(asset.id)}`, { method: 'DELETE' });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.message || 'Não foi possível remover o modelo.');
+  builderState.slides.forEach((slide) => {
+    if (slide?.threeDScene?.assetId === asset.id) {
+      slide.threeDScene = normalizeThreeDScene({
+        ...slide.threeDScene,
+        assetId: '',
+        animationIndex: -1,
+        animationPlaying: false
+      });
+    }
+  });
+  await loadThreeDAssetLibrary();
+  commitHistoryState();
+  render();
+  const status = document.getElementById('threeDUploadStatus');
+  if (status) status.textContent = 'Modelo excluído e espaço liberado.';
+};
+
+const uploadThreeDModel = async (file) => {
+  if (!file) return;
+  const status = document.getElementById('threeDUploadStatus');
+  const button = document.getElementById('threeDImportBtn');
+  if (file.size > 100 * 1024 * 1024) {
+    if (status) status.textContent = 'O arquivo excede o limite de 100 MB.';
+    return;
+  }
+  const formData = new FormData();
+  formData.append('model', file, file.name);
+  button?.setAttribute('disabled', 'disabled');
+  if (status) status.textContent = 'Validando e otimizando o modelo. Isso pode levar alguns segundos...';
+  try {
+    const response = await authorizedFetch('/api/admin/3d-assets', { method: 'POST', body: formData });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload.asset?.id) {
+      await handlePlatformCreditsExhausted(payload);
+      throw new Error(payload.message || 'Não foi possível importar o modelo 3D.');
+    }
+    syncProfessorCreditsFromPayload(payload);
+    await loadThreeDAssetLibrary();
+    updateActiveThreeDScene({ assetId: payload.asset.id, enabled: true });
+    if (status) {
+      status.textContent = payload.duplicate
+        ? 'Este modelo já existia e foi reutilizado sem consumir espaço novamente.'
+        : `Modelo pronto: ${formatThreeDAssetStats(payload.asset)}.`;
+    }
+  } catch (error) {
+    if (status) status.textContent = error.message || 'Falha ao importar o modelo 3D.';
+  } finally {
+    button?.removeAttribute('disabled');
+    const input = document.getElementById('threeDModelInput');
+    if (input) input.value = '';
+  }
+};
+
+const beginSelectedElementThreeDAttachment = () => {
+  const slide = getActiveSlide();
+  const element = slide?.elements?.find((entry) => entry.id === selectedElementId);
+  if (!slide?.threeDScene?.enabled || !element || !threeDStageController) return;
+  if (!element.attachment3d?.fallback2d) {
+    element.attachment3d = {
+      ...(element.attachment3d || {}),
+      fallback2d: { x: Number(element.x) || 0, y: Number(element.y) || 0 }
+    };
+  }
+  if (threeDStageController.beginAnchorPick(element.id)) {
+    const status = document.getElementById('element3dAttachmentStatus');
+    if (status) status.textContent = 'Agora clique na superfície do objeto 3D.';
+  }
+};
+
+const detachSelectedElementFromThreeD = () => {
+  const element = getActiveSlide()?.elements?.find((entry) => entry.id === selectedElementId);
+  if (!element?.attachment3d) return;
+  const fallback = element.attachment3d.fallback2d;
+  if (fallback) {
+    element.x = Number(fallback.x) || 0;
+    element.y = Number(fallback.y) || 0;
+  }
+  delete element.attachment3d;
+  renderSlide();
+  updateElementInspector(element);
+  commitHistoryState();
+};
+
+const sendLiveThreeDTransform = (phase = 'move', scene = getActiveThreeDScene()) => {
+  if (
+    !liveStageShareState.active ||
+    !liveStageShareState.shareId ||
+    liveStageShareState.manualPublish ||
+    !getActiveSlide()?.threeDScene?.enabled
+  ) {
+    return;
+  }
+  const send = async () => {
+    liveThreeDTransformTimer = null;
+    liveThreeDTransformLastSentAt = Date.now();
+    liveThreeDTransformSequence += 1;
+    try {
+      await authorizedFetch(
+        `/api/admin/live-stage-shares/${encodeURIComponent(liveStageShareState.shareId)}/3d-transform`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            slideId: getActiveSlide()?.id,
+            quaternion: normalizeThreeDScene(scene).quaternion,
+            position: normalizeThreeDScene(scene).position,
+            zoom: normalizeThreeDScene(scene).zoom,
+            sequence: liveThreeDTransformSequence
+          })
+        }
+      );
+    } catch (error) {
+      console.warn('Não foi possível sincronizar a rotação 3D.', error);
+    }
+  };
+  const elapsed = Date.now() - liveThreeDTransformLastSentAt;
+  if (phase === 'end' || elapsed >= 100) {
+    if (liveThreeDTransformTimer) clearTimeout(liveThreeDTransformTimer);
+    void send();
+    return;
+  }
+  if (!liveThreeDTransformTimer) {
+    liveThreeDTransformTimer = setTimeout(() => void send(), Math.max(0, 100 - elapsed));
+  }
+};
+
+const ensureThreeDStageController = () => {
+  if (threeDStageController) return threeDStageController;
+  threeDStageController = createThreeDStageController({
+    mode: 'creator',
+    loadAssetBuffer: async (assetId, variant) => {
+      const response = await authorizedFetch(
+        `/api/admin/3d-assets/${encodeURIComponent(assetId)}/file?variant=${encodeURIComponent(variant)}`
+      );
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.message || 'Não foi possível carregar o modelo 3D.');
+      }
+      return response.arrayBuffer();
+    },
+    canControl: () => true,
+    shouldAnimateAttachedElement: () => previewState.active,
+    onSceneChange: (scene, { transient } = {}) => {
+      if (previewState.active) return;
+      const slide = getActiveSlide();
+      if (slide) slide.threeDScene = normalizeThreeDScene(scene);
+      syncThreeDPanel();
+      if (!transient) commitHistoryState();
+      if (liveStageShareState.active && liveStageShareState.manualPublish) scheduleLiveStageShareSync();
+    },
+    onTransformInteraction: (phase, scene) => sendLiveThreeDTransform(phase, scene),
+    onRender: () => {
+      const selectedElement = getActiveSlide()?.elements?.find((entry) => entry.id === selectedElementId);
+      if (!previewState.active && normalizeThreeDAttachment(selectedElement?.attachment3d)) {
+        if (handleLayer) {
+          syncAttachedElementHandles();
+        } else {
+          renderHandles();
+        }
+      }
+    },
+    onAnchorPicked: (elementId, attachment) => {
+      if (previewState.active) return;
+      const element = getActiveSlide()?.elements?.find((entry) => entry.id === elementId);
+      if (!element) return;
+      const fallback2d = element.attachment3d?.fallback2d || {
+        x: Number(element.x) || 0,
+        y: Number(element.y) || 0
+      };
+      element.attachment3d = { ...attachment, fallback2d };
+      applyStageConstraints(element);
+      renderSlide();
+      updateElementInspector(element);
+      commitHistoryState();
+    }
+  });
+  return threeDStageController;
+};
+
+const getSortedElementLayers = (slide = getActiveSlide()) =>
+  (slide?.elements || [])
+    .map((element, index) => ({ element, index }))
+    .sort((left, right) => {
+      const layerDifference = (Number(right.element.zIndex) || 0) - (Number(left.element.zIndex) || 0);
+      return layerDifference || right.index - left.index;
+    })
+    .map(({ element }) => element);
+
+const setElementLayersStatus = (message = '') => {
+  if (elementLayersStatus) {
+    elementLayersStatus.textContent = message;
+  }
+};
+
+const setElementLayersPanelCollapsed = (collapsed, { persist = true } = {}) => {
+  if (!elementLayersPanel || !elementLayersToggleBtn) return;
+  elementLayersPanel.classList.toggle('is-collapsed', Boolean(collapsed));
+  elementLayersToggleBtn.setAttribute('aria-expanded', String(!collapsed));
+  elementLayersToggleBtn.title = collapsed ? 'Abrir camadas' : 'Recolher camadas';
+  const accessibleLabel = elementLayersToggleBtn.querySelector('.sr-only');
+  if (accessibleLabel) {
+    accessibleLabel.textContent = collapsed ? 'Abrir camadas' : 'Recolher camadas';
+  }
+  if (persist) {
+    try {
+      localStorage.setItem(ELEMENT_LAYERS_PANEL_STORAGE_KEY, collapsed ? '1' : '0');
+    } catch (error) {
+      console.warn('Não foi possível salvar o estado do painel de camadas.', error);
+    }
+  }
+};
+
+const restoreElementLayersPanelState = () => {
+  let storedValue = null;
+  try {
+    storedValue = localStorage.getItem(ELEMENT_LAYERS_PANEL_STORAGE_KEY);
+  } catch (error) {
+    console.warn('Não foi possível restaurar o painel de camadas.', error);
+  }
+  const collapseByDefault = window.matchMedia('(max-width: 960px)').matches;
+  setElementLayersPanelCollapsed(storedValue == null ? collapseByDefault : storedValue === '1', { persist: false });
+};
+
+const renderElementLayersPanel = () => {
+  if (!elementLayersPanel || !elementLayersList) return;
+  const hidden = previewState.active;
+  elementLayersPanel.classList.toggle('is-hidden', hidden);
+  elementLayersPanel.setAttribute('aria-hidden', String(hidden));
+  if (hidden) return;
+
+  const slide = getActiveSlide();
+  const elements = getSortedElementLayers(slide);
+  const previousScrollTop = elementLayersList.scrollTop;
+  if (!elements.length) {
+    elementLayersList.innerHTML = '<p class="element-layers-empty">Este slide ainda não tem elementos.</p>';
+    return;
+  }
+
+  elementLayersList.innerHTML = elements
+    .map((element, index) => {
+      const typeDisplay = getElementTypeDisplay(element);
+      const displayName = getElementLayerDisplayName(element);
+      const isRenaming = renamingLayerElementId === element.id;
+      const hiddenBadge = element.initiallyHidden
+        ? '<span class="element-layer-badge is-hidden-state">Oculto</span>'
+        : '';
+      const attachedBadge = normalizeThreeDAttachment(element.attachment3d)
+        ? '<span class="element-layer-badge is-three-d">3D</span>'
+        : '';
+      const layer = Number(element.zIndex) || 0;
+      return `
+        <div class="element-layer-row${selectedElementId === element.id ? ' is-selected' : ''}"
+          role="listitem" tabindex="0" data-layer-element-id="${escapeAttribute(element.id)}"
+          aria-label="${escapeAttribute(`${displayName}, camada ${layer}`)}">
+          <button class="element-layer-drag" type="button" data-layer-drag-handle
+            aria-label="Arrastar ${escapeAttribute(displayName)}" title="Arrastar camada">⋮⋮</button>
+          <span class="element-layer-type-icon" aria-hidden="true">${escapeHtml(typeDisplay.icon)}</span>
+          <span class="element-layer-copy">
+            ${isRenaming
+              ? `<input class="element-layer-name-input" data-layer-name-input
+                  value="${escapeAttribute(String(element.editorName || displayName))}"
+                  maxlength="${ELEMENT_LAYER_NAME_MAX_LENGTH}" aria-label="Nome da camada" />`
+              : `<strong class="element-layer-name" title="${escapeAttribute(displayName)}">${escapeHtml(displayName)}</strong>`}
+            <span class="element-layer-meta">
+              <span>${escapeHtml(typeDisplay.label)}</span>
+              ${hiddenBadge}
+              ${attachedBadge}
+            </span>
+          </span>
+          <span class="element-layer-actions">
+            <button class="element-layer-action" type="button" data-layer-move="-1"
+              ${index === 0 ? 'disabled' : ''} aria-label="Trazer uma camada para frente" title="Para frente">↑</button>
+            <button class="element-layer-action" type="button" data-layer-move="1"
+              ${index === elements.length - 1 ? 'disabled' : ''} aria-label="Enviar uma camada para trás" title="Para trás">↓</button>
+            <button class="element-layer-rename" type="button" data-layer-rename
+              aria-label="Renomear ${escapeAttribute(displayName)}" title="Renomear camada">Nome</button>
+          </span>
+        </div>`;
+    })
+    .join('');
+  elementLayersList.scrollTop = previousScrollTop;
+
+  if (renamingLayerElementId) {
+    requestAnimationFrame(() => {
+      const input = elementLayersList?.querySelector(
+        `[data-layer-element-id="${CSS.escape(renamingLayerElementId)}"] [data-layer-name-input]`
+      );
+      if (input instanceof HTMLInputElement) {
+        input.focus();
+        input.select();
+      }
+    });
+  }
+};
+
+const applyElementLayerOrder = (frontToBackIds, { commit = true } = {}) => {
+  const slide = getActiveSlide();
+  if (!slide || !Array.isArray(frontToBackIds)) return false;
+  const elementsById = new Map((slide.elements || []).map((element) => [element.id, element]));
+  const orderedIds = frontToBackIds.filter((id) => elementsById.has(id));
+  getSortedElementLayers(slide).forEach((element) => {
+    if (!orderedIds.includes(element.id)) orderedIds.push(element.id);
+  });
+  let changed = false;
+  orderedIds.forEach((id, index) => {
+    const element = elementsById.get(id);
+    const nextLayer = orderedIds.length - index;
+    if ((Number(element.zIndex) || 0) !== nextLayer) {
+      element.zIndex = nextLayer;
+      changed = true;
+    }
+  });
+  if (!changed) {
+    renderElementLayersPanel();
+    return false;
+  }
+  const selectedElement = slide.elements.find((element) => element.id === selectedElementId) || null;
+  renderSlide();
+  updateElementInspector(selectedElement);
+  if (commit) commitHistoryState();
+  return true;
+};
+
+const moveElementLayerFromPanel = (elementId, direction) => {
+  const ids = getSortedElementLayers().map((element) => element.id);
+  const currentIndex = ids.indexOf(elementId);
+  const nextIndex = currentIndex + Number(direction);
+  if (currentIndex < 0 || nextIndex < 0 || nextIndex >= ids.length) return;
+  [ids[currentIndex], ids[nextIndex]] = [ids[nextIndex], ids[currentIndex]];
+  applyElementLayerOrder(ids);
+};
+
+const saveElementLayerName = (elementId, rawName) => {
+  const slide = getActiveSlide();
+  const element = slide?.elements?.find((item) => item.id === elementId);
+  if (!element) return false;
+  const nextName = String(rawName || '').trim().slice(0, ELEMENT_LAYER_NAME_MAX_LENGTH);
+  if (nextName) {
+    const normalizedName = nextName.toLocaleLowerCase('pt-BR');
+    const duplicate = slide.elements.some(
+      (item) =>
+        item.id !== elementId &&
+        getElementLayerDisplayName(item).trim().toLocaleLowerCase('pt-BR') === normalizedName
+    );
+    if (duplicate) {
+      setElementLayersStatus('Use um nome diferente para identificar esta camada.');
+      return false;
+    }
+    element.editorName = nextName;
+  } else {
+    delete element.editorName;
+  }
+  renamingLayerElementId = null;
+  setElementLayersStatus('');
+  renderSlide();
+  updateElementInspector(element);
+  commitHistoryState();
+  return true;
+};
+
+const clearElementLayerDropIndicators = () => {
+  elementLayersList
+    ?.querySelectorAll('.is-drop-before, .is-drop-after')
+    .forEach((row) => row.classList.remove('is-drop-before', 'is-drop-after'));
+};
+
+const stopElementLayerPointerDrag = (event, { cancelled = false } = {}) => {
+  const state = elementLayerDragState;
+  if (!state) return;
+  document.removeEventListener('pointermove', state.onMove);
+  document.removeEventListener('pointerup', state.onEnd);
+  document.removeEventListener('pointercancel', state.onCancel);
+  clearElementLayerDropIndicators();
+  state.row.classList.remove('is-dragging');
+  elementLayerDragState = null;
+  suppressElementLayerRowClick = true;
+  setTimeout(() => {
+    suppressElementLayerRowClick = false;
+  }, 0);
+  if (cancelled) {
+    renderElementLayersPanel();
+    return;
+  }
+  const nextOrder = Array.from(elementLayersList?.querySelectorAll('[data-layer-element-id]') || [])
+    .map((row) => row.dataset.layerElementId)
+    .filter(Boolean);
+  applyElementLayerOrder(nextOrder);
+  event?.preventDefault?.();
+};
+
+const startElementLayerPointerDrag = (event, handle) => {
+  if (event.button !== 0 || !elementLayersList) return;
+  const row = handle.closest('[data-layer-element-id]');
+  if (!row) return;
+  event.preventDefault();
+  row.classList.add('is-dragging');
+
+  const onMove = (moveEvent) => {
+    if (!elementLayerDragState || moveEvent.pointerId !== event.pointerId) return;
+    moveEvent.preventDefault();
+    const listRect = elementLayersList.getBoundingClientRect();
+    const scrollZone = 38;
+    if (moveEvent.clientY < listRect.top + scrollZone) elementLayersList.scrollTop -= 12;
+    if (moveEvent.clientY > listRect.bottom - scrollZone) elementLayersList.scrollTop += 12;
+    const hovered = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY)
+      ?.closest?.('[data-layer-element-id]');
+    clearElementLayerDropIndicators();
+    if (!hovered || hovered === row || hovered.parentElement !== elementLayersList) return;
+    const hoveredRect = hovered.getBoundingClientRect();
+    const placeAfter = moveEvent.clientY > hoveredRect.top + hoveredRect.height / 2;
+    hovered.classList.add(placeAfter ? 'is-drop-after' : 'is-drop-before');
+    elementLayersList.insertBefore(row, placeAfter ? hovered.nextSibling : hovered);
+  };
+  const onEnd = (endEvent) => {
+    if (endEvent.pointerId !== event.pointerId) return;
+    stopElementLayerPointerDrag(endEvent);
+  };
+  const onCancel = (cancelEvent) => {
+    if (cancelEvent.pointerId !== event.pointerId) return;
+    stopElementLayerPointerDrag(cancelEvent, { cancelled: true });
+  };
+  elementLayerDragState = { row, onMove, onEnd, onCancel };
+  document.addEventListener('pointermove', onMove, { passive: false });
+  document.addEventListener('pointerup', onEnd);
+  document.addEventListener('pointercancel', onCancel);
+};
+
 const renderSlide = () => {
   if (!slideCanvas) return;
   const slide = previewState.active ? getPreviewActiveSlide() : getActiveSlide();
@@ -11254,6 +13235,7 @@ const renderSlide = () => {
       previewState.activeTimedSlideId = null;
     }
     slideCanvas.innerHTML = '';
+    renderElementLayersPanel();
     return;
   }
   if (previewState.active) {
@@ -11288,9 +13270,21 @@ const renderSlide = () => {
   );
   if (previewState.active) {
     snapshotPreviewMediaState(slide);
+  } else {
+    snapshotBuilderMediaState(slide);
   }
   slideCanvas.innerHTML = '';
   setStageBackground(slide);
+  const threeDEnabled = Boolean(slide?.threeDScene?.enabled);
+  if (threeDEnabled) {
+    const controller = ensureThreeDStageController();
+    void controller.mount(slideCanvas, slide).then(() => {
+      syncThreeDAnimationOptions();
+      controller.requestRender();
+    });
+  } else {
+    threeDStageController?.unmount();
+  }
   {
     const branchConnectors = renderBlockBranchConnectors(slide, {
       interactive: !previewState.active,
@@ -11304,7 +13298,7 @@ const renderSlide = () => {
     syncBackgroundInputs(slide);
   }
   const deferredCaptionOverlays = [];
-  if (!slide.elements.length) {
+  if (!slide.elements.length && !threeDEnabled) {
     if (previewState.active) {
       clearPreviewTimedSlideTriggerTimers();
     }
@@ -11322,6 +13316,7 @@ const renderSlide = () => {
       destroyPenOverlay();
     }
     updateBuilderStageSize();
+    renderElementLayersPanel();
     return;
   }
   slide.elements
@@ -11329,8 +13324,19 @@ const renderSlide = () => {
     .sort((a, b) => (Number(a.zIndex) || 0) - (Number(b.zIndex) || 0))
     .filter((element) => !previewState.active || !isPreviewBlockBranchHidden(slide, element))
     .forEach((element) => {
+      if (!previewState.active && threeDEnabled && normalizeThreeDAttachment(element.attachment3d)) {
+        applyStageConstraints(element);
+      }
       const node = previewState.active ? createPreviewElementNode(element, slide) : renderElementNode(element);
-      slideCanvas.appendChild(node);
+      const attachedToThreeD = threeDEnabled
+        && normalizeThreeDAttachment(element.attachment3d)
+        && threeDStageController?.attachElement(node, element);
+      if (!attachedToThreeD) {
+        slideCanvas.appendChild(node);
+      } else if (!previewState.active && node instanceof Element) {
+        node.dataset.hasMenuTrigger = 'true';
+        node.appendChild(createElementMenuTrigger(element, { skipPositioning: true }));
+      }
       if (['audio', 'video'].includes(element.type)) {
         const mediaNode = getPreviewMediaNode(node);
         const overlayNode = createMediaCaptionOverlayNode(element, mediaNode, {
@@ -11389,12 +13395,15 @@ const renderSlide = () => {
     schedulePreviewTimedSlideTriggers(slide);
   }
   updateBuilderStageSize();
+  threeDStageController?.requestRender();
+  if (!previewState.active) syncThreeDPanel();
   if (!previewState.active) {
     scheduleLiveStageShareSync();
     if (liveStageShareState.active) {
       redrawStudentLiveDrawingOverlay();
     }
   }
+  renderElementLayersPanel();
 };
 
 const clearHandleLayer = () => {
@@ -11592,7 +13601,19 @@ const renderHandles = () => {
   if (!element) {
     return;
   }
-  const elementBox = getElementBox(element);
+  const attachment = getActiveSlide()?.threeDScene?.enabled
+    ? normalizeThreeDAttachment(element.attachment3d)
+    : null;
+  const anchoredNode = attachment
+    ? slideCanvas.querySelector(
+        `.three-d-anchored-element [data-element-id="${escapeAttributeSelectorValue(element.id)}"]`
+      )
+    : null;
+  const anchoredWrapper = anchoredNode?.closest('.three-d-anchored-element');
+  if (attachment && (!anchoredWrapper || getComputedStyle(anchoredWrapper).visibility === 'hidden')) {
+    return;
+  }
+  const elementBox = attachment ? getStageRelativeElementBox(element) : getElementBox(element);
   const handleMetrics = getElementHandleMetrics();
   const resizeHalf = handleMetrics.resizeSize / 2;
   const rotateHalf = handleMetrics.rotateSize / 2;
@@ -11614,7 +13635,9 @@ const renderHandles = () => {
   } else if (element.shape === 'triangle' || element.shape === 'arrow') {
     selectionOutline.style.borderRadius = '0.4rem';
   }
-  handleLayer.appendChild(selectionOutline);
+  if (!attachment) {
+    handleLayer.appendChild(selectionOutline);
+  }
   const corners = ['nw', 'ne', 'sw', 'se'];
   corners.forEach((direction) => {
     const handle = document.createElement('div');
@@ -11674,6 +13697,41 @@ const renderHandles = () => {
   }
   slideCanvas.appendChild(handleLayer);
 };
+
+function syncAttachedElementHandles() {
+  if (!handleLayer || !slideCanvas || !selectedElementId) return;
+  const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId);
+  if (!normalizeThreeDAttachment(element?.attachment3d)) return;
+  const anchoredNode = slideCanvas.querySelector(
+    `.three-d-anchored-element [data-element-id="${escapeAttributeSelectorValue(element.id)}"]`
+  );
+  const anchoredWrapper = anchoredNode?.closest('.three-d-anchored-element');
+  const hidden = !anchoredWrapper || getComputedStyle(anchoredWrapper).visibility === 'hidden';
+  handleLayer.style.display = hidden ? 'none' : '';
+  if (hidden) return;
+
+  const elementBox = getStageRelativeElementBox(element);
+  const handleMetrics = getElementHandleMetrics();
+  const resizeHalf = handleMetrics.resizeSize / 2;
+  const rotateHalf = handleMetrics.rotateSize / 2;
+  const left = elementBox.left || 0;
+  const top = elementBox.top || 0;
+  const width = Math.max(MIN_ELEMENT_SIZE, Number(elementBox.width) || MIN_ELEMENT_SIZE);
+  const height = Math.max(MIN_ELEMENT_SIZE, Number(elementBox.height) || MIN_ELEMENT_SIZE);
+  handleLayer.querySelectorAll(':scope > .resize-handle:not(.caption-resize-handle):not(.rotate)')
+    .forEach((handle) => {
+      const direction = handle.dataset.direction || '';
+      const offsetX = direction.includes('e') ? width : 0;
+      const offsetY = direction.includes('s') ? height : 0;
+      handle.style.left = `${left + offsetX - resizeHalf}px`;
+      handle.style.top = `${top + offsetY - resizeHalf}px`;
+    });
+  const rotateHandle = handleLayer.querySelector(':scope > .resize-handle.rotate');
+  if (rotateHandle) {
+    rotateHandle.style.left = `${left + width / 2 - rotateHalf}px`;
+    rotateHandle.style.top = `${top - handleMetrics.rotateOffset}px`;
+  }
+}
 
 function setStageBackground(slide) {
   if (!slideCanvas) return;
@@ -11914,15 +13972,48 @@ function updateSlideBehavior() {
   scheduleLiveStageShareSync();
 }
 
+const getFaceVerificationSettingsFromInputs = () => {
+  const enabled = Boolean(moduleFaceVerificationToggle?.checked);
+  return {
+    enabled,
+    verifyOnEntry: enabled && moduleFaceEntryToggle?.checked !== false,
+    verifyDuringModule: enabled && Boolean(moduleFacePeriodicToggle?.checked),
+    verifyOnCompletion: enabled && Boolean(moduleFaceCompletionToggle?.checked),
+    schemaVersion: 1
+  };
+};
+
+const syncFaceVerificationUi = () => {
+  const enabled = Boolean(moduleFaceVerificationToggle?.checked);
+  moduleFaceVerificationOptions?.classList.toggle('hidden', !enabled);
+  if (modulePublicToggle) {
+    modulePublicToggle.disabled = enabled;
+  }
+  if (enabled && modulePublicToggle?.checked) {
+    modulePublicToggle.checked = false;
+  }
+};
+
+const hydrateFaceVerificationInputs = () => {
+  const settings = normalizeTemplateModuleSettings(builderState.moduleSettings).faceVerification;
+  if (moduleFaceVerificationToggle) moduleFaceVerificationToggle.checked = settings.enabled;
+  if (moduleFaceEntryToggle) moduleFaceEntryToggle.checked = settings.verifyOnEntry;
+  if (moduleFacePeriodicToggle) moduleFacePeriodicToggle.checked = settings.verifyDuringModule;
+  if (moduleFaceCompletionToggle) moduleFaceCompletionToggle.checked = settings.verifyOnCompletion;
+  syncFaceVerificationUi();
+};
+
 function updateModuleBehavior() {
+  syncFaceVerificationUi();
   builderState.moduleSettings = {
     ...(builderState.moduleSettings || {}),
     lockNextModuleUntilCompleted: Boolean(moduleLockNextToggle?.checked),
     requireQuizCompletion: Boolean(moduleRequireQuizToggle?.checked),
     isPublic: Boolean(modulePublicToggle?.checked),
     coverImage: getModuleCoverValue(),
-    allowStudentPen: moduleHasStudentPaintEnabled(builderState.slides || []),
-    allowLiveCursors: allowLiveCursorsToggle?.checked !== false
+    allowStudentPen: getSecurityStudentPenEnabled(),
+    allowLiveCursors: allowLiveCursorsToggle?.checked !== false,
+    faceVerification: getFaceVerificationSettingsFromInputs()
   };
   syncPublicModuleLinkUi();
   syncModuleCoverPreview();
@@ -11935,10 +14026,18 @@ const resetBuilder = () => {
   builderState.activeSlideId = null;
   builderState.moduleSettings = {
     lockNextModuleUntilCompleted: false,
+    requireQuizCompletion: false,
     isPublic: false,
     coverImage: '',
     allowStudentPen: false,
-    allowLiveCursors: true
+    allowLiveCursors: true,
+    faceVerification: {
+      enabled: false,
+      verifyOnEntry: true,
+      verifyDuringModule: false,
+      verifyOnCompletion: false,
+      schemaVersion: 1
+    }
   };
   if (moduleCoverUrlInput) {
     moduleCoverUrlInput.value = '';
@@ -11946,9 +14045,14 @@ const resetBuilder = () => {
   if (moduleLockNextToggle) {
     moduleLockNextToggle.checked = false;
   }
+  if (moduleRequireQuizToggle) {
+    moduleRequireQuizToggle.checked = false;
+  }
   if (modulePublicToggle) {
     modulePublicToggle.checked = false;
   }
+  hydrateFaceVerificationInputs();
+  syncSecurityStudentPenToggle();
   if (allowLiveCursorsToggle) {
     allowLiveCursorsToggle.checked = true;
   }
@@ -12053,19 +14157,10 @@ const startEditingModule = (courseId, moduleId) => {
   moduleDescriptionInput.value = module.description || '';
   builderState.slides = JSON.parse(JSON.stringify(module.builder_data?.slides || []));
   builderState.stageSize = module.builder_data?.stageSize || builderState.stageSize;
-  builderState.moduleSettings = {
-    lockNextModuleUntilCompleted: Boolean(module.builder_data?.moduleSettings?.lockNextModuleUntilCompleted),
-    requireQuizCompletion: Boolean(module.builder_data?.moduleSettings?.requireQuizCompletion),
-    isPublic: Boolean(module.builder_data?.moduleSettings?.isPublic),
-    coverImage: typeof module.builder_data?.moduleSettings?.coverImage === 'string' ? module.builder_data.moduleSettings.coverImage : '',
-    allowStudentPen:
-      module.builder_data?.moduleSettings?.allowStudentPen === true ||
-      module.builder_data?.moduleSettings?.allowStudentPen === 'true' ||
-      moduleHasStudentPaintEnabled(module.builder_data?.slides || []),
-    allowLiveCursors:
-      module.builder_data?.moduleSettings?.allowLiveCursors !== false &&
-      module.builder_data?.moduleSettings?.allowLiveCursors !== 'false'
-  };
+  builderState.moduleSettings = normalizeTemplateModuleSettings(module.builder_data?.moduleSettings);
+  builderState.moduleSettings.allowStudentPen =
+    builderState.moduleSettings.allowStudentPen ||
+    moduleHasStudentPaintEnabled(module.builder_data?.slides || []);
   if (moduleCoverUrlInput) {
     moduleCoverUrlInput.value = builderState.moduleSettings.coverImage || '';
   }
@@ -12078,6 +14173,8 @@ const startEditingModule = (courseId, moduleId) => {
   if (modulePublicToggle) {
     modulePublicToggle.checked = Boolean(builderState.moduleSettings.isPublic);
   }
+  hydrateFaceVerificationInputs();
+  syncSecurityStudentPenToggle();
   syncModuleCoverPreview();
   setPublicModuleLinkState(
     builderState.moduleSettings.isPublic
@@ -12281,6 +14378,7 @@ function updateElementInspector(element) {
       removeSelectedElementBtn.disabled = true;
     }
     selectedMotionFrameIndex = -1;
+    syncThreeDAttachmentControls(null);
     updateHistoryButtons();
     return;
   }
@@ -12368,6 +14466,7 @@ function updateElementInspector(element) {
     removeSelectedElementBtn.disabled = false;
   }
   selectedMotionFrameIndex = Array.isArray(element.motionFrames) ? Math.min(selectedMotionFrameIndex, element.motionFrames.length - 1) : -1;
+  syncThreeDAttachmentControls(element);
   updateHistoryButtons();
 }
 
@@ -12439,31 +14538,32 @@ const updateSelectedElementLayer = (mode) => {
   if (!slide || !selectedElementId) {
     return;
   }
-  const element = slide.elements.find((child) => child.id === selectedElementId);
-  if (!element) {
+  const orderedIds = getSortedElementLayers(slide).map((element) => element.id);
+  const currentIndex = orderedIds.indexOf(selectedElementId);
+  if (currentIndex < 0) {
     return;
   }
-  const bounds = getElementLayerBounds(slide);
-  const currentLayer = Number(element.zIndex) || 0;
+  let nextIndex = currentIndex;
   switch (mode) {
     case 'forward':
-      element.zIndex = currentLayer + 1;
+      nextIndex = Math.max(0, currentIndex - 1);
       break;
     case 'backward':
-      element.zIndex = Math.max(bounds.min - 1, currentLayer - 1);
+      nextIndex = Math.min(orderedIds.length - 1, currentIndex + 1);
       break;
     case 'front':
-      element.zIndex = bounds.max + 1;
+      nextIndex = 0;
       break;
     case 'back':
-      element.zIndex = bounds.min - 1;
+      nextIndex = orderedIds.length - 1;
       break;
     default:
       return;
   }
-  updateElementInspector(element);
-  renderSlide();
-  commitHistoryState();
+  if (nextIndex === currentIndex) return;
+  const [elementId] = orderedIds.splice(currentIndex, 1);
+  orderedIds.splice(nextIndex, 0, elementId);
+  applyElementLayerOrder(orderedIds);
 };
 
 const syncImageEditor = () => {
@@ -12568,7 +14668,7 @@ const syncAudioEditor = () => {
   if (!Number.isNaN(rotationValue)) {
     element.rotation = ((rotationValue % 360) + 360) % 360;
   }
-  element.audioVisible = Boolean(audioElementVisibleToggle?.checked);
+  element.audioVisible = true;
   element.audioLoop = Boolean(audioElementLoopToggle?.checked);
   element.collectStudentAudio = Boolean(audioCollectStudentAudioToggle?.checked);
   element.captionsEnabled = Boolean(audioCaptionEnabledToggle?.checked);
@@ -12731,6 +14831,12 @@ function applyElementStyles() {
     normalizeQuizElement(element);
   }
   applyStageConstraints(element);
+  if (widthSource && Number(widthSource.value) !== Number(element.width)) {
+    widthSource.value = String(element.width || '');
+  }
+  if (heightSource && Number(heightSource.value) !== Number(element.height)) {
+    heightSource.value = String(element.height || '');
+  }
   if (element.type === 'text') {
     syncTextEditorControls(element, { preserveContent: true });
   } else if (element.type === 'block') {
@@ -12783,9 +14889,12 @@ const saveModule = async () => {
           stageSize: currentStageSize,
           moduleSettings: {
             lockNextModuleUntilCompleted: Boolean(builderState.moduleSettings?.lockNextModuleUntilCompleted),
+            requireQuizCompletion: Boolean(builderState.moduleSettings?.requireQuizCompletion),
             isPublic: Boolean(builderState.moduleSettings?.isPublic),
             coverImage: getModuleCoverValue(),
-            allowStudentPen: moduleHasStudentPaintEnabled(slidesCopy)
+            allowStudentPen: getSecurityStudentPenEnabled(),
+            allowLiveCursors: builderState.moduleSettings?.allowLiveCursors !== false,
+            faceVerification: getFaceVerificationSettingsFromInputs()
           }
         }
       })
@@ -14018,6 +16127,8 @@ const generateCaptionsForSelectedVideo = async () => {
     return;
   }
   try {
+    videoCaptionToolsExpanded = true;
+    syncVideoCaptionEditorVisibility(element);
     setActionButtonBusy(videoGenerateCaptionsBtn, true, 'Gerar legenda automática', 'Gerando legenda...');
     const payload = await requestMediaTranscription(element.src, 'video');
     applyGeneratedCaptionsToElement(element, payload, 'video');
@@ -14044,6 +16155,8 @@ const extractAudioFromSelectedVideo = async () => {
     return;
   }
   try {
+    videoCaptionToolsExpanded = true;
+    syncVideoCaptionEditorVisibility(element);
     setActionButtonBusy(videoExtractAudioBtn, true, 'Extrair áudio do vídeo', 'Extraindo áudio...');
     const response = await authorizedFetch('/api/admin/media/extract-audio', {
       method: 'POST',
@@ -14511,6 +16624,16 @@ const createQuizNode = (element) => {
     }
     if (previewState.active && element.playSourceVideoOnValidate && element.sourceVideoElementId) {
       controlPreviewVideoElement(getPreviewActiveSlide(), element.sourceVideoElementId, 'playVideo');
+    }
+    if (isCorrect && element.hideOnCorrect) {
+      const activeSlide = getPreviewActiveSlide();
+      if (activeSlide && setPreviewElementVisibilityFromAction(activeSlide, element.id, true)) {
+        window.setTimeout(() => {
+          if (getPreviewActiveSlide()?.id === activeSlide.id) {
+            renderSlide();
+          }
+        }, 140);
+      }
     }
   });
   return node;
@@ -15096,6 +17219,11 @@ const createPreviewElementNode = (element, slide, options = {}) => {
   node.style.zIndex = String(element.zIndex ?? 0);
   if (renderState.width) node.style.width = `${renderState.width}px`;
   if (renderState.height) node.style.height = `${renderState.height}px`;
+  if (element.type === 'text' && element.isRuntimeGenerated) {
+    node.style.minWidth = '0';
+    node.style.boxSizing = 'border-box';
+    node.style.overflow = 'hidden';
+  }
   if (element.textColor) node.style.color = element.textColor;
   if (element.fontSize) node.style.fontSize = `${element.fontSize}px`;
   if (element.fontFamily) node.style.fontFamily = element.fontFamily;
@@ -15159,6 +17287,7 @@ const renderElementNode = (element) => {
           mediaNode.src = element.src || '';
           applyPreviewAudioPresentation(mediaNode, element, { authoring: true });
           node = wrapMediaNodeWithCaptions(mediaNode, element);
+          restoreBuilderMediaState(getActiveSlide(), element, node);
         }
       }
       break;
@@ -15183,6 +17312,7 @@ const renderElementNode = (element) => {
         mediaNode.src = element.src || '';
         attachPreviewVideoTimedTrigger(mediaNode, element);
         node = wrapMediaNodeWithCaptions(mediaNode, element);
+        restoreBuilderMediaState(getActiveSlide(), element, node);
       }
       break;
     case 'camera':
@@ -15532,6 +17662,48 @@ const enableDrag = (node, element) => {
     event.preventDefault();
     showElementMenuTrigger(null);
     pointerId = event.pointerId;
+    const attachment = normalizeThreeDAttachment(element?.attachment3d);
+    if (attachment) {
+      event.stopPropagation();
+      const moveAttached = (moveEvent) => {
+        if (moveEvent.pointerId !== pointerId) return;
+        moveEvent.preventDefault();
+        const nextAttachment = threeDStageController?.moveAttachedElement(element.id, moveEvent);
+        if (!nextAttachment) return;
+        element.attachment3d = {
+          ...nextAttachment,
+          fallback2d: attachment.fallback2d || nextAttachment.fallback2d || null
+        };
+        updateElementInspector(element);
+      };
+      const endAttachedDrag = (endEvent) => {
+        if (endEvent.pointerId !== pointerId) return;
+        document.removeEventListener('pointermove', moveAttached);
+        document.removeEventListener('pointerup', endAttachedDrag);
+        document.removeEventListener('pointercancel', endAttachedDrag);
+        try {
+          node.releasePointerCapture(pointerId);
+        } catch (e) {
+          // The CSS3D node may be rebuilt after a resize while the pointer is active.
+        }
+        pointerId = undefined;
+        node.style.cursor = 'grab';
+        commitHistoryState();
+        scheduleLiveStageShareSync();
+      };
+      try {
+        if (node.isConnected && pointerId !== undefined) {
+          node.setPointerCapture(pointerId);
+        }
+      } catch (e) {
+        // Movement still works through the document listeners when capture is unavailable.
+      }
+      node.style.cursor = 'grabbing';
+      document.addEventListener('pointermove', moveAttached);
+      document.addEventListener('pointerup', endAttachedDrag);
+      document.addEventListener('pointercancel', endAttachedDrag);
+      return;
+    }
     const pointer = getStagePointerPosition(event);
     offsetX = pointer.x - (element.x || 0);
     offsetY = pointer.y - (element.y || 0);
@@ -15625,6 +17797,7 @@ document.addEventListener('DOMContentLoaded', () => {
     window.location.href = 'login.html';
     return;
   }
+  loadCreatorPortalTheme();
   slideList = document.getElementById('slideList');
   builderMain = document.querySelector('.builder-main');
   builderPanel = document.getElementById('builderPanel');
@@ -15633,8 +17806,15 @@ document.addEventListener('DOMContentLoaded', () => {
   mobileBuilderPanelBackdrop = document.getElementById('mobileBuilderPanelBackdrop');
   slideCanvas = document.getElementById('slideCanvas');
   slideCanvasViewport = document.getElementById('slideCanvasViewport');
+  elementLayersPanel = document.getElementById('elementLayersPanel');
+  elementLayersList = document.getElementById('elementLayersList');
+  elementLayersToggleBtn = document.getElementById('elementLayersToggleBtn');
+  elementLayersStatus = document.getElementById('elementLayersStatus');
+  restoreElementLayersPanelState();
   slideName = document.getElementById('slideName');
   builderProfessorCreditsStatus = document.getElementById('builderProfessorCreditsStatus');
+  initCreatorPlatformCredits();
+  loadBuilderProfessorCreditsStatus();
   previewStageBtn = document.getElementById('previewStageBtn');
   moduleCourseSelect = document.getElementById('moduleCourseSelect');
   moduleTitleInput = document.getElementById('moduleTitleInput');
@@ -15649,6 +17829,11 @@ document.addEventListener('DOMContentLoaded', () => {
   moduleLockNextToggle = document.getElementById('moduleLockNextToggle');
   moduleRequireQuizToggle = document.getElementById('moduleRequireQuizToggle');
   modulePublicToggle = document.getElementById('modulePublicToggle');
+  moduleFaceVerificationToggle = document.getElementById('moduleFaceVerificationToggle');
+  moduleFaceVerificationOptions = document.getElementById('moduleFaceVerificationOptions');
+  moduleFaceEntryToggle = document.getElementById('moduleFaceEntryToggle');
+  moduleFacePeriodicToggle = document.getElementById('moduleFacePeriodicToggle');
+  moduleFaceCompletionToggle = document.getElementById('moduleFaceCompletionToggle');
   modulePublicLinkInput = document.getElementById('modulePublicLinkInput');
   copyPublicModuleLinkBtn = document.getElementById('copyPublicModuleLinkBtn');
   openPublicModuleLinkBtn = document.getElementById('openPublicModuleLinkBtn');
@@ -15657,6 +17842,7 @@ document.addEventListener('DOMContentLoaded', () => {
   publishLiveStageShareBtn = document.getElementById('publishLiveStageShareBtn');
   manualLivePublishToggle = document.getElementById('manualLivePublishToggle');
   allowLiveCursorsToggle = document.getElementById('allowLiveCursorsToggle');
+  allowLiveStudentPenToggle = document.getElementById('allowLiveStudentPenToggle');
   liveStageShareLinkInput = document.getElementById('liveStageShareLinkInput');
   copyLiveStageShareLinkBtn = document.getElementById('copyLiveStageShareLinkBtn');
   openLiveStageShareLinkBtn = document.getElementById('openLiveStageShareLinkBtn');
@@ -15890,7 +18076,6 @@ document.addEventListener('DOMContentLoaded', () => {
   floatingReplaceCounterStartInput = document.getElementById('floatingReplaceCounterStartInput');
   floatingReplaceCounterStepInput = document.getElementById('floatingReplaceCounterStepInput');
   floatingActionUrlInput = document.getElementById('floatingActionUrlInput');
-  floatingAudioVisibleToggle = document.getElementById('floatingAudioVisibleToggle');
   floatingAudioLoopToggle = document.getElementById('floatingAudioLoopToggle');
   floatingTextColorInput = document.getElementById('floatingTextColorInput');
   floatingTextBgColorInput = document.getElementById('floatingTextBgColorInput');
@@ -15938,7 +18123,6 @@ document.addEventListener('DOMContentLoaded', () => {
   videoTriggerReplaceModeSelect = document.getElementById('videoTriggerReplaceModeSelect');
   videoTriggerReplaceCounterStartInput = document.getElementById('videoTriggerReplaceCounterStartInput');
   videoTriggerReplaceCounterStepInput = document.getElementById('videoTriggerReplaceCounterStepInput');
-  videoTriggerAudioVisibleToggle = document.getElementById('videoTriggerAudioVisibleToggle');
   videoTriggerAudioLoopToggle = document.getElementById('videoTriggerAudioLoopToggle');
   videoTriggerTextColorInput = document.getElementById('videoTriggerTextColorInput');
   videoTriggerTextBgColorInput = document.getElementById('videoTriggerTextBgColorInput');
@@ -15971,7 +18155,11 @@ document.addEventListener('DOMContentLoaded', () => {
   videoTriggerQuizPointsInput = document.getElementById('videoTriggerQuizPointsInput');
   videoTriggerQuizLockOnWrongToggle = document.getElementById('videoTriggerQuizLockOnWrongToggle');
   videoTriggerQuizPlaySourceVideoToggle = document.getElementById('videoTriggerQuizPlaySourceVideoToggle');
+  videoTriggerQuizHideOnCorrectToggle = document.getElementById('videoTriggerQuizHideOnCorrectToggle');
   videoCaptionEnabledToggle = document.getElementById('videoCaptionEnabledToggle');
+  videoCaptionToolsPanel = document.getElementById('videoCaptionToolsPanel');
+  videoCaptionManualToggleBtn = document.getElementById('videoCaptionManualToggleBtn');
+  videoCaptionSegmentEditorFields = document.getElementById('videoCaptionSegmentEditorFields');
   videoCaptionPositionSelect = document.getElementById('videoCaptionPositionSelect');
   videoCaptionWidthInput = document.getElementById('videoCaptionWidthInput');
   videoCaptionFontSizeInput = document.getElementById('videoCaptionFontSizeInput');
@@ -15994,7 +18182,6 @@ document.addEventListener('DOMContentLoaded', () => {
   audioElementWidthInput = document.getElementById('audioElementWidthInput');
   audioElementHeightInput = document.getElementById('audioElementHeightInput');
   audioElementRotationInput = document.getElementById('audioElementRotationInput');
-  audioElementVisibleToggle = document.getElementById('audioElementVisibleToggle');
   audioElementLoopToggle = document.getElementById('audioElementLoopToggle');
   audioCollectStudentAudioToggle = document.getElementById('audioCollectStudentAudioToggle');
   audioCaptionEnabledToggle = document.getElementById('audioCaptionEnabledToggle');
@@ -16260,6 +18447,10 @@ document.addEventListener('DOMContentLoaded', () => {
   moduleLockNextToggle?.addEventListener('change', updateModuleBehavior);
   moduleRequireQuizToggle?.addEventListener('change', updateModuleBehavior);
   modulePublicToggle?.addEventListener('change', updateModuleBehavior);
+  moduleFaceVerificationToggle?.addEventListener('change', updateModuleBehavior);
+  moduleFaceEntryToggle?.addEventListener('change', updateModuleBehavior);
+  moduleFacePeriodicToggle?.addEventListener('change', updateModuleBehavior);
+  moduleFaceCompletionToggle?.addEventListener('change', updateModuleBehavior);
   syncPublicModuleLinkUi();
   syncLiveStageShareUi();
   updateModuleCoverModeUi();
@@ -16332,6 +18523,82 @@ document.addEventListener('DOMContentLoaded', () => {
   layerSendBackwardBtn?.addEventListener('click', () => updateSelectedElementLayer('backward'));
   layerBringToFrontBtn?.addEventListener('click', () => updateSelectedElementLayer('front'));
   layerSendToBackBtn?.addEventListener('click', () => updateSelectedElementLayer('back'));
+  elementLayersToggleBtn?.addEventListener('click', () => {
+    setElementLayersPanelCollapsed(!elementLayersPanel?.classList.contains('is-collapsed'));
+  });
+  elementLayersList?.addEventListener('pointerdown', (event) => {
+    const handle = event.target.closest?.('[data-layer-drag-handle]');
+    if (handle) startElementLayerPointerDrag(event, handle);
+  });
+  elementLayersList?.addEventListener('click', (event) => {
+    if (suppressElementLayerRowClick) return;
+    const row = event.target.closest?.('[data-layer-element-id]');
+    if (!row) return;
+    const elementId = row.dataset.layerElementId;
+    const moveButton = event.target.closest?.('[data-layer-move]');
+    if (moveButton) {
+      moveElementLayerFromPanel(elementId, Number(moveButton.dataset.layerMove));
+      return;
+    }
+    if (event.target.closest?.('[data-layer-rename]')) {
+      renamingLayerElementId = elementId;
+      setElementLayersStatus('');
+      renderElementLayersPanel();
+      return;
+    }
+    if (event.target.closest?.('button, input')) return;
+    selectElement(elementId, { openEditor: true });
+  });
+  elementLayersList?.addEventListener('dblclick', (event) => {
+    const row = event.target.closest?.('[data-layer-element-id]');
+    if (!row || event.target.closest?.('button, input')) return;
+    renamingLayerElementId = row.dataset.layerElementId;
+    setElementLayersStatus('');
+    renderElementLayersPanel();
+  });
+  elementLayersList?.addEventListener('keydown', (event) => {
+    const row = event.target.closest?.('[data-layer-element-id]');
+    if (!row) return;
+    const elementId = row.dataset.layerElementId;
+    const input = event.target.closest?.('[data-layer-name-input]');
+    if (input) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        if (!saveElementLayerName(elementId, input.value)) {
+          input.focus();
+          input.select();
+        }
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        input.dataset.cancelled = 'true';
+        renamingLayerElementId = null;
+        setElementLayersStatus('');
+        renderElementLayersPanel();
+      }
+      return;
+    }
+    if (event.target.closest?.('[data-layer-drag-handle]') && ['ArrowUp', 'ArrowDown'].includes(event.key)) {
+      event.preventDefault();
+      moveElementLayerFromPanel(elementId, event.key === 'ArrowUp' ? -1 : 1);
+      return;
+    }
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      selectElement(elementId, { openEditor: true });
+    }
+  });
+  elementLayersList?.addEventListener('focusout', (event) => {
+    const input = event.target.closest?.('[data-layer-name-input]');
+    if (!input || input.dataset.cancelled === 'true') return;
+    const row = input.closest('[data-layer-element-id]');
+    if (!row) return;
+    if (!saveElementLayerName(row.dataset.layerElementId, input.value)) {
+      requestAnimationFrame(() => {
+        input.focus();
+        input.select();
+      });
+    }
+  });
   removeImageBackgroundBtn?.addEventListener('click', removeBackgroundFromSelectedImage);
   imageReplaceSourceBtn?.addEventListener('click', replaceSelectedImageSource);
   imageApplySourceBtn?.addEventListener('click', () => applySelectedImageSourceFromEditor(imageSourceModeSelect?.value || 'local'));
@@ -16698,7 +18965,6 @@ document.addEventListener('DOMContentLoaded', () => {
     floatingReplaceCounterStartInput,
     floatingReplaceCounterStepInput,
     floatingActionUrlInput,
-    floatingAudioVisibleToggle,
     floatingAudioLoopToggle,
     floatingTextColorInput,
     floatingTextBgColorInput,
@@ -16733,6 +18999,12 @@ document.addEventListener('DOMContentLoaded', () => {
     control?.addEventListener('input', syncFloatingButtonEditor);
     control?.addEventListener('change', syncFloatingButtonEditor);
   });
+  [floatingInsertWidthInput, floatingInsertHeightInput].forEach((control) => {
+    control?.addEventListener('blur', (event) => syncFloatingButtonEditor({
+      type: 'change',
+      target: event.currentTarget
+    }));
+  });
   [
     videoTriggerTimeInput,
     videoTriggerActionSelect,
@@ -16741,7 +19013,6 @@ document.addEventListener('DOMContentLoaded', () => {
     videoTriggerReplaceModeSelect,
     videoTriggerReplaceCounterStartInput,
     videoTriggerReplaceCounterStepInput,
-    videoTriggerAudioVisibleToggle,
     videoTriggerAudioLoopToggle,
     videoTriggerTextColorInput,
     videoTriggerTextBgColorInput,
@@ -16771,7 +19042,8 @@ document.addEventListener('DOMContentLoaded', () => {
     videoTriggerQuizButtonBackgroundColorInput,
     videoTriggerQuizPointsInput,
     videoTriggerQuizLockOnWrongToggle,
-    videoTriggerQuizPlaySourceVideoToggle
+    videoTriggerQuizPlaySourceVideoToggle,
+    videoTriggerQuizHideOnCorrectToggle
   ].forEach((control) => {
     control?.addEventListener('input', syncVideoEditor);
     control?.addEventListener('change', syncVideoEditor);
@@ -16806,6 +19078,14 @@ document.addEventListener('DOMContentLoaded', () => {
       renderCaptionSegmentEditor('video', element);
     }
   });
+  videoCaptionManualToggleBtn?.addEventListener('click', () => {
+    const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId && child.type === 'video');
+    videoCaptionManualExpanded = !videoCaptionManualExpanded;
+    if (videoCaptionManualExpanded) {
+      videoCaptionToolsExpanded = true;
+    }
+    syncVideoCaptionEditorVisibility(element || null);
+  });
   videoApplySourceBtn?.addEventListener('click', () => applySelectedVideoSourceFromEditor(videoSourceModeSelect?.value || 'local'));
   videoSourceModeSelect?.addEventListener('change', () => {
     document.getElementById('videoSourceUrlField')?.classList.toggle('hidden', (videoSourceModeSelect?.value || 'local') !== 'url');
@@ -16835,7 +19115,7 @@ document.addEventListener('DOMContentLoaded', () => {
   cameraEditorTransmitBtn?.addEventListener('click', () => {
     alert('O modo transmitir será ligado em uma próxima atualização.');
   });
-  [audioElementWidthInput, audioElementHeightInput, audioElementRotationInput, audioElementVisibleToggle, audioElementLoopToggle, audioCollectStudentAudioToggle, audioCaptionEnabledToggle, audioCaptionPositionSelect, audioCaptionWidthInput, audioCaptionFontSizeInput, audioCaptionTextColorInput, audioCaptionBackgroundColorInput, audioCaptionAccentColorInput, audioCaptionUppercaseToggle].forEach((control) => {
+  [audioElementWidthInput, audioElementHeightInput, audioElementRotationInput, audioElementLoopToggle, audioCollectStudentAudioToggle, audioCaptionEnabledToggle, audioCaptionPositionSelect, audioCaptionWidthInput, audioCaptionFontSizeInput, audioCaptionTextColorInput, audioCaptionBackgroundColorInput, audioCaptionAccentColorInput, audioCaptionUppercaseToggle].forEach((control) => {
     control?.addEventListener('input', syncAudioEditor);
     control?.addEventListener('change', syncAudioEditor);
   });
@@ -16914,10 +19194,18 @@ document.addEventListener('DOMContentLoaded', () => {
     if (isPickingFloatingTargetElement) {
       return;
     }
+    if (event.target.closest?.('.three-d-webgl-layer, .three-d-css-layer')) {
+      return;
+    }
     selectElement(null);
   });
   document.addEventListener('keydown', (event) => {
     const target = event.target;
+    if (event.key === 'Escape' && !document.getElementById('threeDCatalogPreviewModal')?.classList.contains('hidden')) {
+      event.preventDefault();
+      closeThreeDCatalogPreview();
+      return;
+    }
     const isTypingField = isTypingTarget(target);
     if (isTypingField) return;
     if (handlePreviewKeyTriggerEvent(event)) {
@@ -17003,6 +19291,114 @@ document.addEventListener('DOMContentLoaded', () => {
     control?.addEventListener('input', applyElementStyles);
     control?.addEventListener('change', applyElementStyles);
   });
+  ensureThreeDStageController();
+  document.getElementById('threeDSceneEnabledToggle')?.addEventListener('change', (event) => {
+    updateActiveThreeDScene({ enabled: Boolean(event.target.checked) });
+  });
+  document.getElementById('threeDPrimitiveSelect')?.addEventListener('change', (event) => {
+    updateActiveThreeDScene({ primitiveType: event.target.value, assetId: '', animationIndex: -1, animationPlaying: false });
+  });
+  document.getElementById('threeDAssetSelect')?.addEventListener('change', (event) => {
+    updateActiveThreeDScene({ assetId: event.target.value, animationIndex: -1, animationPlaying: false });
+  });
+  document.getElementById('threeDControlModeSelect')?.addEventListener('change', (event) => {
+    updateActiveThreeDScene({ controlMode: event.target.value });
+  });
+  const syncThreeDPositionFromControls = ({ commit = false } = {}) => {
+    const x = Number(document.getElementById('threeDPositionXInput')?.value || 0) / 100;
+    const y = Number(document.getElementById('threeDPositionYInput')?.value || 0) / 100;
+    updateActiveThreeDScene(
+      { position: [x, y] },
+      {
+        commit,
+        rerender: false,
+        transformPhase: commit ? 'end' : 'move'
+      }
+    );
+  };
+  ['threeDPositionXInput', 'threeDPositionYInput'].forEach((id) => {
+    document.getElementById(id)?.addEventListener('input', () => syncThreeDPositionFromControls());
+    document.getElementById(id)?.addEventListener('change', () => syncThreeDPositionFromControls({ commit: true }));
+  });
+  document.getElementById('threeDCenterPositionBtn')?.addEventListener('click', () => {
+    updateActiveThreeDScene(
+      { position: [0, 0] },
+      { rerender: false, transformPhase: 'end' }
+    );
+  });
+  document.getElementById('threeDImportBtn')?.addEventListener('click', () => {
+    document.getElementById('threeDModelInput')?.click();
+  });
+  document.getElementById('threeDModelInput')?.addEventListener('change', (event) => {
+    void uploadThreeDModel(event.target.files?.[0]);
+  });
+  document.getElementById('threeDCatalogSearchBtn')?.addEventListener('click', () => {
+    loadThreeDCatalog().catch((error) => setThreeDCatalogStatus(error.message));
+  });
+  document.getElementById('threeDCatalogSearchInput')?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    loadThreeDCatalog().catch((error) => setThreeDCatalogStatus(error.message));
+  });
+  document.getElementById('threeDCatalogCategorySelect')?.addEventListener('change', () => {
+    loadThreeDCatalog().catch((error) => setThreeDCatalogStatus(error.message));
+  });
+  document.getElementById('threeDCatalogGrid')?.addEventListener('click', async (event) => {
+    const actionButton = event.target.closest('[data-catalog-action]');
+    try {
+      if (!actionButton) return;
+      actionButton.disabled = true;
+      const itemId = actionButton.dataset.catalogItem;
+      if (actionButton.dataset.catalogAction === 'external-import') await importExternalThreeDCatalogItem(itemId);
+      if (actionButton.dataset.catalogAction === 'external-open') {
+        const item = threeDCatalogItems.find((entry) => entry.id === itemId);
+        if (item?.externalOpenUrl) window.open(item.externalOpenUrl, '_blank', 'noopener,noreferrer');
+      }
+      if (actionButton.dataset.catalogAction === 'preview') await openThreeDCatalogPreview(itemId);
+    } catch (error) {
+      setThreeDCatalogStatus(error.message || 'Não foi possível concluir esta ação.');
+    } finally {
+      if (actionButton?.isConnected) actionButton.disabled = false;
+    }
+  });
+  document.getElementById('threeDResetViewBtn')?.addEventListener('click', () => {
+    updateActiveThreeDScene({ quaternion: [0, 0, 0, 1], zoom: 1 });
+  });
+  document.getElementById('threeDRemoveAssetBtn')?.addEventListener('click', () => {
+    updateActiveThreeDScene({ assetId: '', animationIndex: -1, animationPlaying: false });
+  });
+  document.getElementById('threeDDeleteSelectedAssetBtn')?.addEventListener('click', () => {
+    deleteSelectedThreeDAsset().catch((error) => {
+      const status = document.getElementById('threeDUploadStatus');
+      if (status) status.textContent = error.message || 'Não foi possível remover o modelo.';
+    });
+  });
+  document.getElementById('closeThreeDCatalogPreviewBtn')?.addEventListener('click', closeThreeDCatalogPreview);
+  document.querySelector('[data-close-three-d-catalog-preview="true"]')?.addEventListener('click', closeThreeDCatalogPreview);
+  document.getElementById('threeDCatalogPreviewUseBtn')?.addEventListener('click', async () => {
+    const item = threeDCatalogPreviewItem;
+    if (!item) return;
+    try {
+      await importExternalThreeDCatalogItem(item.id);
+      closeThreeDCatalogPreview();
+    } catch (error) {
+      const status = document.getElementById('threeDCatalogPreviewStatus');
+      if (status) status.textContent = error.message || 'Não foi possível usar este modelo.';
+    }
+  });
+  document.getElementById('threeDAnimationSelect')?.addEventListener('change', (event) => {
+    updateActiveThreeDScene({ animationIndex: Number(event.target.value), animationPlaying: false });
+  });
+  document.getElementById('threeDAnimationPlayBtn')?.addEventListener('click', () => {
+    const selected = Number(document.getElementById('threeDAnimationSelect')?.value ?? -1);
+    updateActiveThreeDScene({ animationIndex: selected, animationPlaying: selected >= 0 });
+  });
+  document.getElementById('threeDAnimationPauseBtn')?.addEventListener('click', () => {
+    updateActiveThreeDScene({ animationPlaying: false });
+  });
+  document.getElementById('element3dAttachBtn')?.addEventListener('click', beginSelectedElementThreeDAttachment);
+  document.getElementById('element3dRepositionBtn')?.addEventListener('click', beginSelectedElementThreeDAttachment);
+  document.getElementById('element3dDetachBtn')?.addEventListener('click', detachSelectedElementFromThreeD);
   addSlide('Slide 01');
   updateSaveButtonLabel();
   syncBuilderPanelLayout();
@@ -17022,7 +19418,8 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   loadTemplateStore();
   loadAiAssistantSettings();
-  loadBuilderProfessorCreditsStatus();
+  void loadThreeDAssetLibrary();
+  void loadThreeDCatalog().catch((error) => setThreeDCatalogStatus(error.message));
   renderAiAssistantActions();
   renderAiAssistantFeedback();
   renderAiAssistantDebug();
@@ -17046,12 +19443,14 @@ document.addEventListener('DOMContentLoaded', () => {
     stageViewportResizeObserver.observe(slideCanvasViewport);
   }
   syncMobileBuilderPanelUi();
-  document.getElementById('allowLiveStudentPenToggle')?.addEventListener('change', () => {
+  allowLiveStudentPenToggle?.addEventListener('change', () => {
+    updateModuleBehavior();
     if (liveStageShareState.active) {
       flushLiveStageShareSync();
     }
   });
-  document.getElementById('allowLiveCursorsToggle')?.addEventListener('change', () => {
+  allowLiveCursorsToggle?.addEventListener('change', () => {
+    updateModuleBehavior();
     if (liveStageShareState.active) {
       flushLiveStageShareSync();
     }

@@ -5,9 +5,11 @@
   <meta charset="UTF-8">
   <title>Criador de aulas interativas</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="builder.css">
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js" integrity="sha384-PMNj1TmCgXfW24/rfIyxYSAWwj2mffkMfguUWv08iNFcy0kTC0JN7E/tE+pJ7+fa" crossorigin="anonymous"></script>
+  <script src="three-import-map.js"></script>
 </head>
 
 <body>
@@ -19,6 +21,11 @@
         <p>Monte aulas com blocos, mídia, texto, animações e interações sem perder o controle do layout.</p>
       </div>
       <div class="builder-header-actions">
+        <button id="creatorPlatformCreditsCard" class="platform-credits-card hidden" type="button" aria-label="Recarregar créditos">
+          <span>Créditos</span>
+          <strong id="creatorPlatformCreditsValue">0</strong>
+          <small>Recarregar</small>
+        </button>
         <a class="secondary-btn" href="admin.html">Voltar ao admin</a>
         <button class="secondary-btn logout-btn" type="button">Sair</button>
       </div>
@@ -42,9 +49,10 @@
           <button type="button" class="builder-panel-nav-link" data-builder-target="builderSectionModule">Módulo</button>
           <button type="button" class="builder-panel-nav-link" data-builder-target="builderSectionCatalog">Publicados</button>
           <button type="button" class="builder-panel-nav-link" data-builder-target="builderSectionStyle">Estilo</button>
+          <button type="button" class="builder-panel-nav-link" data-builder-target="builderSection3d">3D</button>
           <button type="button" class="builder-panel-nav-link" data-builder-target="builderSectionElement">Elemento</button>
           <button type="button" class="builder-panel-nav-link" data-builder-target="builderSectionAi">IA</button>
-          <button type="button" class="builder-panel-nav-link" data-builder-target="builderSectionHelp">Ajuda</button>
+          <button type="button" class="builder-panel-nav-link" data-builder-target="builderSectionSecurity">Segurança</button>
         </div>
         <div class="builder-panel-section builder-module-section" data-builder-section="builderSectionModule">
           <h3>Dados do módulo</h3>
@@ -96,35 +104,6 @@
               <button id="clearModuleCoverBtn" class="secondary-btn" type="button">Remover capa</button>
             </div>
           </div>
-          <div class="builder-field">
-            <label class="toggle-inline">
-              <input id="moduleLockNextToggle" type="checkbox" />
-              Bloquear o próximo módulo até este ser concluído
-            </label>
-          </div>
-          <div class="builder-field">
-            <label class="toggle-inline">
-              <input id="moduleRequireQuizToggle" type="checkbox" />
-              Bloquear avanço até concluir todos os quizzes do módulo
-            </label>
-          </div>
-          <div class="builder-field">
-            <label class="toggle-inline">
-              <input id="modulePublicToggle" type="checkbox" />
-              Liberar este módulo com link público, sem login de aluno
-            </label>
-            <small class="muted">Depois de salvar, você poderá abrir a aula por um link público.</small>
-          </div>
-          <div class="builder-field">
-            <label for="modulePublicLinkInput">Link público do módulo</label>
-            <input id="modulePublicLinkInput" readonly placeholder="Salve um módulo público para gerar o link" />
-            <div class="template-actions">
-              <button id="copyPublicModuleLinkBtn" class="secondary-btn" type="button" disabled>Copiar link</button>
-              <button id="openPublicModuleLinkBtn" class="secondary-btn" type="button" disabled>Abrir link</button>
-            </div>
-            <small id="modulePublicLinkStatus" class="muted">Ative a opção de link público e salve o módulo para gerar
-              um link compartilhável.</small>
-          </div>
           <button id="saveModuleBtn" class="primary-btn" type="button">Salvar módulo e associar ao curso</button>
           <div class="template-actions">
             <button id="exportTemplateBtn" class="secondary-btn" type="button">Exportar template</button>
@@ -165,6 +144,97 @@
             <input id="slideBgInput" hidden />
             <small id="slideBgStatus" class="muted">Escolha cor unica, gradiente, imagem ou vídeo para o fundo do
               slide.</small>
+          </div>
+        </div>
+        <div class="builder-panel-section builder-3d-section" data-builder-section="builderSection3d">
+          <div>
+            <p class="badge">Palco tridimensional</p>
+            <h3>Modo 3D do slide</h3>
+            <p class="muted">Gire, mova pelo palco e fixe nele os elementos que já existem no editor.</p>
+          </div>
+          <label class="security-switch-card">
+            <span class="security-switch-copy">
+              <strong>Ativar neste slide</strong>
+              <small>Os outros slides continuam no modo normal.</small>
+            </span>
+            <input id="threeDSceneEnabledToggle" type="checkbox" />
+            <span class="security-switch-track" aria-hidden="true"></span>
+          </label>
+          <div id="threeDSceneControls" class="builder-3d-controls hidden">
+            <div class="three-d-catalog-panel">
+              <div class="three-d-catalog-heading">
+                <div>
+                  <span class="badge">CATÁLOGO 3D</span>
+                  <strong>Pesquise e importe modelos</strong>
+                </div>
+              </div>
+              <div class="three-d-catalog-search">
+                <input id="threeDCatalogSearchInput" type="search" placeholder="Buscar modelo ou categoria" />
+                <select id="threeDCatalogCategorySelect" aria-label="Filtrar categoria">
+                  <option value="">Todas as categorias</option>
+                </select>
+                <button id="threeDCatalogSearchBtn" class="secondary-btn" type="button">Buscar</button>
+              </div>
+              <div id="threeDCatalogGrid" class="three-d-catalog-grid">
+                <p class="muted">Carregando catálogo 3D...</p>
+              </div>
+              <small id="threeDCatalogStatus" class="muted">Busca e prévia são gratuitas. A importação de um modelo novo consome créditos.</small>
+            </div>
+            <div class="builder-field">
+              <label for="threeDPrimitiveSelect">Forma básica</label>
+              <select id="threeDPrimitiveSelect">
+                <option value="cube">Cubo</option>
+                <option value="sphere">Esfera</option>
+                <option value="cylinder">Cilindro</option>
+                <option value="plane">Plano</option>
+                <option value="pyramid">Pirâmide</option>
+              </select>
+              <small class="muted">Escolher uma forma remove apenas a referência ao modelo importado deste slide.</small>
+            </div>
+            <div class="builder-field">
+              <label>Modelo GLB ou GLTF</label>
+              <button id="threeDImportBtn" class="primary-btn" type="button">Importar modelo 3D</button>
+              <small id="threeDUploadStatus" class="muted">Limite de 100 MB. Um modelo novo validado consome <span id="threeDImportCreditCostLabel">5</span> créditos.</small>
+            </div>
+            <div class="builder-field">
+              <label for="threeDAssetSelect">Minha biblioteca</label>
+              <select id="threeDAssetSelect">
+                <option value="">Usar forma básica</option>
+              </select>
+              <div id="threeDAssetStats" class="three-d-asset-stats muted">Nenhum modelo importado selecionado.</div>
+              <button id="threeDDeleteSelectedAssetBtn" class="secondary-btn danger" type="button" disabled>
+                Excluir modelo da biblioteca
+              </button>
+            </div>
+            <div class="builder-field">
+              <label for="threeDControlModeSelect">Controle durante a aula</label>
+              <select id="threeDControlModeSelect">
+                <option value="teacher">Somente o professor gira</option>
+                <option value="student">O aluno pode explorar</option>
+              </select>
+            </div>
+            <div class="builder-field">
+              <label for="threeDPositionXInput">Posição horizontal</label>
+              <input id="threeDPositionXInput" type="range" min="-50" max="50" step="1" value="0" />
+              <label for="threeDPositionYInput">Posição vertical</label>
+              <input id="threeDPositionYInput" type="range" min="-50" max="50" step="1" value="0" />
+              <small class="muted">Use os controles ou segure Shift enquanto arrasta o objeto no palco.</small>
+              <button id="threeDCenterPositionBtn" class="secondary-btn" type="button">Centralizar objeto</button>
+            </div>
+            <div class="builder-field">
+              <label for="threeDAnimationSelect">Animação do modelo</label>
+              <select id="threeDAnimationSelect">
+                <option value="-1">Nenhuma animação</option>
+              </select>
+              <div class="template-actions">
+                <button id="threeDAnimationPlayBtn" class="secondary-btn" type="button">Reproduzir</button>
+                <button id="threeDAnimationPauseBtn" class="secondary-btn" type="button">Pausar</button>
+              </div>
+            </div>
+            <div class="template-actions">
+              <button id="threeDResetViewBtn" class="secondary-btn" type="button">Redefinir rotação</button>
+              <button id="threeDRemoveAssetBtn" class="secondary-btn" type="button">Usar forma básica</button>
+            </div>
           </div>
         </div>
         <div class="builder-panel-section" data-builder-section="builderSectionElement">
@@ -289,6 +359,15 @@
               <button id="centerTextBlockBtn" class="secondary-btn" type="button">Centralizar no bloco</button>
             </div>
           </div>
+          <div id="element3dAttachmentField" class="builder-field hidden">
+            <label>Fixação no cenário 3D</label>
+            <div class="template-actions">
+              <button id="element3dAttachBtn" class="secondary-btn" type="button">Fixar no 3D</button>
+              <button id="element3dRepositionBtn" class="secondary-btn hidden" type="button">Reposicionar</button>
+              <button id="element3dDetachBtn" class="secondary-btn hidden" type="button">Desfixar</button>
+            </div>
+            <small id="element3dAttachmentStatus" class="muted">Selecione onde o elemento será fixado.</small>
+          </div>
         </div>
         <div class="builder-panel-section" data-builder-section="builderSectionAi">
           <h3>Assistente de IA</h3>
@@ -340,29 +419,95 @@
             <p class="muted" style="margin:0;">Nenhuma proposta carregada.</p>
           </div>
           <div class="builder-field">
-            <label for="aiAssistantDebugOutput">Debug da proposta</label>
-            <pre id="aiAssistantDebugOutput" class="ai-debug-output">Nenhum debug disponível ainda.</pre>
-          </div>
-          <div class="builder-field">
             <label for="aiProposalHistoryList">Histórico de propostas</label>
             <div id="aiProposalHistoryList" class="ai-proposal-history" aria-live="polite">
               <p class="muted" style="margin:0;">As propostas geradas pela IA vão aparecer aqui.</p>
             </div>
           </div>
         </div>
-        <div class="builder-panel-section" data-builder-section="builderSectionHelp">
-          <h3>Instruções</h3>
-          <ul class="builder-instructions">
-            <li>Use os ícones do topo para criar texto, bloco, imagem, áudio, vídeo, quiz, botão flutuante, borracha e
-              animação.</li>
-            <li>Duplo clique em texto, bloco, imagem, vídeo ou botão para editar rapidamente o conteúdo principal.</li>
-            <li>Os menus de texto, quiz, botão flutuante e animação são flutuantes, podem ser arrastados pelo topo e
-              fecham ao clicar fora.</li>
-            <li>Use os ícones do assistente para anexar ou remover imagem de referência quando quiser dar contexto
-              visual para a IA.</li>
-            <li>Limpar slide apaga o slide atual; Criar novo módulo reinicia o editor; salvar continua sendo manual.
-            </li>
-          </ul>
+        <div class="builder-panel-section builder-security-section" data-builder-section="builderSectionSecurity">
+          <h3>Segurança</h3>
+          <div class="builder-security-list">
+            <label class="security-switch-card">
+              <span class="security-switch-copy">
+                <strong>Bloqueio do próximo módulo</strong>
+                <small>O aluno só acessa o próximo módulo depois de concluir este.</small>
+              </span>
+              <input id="moduleLockNextToggle" type="checkbox" />
+              <span class="security-switch-track" aria-hidden="true"></span>
+            </label>
+            <label class="security-switch-card">
+              <span class="security-switch-copy">
+                <strong>Quizzes obrigatórios</strong>
+                <small>Bloqueia o avanço até todos os quizzes do módulo serem concluídos.</small>
+              </span>
+              <input id="moduleRequireQuizToggle" type="checkbox" />
+              <span class="security-switch-track" aria-hidden="true"></span>
+            </label>
+            <label class="security-switch-card">
+              <span class="security-switch-copy">
+                <strong>Link público sem login</strong>
+                <small>Permite abrir este módulo por link público, sem conta de aluno.</small>
+              </span>
+              <input id="modulePublicToggle" type="checkbox" />
+              <span class="security-switch-track" aria-hidden="true"></span>
+            </label>
+            <label class="security-switch-card">
+              <span class="security-switch-copy">
+                <strong>Rabisco do aluno</strong>
+                <small>Libera o aluno para desenhar no viewer durante a aula.</small>
+              </span>
+              <input id="allowLiveStudentPenToggle" type="checkbox" />
+              <span class="security-switch-track" aria-hidden="true"></span>
+            </label>
+            <div class="security-face-group">
+              <label class="security-switch-card">
+                <span class="security-switch-copy">
+                  <strong>Verificação facial</strong>
+                  <small>Confirma se o aluno corresponde ao rosto cadastrado. Não comprova identidade civil.</small>
+                </span>
+                <input id="moduleFaceVerificationToggle" type="checkbox" />
+                <span class="security-switch-track" aria-hidden="true"></span>
+              </label>
+              <div id="moduleFaceVerificationOptions" class="security-face-options hidden">
+                <label class="security-switch-card compact">
+                  <span class="security-switch-copy">
+                    <strong>Ao entrar</strong>
+                    <small>Solicita a confirmação antes de entregar o conteúdo do módulo.</small>
+                  </span>
+                  <input id="moduleFaceEntryToggle" type="checkbox" checked />
+                  <span class="security-switch-track" aria-hidden="true"></span>
+                </label>
+                <label class="security-switch-card compact">
+                  <span class="security-switch-copy">
+                    <strong>Durante a aula</strong>
+                    <small>Repete a confirmação em intervalo aleatório de 15 a 30 minutos.</small>
+                  </span>
+                  <input id="moduleFacePeriodicToggle" type="checkbox" />
+                  <span class="security-switch-track" aria-hidden="true"></span>
+                </label>
+                <label class="security-switch-card compact">
+                  <span class="security-switch-copy">
+                    <strong>Antes de concluir</strong>
+                    <small>Exige uma confirmação recente para registrar a conclusão.</small>
+                  </span>
+                  <input id="moduleFaceCompletionToggle" type="checkbox" />
+                  <span class="security-switch-track" aria-hidden="true"></span>
+                </label>
+                <p class="security-face-warning">A verificação facial não pode ser usada junto com link público sem login.</p>
+              </div>
+            </div>
+          </div>
+          <div class="builder-field security-public-link-field">
+            <label for="modulePublicLinkInput">Link público do módulo</label>
+            <input id="modulePublicLinkInput" readonly placeholder="Salve um módulo público para gerar o link" />
+            <div class="template-actions">
+              <button id="copyPublicModuleLinkBtn" class="secondary-btn" type="button" disabled>Copiar link</button>
+              <button id="openPublicModuleLinkBtn" class="secondary-btn" type="button" disabled>Abrir link</button>
+            </div>
+            <small id="modulePublicLinkStatus" class="muted">Ative a opção de link público e salve o módulo para gerar
+              um link compartilhável.</small>
+          </div>
         </div>
       </aside>
       <section class="builder-stage">
@@ -1197,12 +1342,6 @@
                 <label for="floatingActionUrlInput">URL da mídia</label>
                 <input id="floatingActionUrlInput" placeholder="Cole a URL da imagem, áudio ou vídeo" />
               </div>
-              <div id="floatingAudioVisibleField" class="builder-field hidden">
-                <label class="toggle-inline">
-                  <input id="floatingAudioVisibleToggle" type="checkbox" />
-                  Mostrar player de áudio no slide
-                </label>
-              </div>
               <div id="floatingAudioLoopField" class="builder-field hidden">
                 <label class="toggle-inline">
                   <input id="floatingAudioLoopToggle" type="checkbox" />
@@ -1219,11 +1358,11 @@
               </div>
               <div id="floatingInsertWidthField" class="builder-field hidden">
                 <label for="floatingInsertWidthInput">Largura do item</label>
-                <input id="floatingInsertWidthInput" type="number" step="1" placeholder="Ex: 280" />
+                <input id="floatingInsertWidthInput" type="number" min="40" step="1" placeholder="Ex: 280" />
               </div>
               <div id="floatingInsertHeightField" class="builder-field hidden">
                 <label for="floatingInsertHeightInput">Altura do item</label>
-                <input id="floatingInsertHeightInput" type="number" step="1" placeholder="Ex: 180" />
+                <input id="floatingInsertHeightInput" type="number" min="40" step="1" placeholder="Ex: 180" />
               </div>
               <div id="floatingMoveXField" class="builder-field hidden">
                 <label for="floatingMoveXInput">Mover no eixo X (px)</label>
@@ -1337,49 +1476,77 @@
                   <button id="videoExtractAudioBtn" class="secondary-btn" type="button">Extrair áudio do vídeo</button>
                   <button id="videoGenerateCaptionsBtn" class="secondary-btn" type="button">Gerar legenda
                     automática</button>
+                  <button id="videoCaptionManualToggleBtn" class="secondary-btn" type="button">Adicionar legenda manualmente</button>
                 </div>
                 <small class="muted">A legenda sincronizada acompanha a fala. Links do YouTube não suportam
                   extração/transcrição direta por aqui.</small>
               </div>
-              <div class="builder-field">
-                <label class="toggle-inline">
-                  <input id="videoCaptionEnabledToggle" type="checkbox" />
-                  Exibir legenda durante a reprodução
-                </label>
+              <div id="videoCaptionToolsPanel" class="quiz-editor-grid compact hidden" style="grid-column:1 / -1;">
+                <div class="builder-field">
+                  <label class="toggle-inline">
+                    <input id="videoCaptionEnabledToggle" type="checkbox" />
+                    Exibir legenda durante a reprodução
+                  </label>
+                </div>
+                <div class="builder-field">
+                  <label for="videoCaptionPositionSelect">Posição da legenda</label>
+                  <select id="videoCaptionPositionSelect">
+                    <option value="top">Topo</option>
+                    <option value="center">Centro</option>
+                    <option value="bottom">Rodapé</option>
+                  </select>
+                </div>
+                <div class="builder-field">
+                  <label for="videoCaptionWidthInput">Largura da legenda (px)</label>
+                  <input id="videoCaptionWidthInput" type="number" min="0" step="1" placeholder="Auto" />
+                </div>
+                <div class="builder-field">
+                  <label for="videoCaptionFontSizeInput">Tamanho da legenda (px)</label>
+                  <input id="videoCaptionFontSizeInput" type="number" min="12" max="96" step="1" value="28" />
+                </div>
+                <div class="builder-field">
+                  <label for="videoCaptionTextColorInput">Cor do texto</label>
+                  <input id="videoCaptionTextColorInput" type="color" value="#ffffff" />
+                </div>
+                <div class="builder-field">
+                  <label for="videoCaptionBackgroundColorInput">Fundo da legenda</label>
+                  <input id="videoCaptionBackgroundColorInput" type="color" value="#0f172a" />
+                </div>
+                <div class="builder-field">
+                  <label for="videoCaptionAccentColorInput">Cor de destaque</label>
+                  <input id="videoCaptionAccentColorInput" type="color" value="#facc15" />
+                </div>
+                <div class="builder-field">
+                  <label class="toggle-inline">
+                    <input id="videoCaptionUppercaseToggle" type="checkbox" />
+                    Caixa alta
+                  </label>
+                </div>
               </div>
-              <div class="builder-field">
-                <label for="videoCaptionPositionSelect">Posição da legenda</label>
-                <select id="videoCaptionPositionSelect">
-                  <option value="top">Topo</option>
-                  <option value="center">Centro</option>
-                  <option value="bottom">Rodapé</option>
-                </select>
-              </div>
-              <div class="builder-field">
-                <label for="videoCaptionWidthInput">Largura da legenda (px)</label>
-                <input id="videoCaptionWidthInput" type="number" min="0" step="1" placeholder="Auto" />
-              </div>
-              <div class="builder-field">
-                <label for="videoCaptionFontSizeInput">Tamanho da legenda (px)</label>
-                <input id="videoCaptionFontSizeInput" type="number" min="12" max="96" step="1" value="28" />
-              </div>
-              <div class="builder-field">
-                <label for="videoCaptionTextColorInput">Cor do texto</label>
-                <input id="videoCaptionTextColorInput" type="color" value="#ffffff" />
-              </div>
-              <div class="builder-field">
-                <label for="videoCaptionBackgroundColorInput">Fundo da legenda</label>
-                <input id="videoCaptionBackgroundColorInput" type="color" value="#0f172a" />
-              </div>
-              <div class="builder-field">
-                <label for="videoCaptionAccentColorInput">Cor de destaque</label>
-                <input id="videoCaptionAccentColorInput" type="color" value="#facc15" />
-              </div>
-              <div class="builder-field">
-                <label class="toggle-inline">
-                  <input id="videoCaptionUppercaseToggle" type="checkbox" />
-                  Caixa alta
-                </label>
+              <div id="videoCaptionSegmentPanel" class="builder-field-span hidden" style="margin-bottom:0.85rem;">
+                <label>Trechos da legenda</label>
+                <div class="trigger-collection-card">
+                  <div class="trigger-collection-actions">
+                    <button id="videoCaptionSegmentAddBtn" class="secondary-btn small" type="button">Adicionar trecho</button>
+                    <button id="videoCaptionSegmentRemoveBtn" class="secondary-btn small danger" type="button">Remover trecho</button>
+                  </div>
+                  <div id="videoCaptionSegmentList" class="trigger-list" aria-label="Trechos da legenda do video"></div>
+                  <small id="videoCaptionSegmentEmpty" class="muted">Gere a legenda automatica ou adicione trechos manualmente.</small>
+                </div>
+                <div id="videoCaptionSegmentEditorFields" class="quiz-editor-grid compact hidden" style="margin-top:0.75rem;">
+                  <div class="builder-field">
+                    <label for="videoCaptionSegmentStartInput">Inicio (s)</label>
+                    <input id="videoCaptionSegmentStartInput" type="number" min="0" step="0.1" value="0" />
+                  </div>
+                  <div class="builder-field">
+                    <label for="videoCaptionSegmentEndInput">Fim (s)</label>
+                    <input id="videoCaptionSegmentEndInput" type="number" min="0" step="0.1" value="1" />
+                  </div>
+                  <div class="builder-field builder-field-span">
+                    <label for="videoCaptionSegmentTextInput">Texto do trecho</label>
+                    <textarea id="videoCaptionSegmentTextInput" rows="3" placeholder="Digite a fala deste trecho"></textarea>
+                  </div>
+                </div>
               </div>
               <div class="builder-field builder-field-span">
                 <label>Gatilhos do vídeo</label>
@@ -1388,31 +1555,6 @@
                     <button id="videoAddTriggerBtn" class="secondary-btn small" type="button">Adicionar gatilho</button>
                     <button id="videoDuplicateTriggerBtn" class="secondary-btn small" type="button">Duplicar</button>
                     <button id="videoRemoveTriggerBtn" class="secondary-btn small danger" type="button">Remover</button>
-                  </div>
-                  <div id="videoCaptionSegmentPanel" class="builder-field-span" style="margin-bottom:0.85rem;">
-                    <label>Trechos da legenda</label>
-                    <div class="trigger-collection-card">
-                      <div class="trigger-collection-actions">
-                        <button id="videoCaptionSegmentAddBtn" class="secondary-btn small" type="button">Adicionar trecho</button>
-                        <button id="videoCaptionSegmentRemoveBtn" class="secondary-btn small danger" type="button">Remover trecho</button>
-                      </div>
-                      <div id="videoCaptionSegmentList" class="trigger-list" aria-label="Trechos da legenda do video"></div>
-                      <small id="videoCaptionSegmentEmpty" class="muted">Gere a legenda automatica ou adicione trechos manualmente.</small>
-                    </div>
-                    <div class="quiz-editor-grid compact" style="margin-top:0.75rem;">
-                      <div class="builder-field">
-                        <label for="videoCaptionSegmentStartInput">Inicio (s)</label>
-                        <input id="videoCaptionSegmentStartInput" type="number" min="0" step="0.1" value="0" />
-                      </div>
-                      <div class="builder-field">
-                        <label for="videoCaptionSegmentEndInput">Fim (s)</label>
-                        <input id="videoCaptionSegmentEndInput" type="number" min="0" step="0.1" value="1" />
-                      </div>
-                      <div class="builder-field builder-field-span">
-                        <label for="videoCaptionSegmentTextInput">Texto do trecho</label>
-                        <textarea id="videoCaptionSegmentTextInput" rows="3" placeholder="Digite a fala deste trecho"></textarea>
-                      </div>
-                    </div>
                   </div>
                   <div id="videoTriggerList" class="trigger-list" aria-label="Lista de gatilhos do vídeo"></div>
                   <small class="muted">Regra sugerida: mantenha os tempos em ordem crescente para facilitar a leitura da
@@ -1535,12 +1677,6 @@
                 <label for="videoTriggerUrlInput">URL de redirecionamento</label>
                 <input id="videoTriggerUrlInput" placeholder="https://..." />
               </div>
-              <div id="videoTriggerAudioVisibleField" class="builder-field hidden">
-                <label class="toggle-inline">
-                  <input id="videoTriggerAudioVisibleToggle" type="checkbox" />
-                  Mostrar player de áudio no slide
-                </label>
-              </div>
               <div id="videoTriggerAudioLoopField" class="builder-field hidden">
                 <label class="toggle-inline">
                   <input id="videoTriggerAudioLoopToggle" type="checkbox" />
@@ -1644,6 +1780,12 @@
                   Dar play no vídeo que acionou o gatilho ao validar
                 </label>
               </div>
+              <div id="videoTriggerQuizHideOnCorrectField" class="builder-field hidden">
+                <label class="toggle-inline">
+                  <input id="videoTriggerQuizHideOnCorrectToggle" type="checkbox" />
+                  Sumir ao acertar o quiz
+                </label>
+              </div>
               <div class="builder-field">
                 <small class="muted">O gatilho por tempo funciona em vídeos nativos do editor. Ao chegar nesse ponto, o
                   vídeo executa a ação configurada.</small>
@@ -1694,12 +1836,6 @@
               <div class="builder-field">
                 <label for="audioElementRotationInput">Rotação (°)</label>
                 <input id="audioElementRotationInput" type="number" min="0" max="360" step="1" />
-              </div>
-              <div class="builder-field">
-                <label class="toggle-inline">
-                  <input id="audioElementVisibleToggle" type="checkbox" />
-                  Mostrar player para o aluno
-                </label>
               </div>
               <div class="builder-field">
                 <label class="toggle-inline">
@@ -1869,14 +2005,6 @@
                 <label for="penSizeNumberInput">Espessura exata</label>
                 <input id="penSizeNumberInput" type="number" min="2" max="48" step="1" value="8" />
               </div>
-              <div class="builder-field">
-                <label class="toggle-inline">
-                  <input id="penStudentPaintToggle" type="checkbox" />
-                  Liberar rabisco do aluno no viewer
-                </label>
-                <small class="muted">O aluno pode desenhar por cima deste elemento sem salvar no slide, mas cada traço
-                  entra no relatório de progresso.</small>
-              </div>
               <div class="builder-field eraser-editor-actions">
                 <label>Ações</label>
                 <div class="floating-placement-actions">
@@ -1936,8 +2064,8 @@
                   <button id="removeMotionFrameBtn" class="secondary-btn" type="button">Excluir quadro</button>
                   <button id="clearMotionFramesBtn" class="secondary-btn" type="button">Limpar tudo</button>
                 </div>
-                <small class="muted">Posicione ou redimensione o texto, bloco, imagem ou botao no palco, grave cada
-                  quadro e clique na lista para voltar a um quadro salvo.</small>
+                <small class="muted">Posicione ou redimensione o elemento e grave cada quadro. Se ele estiver fixado
+                  no 3D, use Reposicionar ou arraste pela superfície antes de gravar o próximo quadro.</small>
                 <div id="elementMotionFrameList" class="motion-frame-list"></div>
               </div>
             </div>
@@ -2011,6 +2139,23 @@
             <div class="stage-canvas" id="slideCanvas" aria-label="Canvas da aula interativa">
               <p class="canvas-hint">Arraste elementos aqui ou clique em um botão do painel para começar.</p>
             </div>
+            <aside id="elementLayersPanel" class="element-layers-panel" aria-label="Camadas do slide">
+              <div class="element-layers-panel-head">
+                <div class="element-layers-panel-title">
+                  <span class="element-layers-panel-kicker">Palco</span>
+                  <strong>Camadas</strong>
+                </div>
+                <button id="elementLayersToggleBtn" class="element-layers-toggle" type="button"
+                  aria-controls="elementLayersList" aria-expanded="true" title="Recolher camadas">
+                  <span aria-hidden="true">&rsaquo;</span>
+                  <span class="sr-only">Recolher camadas</span>
+                </button>
+              </div>
+              <p class="element-layers-help">Arraste para definir o que fica na frente.</p>
+              <div id="elementLayersStatus" class="element-layers-status" aria-live="polite"></div>
+              <div id="elementLayersList" class="element-layers-list" role="list"
+                aria-label="Elementos do slide, da frente para o fundo"></div>
+            </aside>
           </div>
           <div class="stage-footer">
             <button id="slideName" class="ghost-btn slide-name-btn" type="button">Slide 01</button>
@@ -2034,10 +2179,6 @@
               <button id="transmitScreenBtn" class="primary-btn hidden" type="button">Transmitir Tela</button>
               <button id="copyLiveStageShareLinkBtn" class="secondary-btn" type="button" disabled>Copiar link</button>
               <button id="openLiveStageShareLinkBtn" class="secondary-btn" type="button" disabled>Abrir link</button>
-              <label class="toggle-inline" style="margin: 0; white-space: nowrap; font-size: 0.85rem; display: flex; align-items: center; gap: 0.5rem; color: #4b568f; cursor: pointer;">
-                <input id="allowLiveStudentPenToggle" type="checkbox" style="width: 1.1rem; height: 1.1rem; cursor: pointer;" />
-                Liberar Rabisco
-              </label>
               <label class="toggle-inline" style="margin: 0; white-space: nowrap; font-size: 0.85rem; display: flex; align-items: center; gap: 0.5rem; color: #4b568f; cursor: pointer;">
                 <input id="allowLiveCursorsToggle" type="checkbox" checked style="width: 1.1rem; height: 1.1rem; cursor: pointer;" />
                 Liberar Cursores
@@ -2120,8 +2261,8 @@
             </select>
           </div>
           <div id="slideExportVideoDurationField" class="builder-field hidden">
-            <label for="slideExportVideoDurationInput">Segundos por slide</label>
-            <input id="slideExportVideoDurationInput" type="number" min="1" max="20" step="1" value="3" />
+            <label for="slideExportVideoDurationInput">Duração mínima por slide</label>
+            <input id="slideExportVideoDurationInput" type="number" min="1" step="1" value="3" />
           </div>
           <div class="builder-field">
             <label for="slideExportScaleSelect">Qualidade</label>
@@ -2144,7 +2285,66 @@
       </div>
     </div>
   </div>
+  <div id="creatorCreditTopupModal" class="admin-report-modal hidden" aria-hidden="true">
+    <div class="admin-report-modal-backdrop" data-creator-credit-close="true"></div>
+    <div class="admin-report-modal-card credit-topup-modal-card" role="dialog" aria-modal="true" aria-labelledby="creatorCreditTopupTitle">
+      <div class="credit-topup-hero">
+        <div class="credit-topup-heading">
+          <span class="credit-topup-icon" aria-hidden="true">C</span>
+          <div>
+          <p class="credit-topup-eyebrow">CARTEIRA CRIATYVE</p>
+          <h3 id="creatorCreditTopupTitle">Recarregar créditos</h3>
+          <p>Continue criando com IA, imagens e modelos 3D.</p>
+          </div>
+        </div>
+        <div class="credit-topup-hero-actions">
+          <div class="credit-topup-balance">
+            <small>Saldo atual</small>
+            <strong><span id="creatorCreditTopupBalance">0</span> créditos</strong>
+          </div>
+          <button class="credit-topup-close" type="button" data-creator-credit-close="true" aria-label="Fechar">×</button>
+        </div>
+      </div>
+      <div class="credit-topup-content">
+        <div class="credit-topup-section-title">
+          <div>
+            <span>Escolha sua recarga</span>
+            <h4>Créditos que não expiram</h4>
+          </div>
+          <div class="credit-topup-secure"><span aria-hidden="true">✓</span> Pagamento protegido</div>
+        </div>
+        <div id="creatorCreditPackageList" class="credit-package-grid">
+          <p class="muted">Carregando pacotes...</p>
+        </div>
+        <p id="creatorCreditTopupStatus" class="credit-topup-status" aria-live="polite"></p>
+        <div class="credit-topup-payment-strip">
+          <div><span class="payment-method-icon">PIX</span><strong>Pix</strong><small>Confirmação rápida</small></div>
+          <div><span class="payment-method-icon">••••</span><strong>Cartão</strong><small>Checkout seguro</small></div>
+          <p>O saldo é liberado somente após confirmação direta do Asaas.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="threeDCatalogPreviewModal" class="admin-report-modal hidden" aria-hidden="true">
+    <div class="admin-report-modal-backdrop" data-close-three-d-catalog-preview="true"></div>
+    <div class="admin-report-modal-card three-d-catalog-preview-modal-card" role="dialog" aria-modal="true"
+      aria-labelledby="threeDCatalogPreviewTitle">
+      <div class="admin-report-modal-head">
+        <div>
+          <p class="badge">Prévia interativa</p>
+          <h3 id="threeDCatalogPreviewTitle">Modelo 3D</h3>
+          <p id="threeDCatalogPreviewStatus" class="muted" style="margin:0;">Arraste para girar e use o scroll para aproximar.</p>
+        </div>
+        <button id="closeThreeDCatalogPreviewBtn" class="secondary-btn small" type="button">Fechar</button>
+      </div>
+      <div id="threeDCatalogPreviewStage" class="three-d-catalog-preview-stage" aria-label="Prévia do modelo 3D"></div>
+      <div class="three-d-catalog-preview-footer">
+        <button id="threeDCatalogPreviewUseBtn" class="primary-btn" type="button">Importar e usar</button>
+      </div>
+    </div>
+  </div>
   <input id="aiAssistantImageInput" type="file" accept="image/*" hidden />
+  <input id="threeDModelInput" type="file" accept=".glb,.gltf,model/gltf-binary,model/gltf+json" hidden />
   <input id="templateImportInput" type="file" accept="application/json,.json" hidden />
   <script type="module" src="interactive-creator.js"></script>
 </body>

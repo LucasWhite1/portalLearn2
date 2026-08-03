@@ -4,23 +4,27 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Portal do Aluno</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <link rel="stylesheet" href="style.css" />
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js" integrity="sha384-PMNj1TmCgXfW24/rfIyxYSAWwj2mffkMfguUWv08iNFcy0kTC0JN7E/tE+pJ7+fa" crossorigin="anonymous"></script>
 </head>
-<body>
+<body class="student-portal-page">
   <button type="button" class="mobile-sidenav-toggle" id="mobileSidenavToggle" aria-controls="mobileSidenav" aria-expanded="false">
     <span>Menu</span>
   </button>
   <div class="mobile-sidenav-backdrop" id="mobileSidenavBackdrop" hidden></div>
   <div class="page-shell">
     <aside class="sidenav" id="mobileSidenav">
-      <h1>Criatyve</h1>
+      <div class="portal-brand portal-brand-sidebar" data-portal-brand>
+        <span class="portal-brand-fallback">Criatyve</span>
+      </div>
       <p>Conteúdos ao vivo, notificações e suporte.</p>
       <ul class="nav-menu">
         <li><button type="button" class="nav-link" data-target="courseList">📚 <span>Conteúdos</span></button></li>
         <li><button type="button" class="nav-link" data-target="courseStoreSection">🛍️ <span>Loja de cursos</span></button></li>
         <li><button type="button" class="nav-link" data-target="portalProgressSection">⭐ <span>Progresso</span></button></li>
         <li><button type="button" class="nav-link" data-target="notificationPanel">🔔 <span>Notificações</span></button></li>
+        <li><button type="button" class="nav-link" data-target="studentSettingsSection">⚙ <span>Configurações</span></button></li>
         <li><button type="button" class="nav-link logout-btn">🚪 <span>Sair da conta</span></button></li>
       </ul>
     </aside>
@@ -90,6 +94,43 @@
         <div class="notification">
           <p style="margin: 0; color: #8b92b1;">Nenhuma notificação disponível.</p>
         </div>
+      </section>
+
+      <section class="list-panel" id="studentSettingsSection" data-section="studentSettingsSection">
+        <h2>Configurações</h2>
+        <form id="studentProfileForm">
+          <div class="profile-settings-row">
+            <div class="profile-avatar-preview" id="profileAvatarPreview" aria-hidden="true">?</div>
+            <div class="field-group">
+              <label>Foto do chat</label>
+              <div class="compact-inline">
+                <button class="secondary-btn" id="profileImagePickBtn" type="button">Escolher foto</button>
+                <button class="secondary-btn" id="profileImageClearBtn" type="button">Remover foto</button>
+              </div>
+              <input id="profileImageInput" type="file" accept="image/*" hidden />
+              <small style="color:#8b92b1;">Essa imagem aparece quando você conversa no chat do curso.</small>
+            </div>
+          </div>
+          <button class="primary-btn" type="submit" style="width:auto; margin-top:1rem;">Salvar foto</button>
+        </form>
+        <div class="biometric-profile-card">
+          <div>
+            <span class="biometric-profile-kicker">PROTEÇÃO DA CONTA</span>
+            <h3>Verificação facial</h3>
+            <p>Cadastre seu rosto para acessar módulos protegidos. O sistema guarda apenas uma assinatura facial criptografada; imagens de auditoria são removidas em até 48 horas.</p>
+          </div>
+          <div id="faceProfileStatus" class="biometric-profile-status">Consultando cadastro...</div>
+          <label class="biometric-consent">
+            <input id="faceConsentToggle" type="checkbox" />
+            <span>Autorizo o tratamento da minha biometria para confirmar acessos aos módulos. Entendo que isso não comprova minha identidade civil.</span>
+          </label>
+          <div class="compact-inline">
+            <button class="primary-btn" id="faceEnrollBtn" type="button">Cadastrar rosto</button>
+            <button class="secondary-btn danger" id="faceRevokeBtn" type="button" hidden>Revogar cadastro</button>
+          </div>
+          <small>Se você não tiver câmera ou precisar de acessibilidade, solicite liberação manual ao professor.</small>
+        </div>
+        <p id="accountSettingsStatus" class="muted" style="margin:0.75rem 0 0;">Nenhuma alteração salva ainda.</p>
       </section>
     </main>
   </div>

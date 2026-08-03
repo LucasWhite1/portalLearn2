@@ -1,6 +1,7 @@
 const { getSession } = require('../sessionStore');
 const { isSessionToken } = require('../security');
 const db = require('../db');
+const { ensurePlatformCreditTables } = require('../platformCredits');
 
 async function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization || '';
@@ -54,16 +55,24 @@ async function requireAuth(req, res, next) {
     return next();
   }
   try {
+    await ensurePlatformCreditTables();
     const { rows } = await db.query(
       `SELECT id, role, full_name, email, class_name, owner_user_id, is_active,
-              ai_credits, student_limit, storage_limit_bytes
+              platform_credits, student_limit, storage_limit_bytes
          FROM users
         WHERE id = $1`,
       [user.id]
     );
     const currentUser = rows[0];
-    if (!currentUser || currentUser.is_active === false) {
+    if (!currentUser || (currentUser.is_active === false && currentUser.role !== 'admin')) {
       return res.status(401).json({ message: 'Conta inativa ou sessao revogada.' });
+    }
+    if (currentUser.role === 'admin' && currentUser.is_active === false) {
+      await db.query(
+        `UPDATE users SET is_active = TRUE WHERE id = $1 AND role = 'admin'`,
+        [currentUser.id]
+      );
+      currentUser.is_active = true;
     }
     Object.assign(user, {
       id: currentUser.id,
@@ -72,7 +81,7 @@ async function requireAuth(req, res, next) {
       email: currentUser.email,
       className: currentUser.class_name,
       ownerUserId: currentUser.owner_user_id || null,
-      aiCredits: Number(currentUser.ai_credits || 0),
+      platformCredits: Number(currentUser.platform_credits || 0),
       studentLimit: Number.isFinite(Number(currentUser.student_limit)) ? Number(currentUser.student_limit) : null,
       storageLimitBytes: Number.isFinite(Number(currentUser.storage_limit_bytes)) ? Number(currentUser.storage_limit_bytes) : null
     });

@@ -7,12 +7,11 @@ const { requireAuth } = require('../middleware/auth');
 const { sanitizeEmail, sanitizePhone, sanitizeText, createRateLimiter, isSessionToken, getPasswordValidationError, assertSafeRemoteUrl } = require('../security');
 const nodemailer = require('nodemailer');
 const { decryptStoredSecret } = require('../aiConfigCrypto');
+const { ensurePlatformCreditTables } = require('../platformCredits');
 
 let resetTokenColumnsEnsured = false;
 let roleAndOwnershipEnsured = false;
 let roleAndOwnershipEnsurePromise = null;
-let professorCreditColumnsEnsured = false;
-let professorCreditColumnsEnsurePromise = null;
 let professorQuotaColumnsEnsured = false;
 let professorQuotaColumnsEnsurePromise = null;
 let adminSmtpSettingsEnsured = false;
@@ -44,12 +43,23 @@ const ensureRoleAndOwnershipSetup = async () => {
         'SELECT id, email, password_hash FROM users WHERE email = ANY($1::text[])',
         [demoCredentials.map((entry) => entry.email)]
       );
+      const unsafeDefaultAdminIds = [];
       for (const demoUser of demoUsers) {
         const credential = demoCredentials.find((entry) => entry.email === demoUser.email);
         if (credential && await bcrypt.compare(credential.password, demoUser.password_hash)) {
           await db.query('UPDATE users SET is_active = FALSE WHERE id = $1', [demoUser.id]);
+          if (demoUser.email === 'admin@curso.com') {
+            unsafeDefaultAdminIds.push(demoUser.id);
+          }
         }
       }
+      await db.query(
+        `UPDATE users
+            SET is_active = TRUE
+          WHERE role = 'admin'
+            AND NOT (id = ANY($1::uuid[]))`,
+        [unsafeDefaultAdminIds]
+      );
       roleAndOwnershipEnsured = true;
     })().catch((error) => {
       roleAndOwnershipEnsurePromise = null;
@@ -57,32 +67,6 @@ const ensureRoleAndOwnershipSetup = async () => {
     });
   }
   await roleAndOwnershipEnsurePromise;
-};
-
-const ensureProfessorCreditColumns = async () => {
-  if (professorCreditColumnsEnsured) return;
-  if (!professorCreditColumnsEnsurePromise) {
-    professorCreditColumnsEnsurePromise = (async () => {
-  await db.query(`
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS ai_credits NUMERIC(12,2) NOT NULL DEFAULT 0
-  `);
-  await db.query(`
-    ALTER TABLE users
-    ALTER COLUMN ai_credits TYPE NUMERIC(12,2)
-    USING COALESCE(ai_credits, 0)::numeric(12,2)
-  `);
-  await db.query(`
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS ai_credits_updated_at TIMESTAMPTZ DEFAULT NOW()
-  `);
-  professorCreditColumnsEnsured = true;
-    })().catch((error) => {
-      professorCreditColumnsEnsurePromise = null;
-      throw error;
-    });
-  }
-  await professorCreditColumnsEnsurePromise;
 };
 
 const ensureProfessorQuotaColumns = async () => {
@@ -210,7 +194,7 @@ const buildSessionPayload = (user, res) => {
     email: user.email,
     className: user.class_name,
     ownerUserId: user.owner_user_id || null,
-    aiCredits: Number.isFinite(Number(user.ai_credits)) ? Number(user.ai_credits) : 0,
+    platformCredits: Number.isFinite(Number(user.platform_credits)) ? Number(user.platform_credits) : 0,
     studentLimit: Number.isFinite(Number(user.student_limit)) ? Number(user.student_limit) : null,
     storageLimitBytes: Number.isFinite(Number(user.storage_limit_bytes)) ? Number(user.storage_limit_bytes) : null
   });
@@ -224,8 +208,10 @@ const buildSessionPayload = (user, res) => {
       role: user.role,
       className: user.class_name,
       ownerUserId: user.owner_user_id || null,
-      isActive: user.is_active,
-      aiCredits: Number.isFinite(Number(user.ai_credits)) ? Number(user.ai_credits) : 0,
+      isActive: user.role === 'admin' ? true : user.is_active,
+      platformCredits: user.role === 'professor' && Number.isFinite(Number(user.platform_credits))
+        ? Number(user.platform_credits)
+        : null,
       studentLimit: Number.isFinite(Number(user.student_limit)) ? Number(user.student_limit) : null,
       storageLimitBytes: Number.isFinite(Number(user.storage_limit_bytes)) ? Number(user.storage_limit_bytes) : null
     }
@@ -326,7 +312,7 @@ const signupIpRateLimiter = createRateLimiter({
 
 router.post('/login', authIpRateLimiter, loginRateLimiter, async (req, res) => {
   await ensureRoleAndOwnershipSetup();
-  await ensureProfessorCreditColumns();
+  await ensurePlatformCreditTables();
   await ensureProfessorQuotaColumns();
   const email = sanitizeEmail(req.body?.email || '');
   const password = sanitizeText(req.body?.password || '', 256, { trim: false });
@@ -345,8 +331,24 @@ router.post('/login', authIpRateLimiter, loginRateLimiter, async (req, res) => {
     return res.status(401).json({ message: 'Credenciais inválidas' });
   }
 
-  if (!user.is_active) {
+  const usesUnsafeDefaultAdminCredential =
+    user.role === 'admin'
+    && user.email === 'admin@curso.com'
+    && password === 'AdminPass2026!';
+  if (usesUnsafeDefaultAdminCredential) {
+    return res.status(403).json({
+      message: 'A senha padrão do administrador foi bloqueada por segurança. Redefina a senha antes de entrar.'
+    });
+  }
+  if (!user.is_active && user.role !== 'admin') {
     return res.status(403).json({ message: 'Conta bloqueada. Verifique o pagamento.' });
+  }
+  if (user.role === 'admin' && user.is_active === false) {
+    await db.query(
+      `UPDATE users SET is_active = TRUE WHERE id = $1 AND role = 'admin'`,
+      [user.id]
+    );
+    user.is_active = true;
   }
 
   res.json(buildSessionPayload(user, res));
@@ -354,7 +356,7 @@ router.post('/login', authIpRateLimiter, loginRateLimiter, async (req, res) => {
 
 router.post('/signup', signupIpRateLimiter, selfSignupRateLimiter, async (req, res) => {
   await ensureRoleAndOwnershipSetup();
-  await ensureProfessorCreditColumns();
+  await ensurePlatformCreditTables();
   await ensureProfessorQuotaColumns();
   await ensureClassesTable();
   await ensureLegalConsentColumns();
@@ -389,7 +391,7 @@ router.post('/signup', signupIpRateLimiter, selfSignupRateLimiter, async (req, r
   const userId = crypto.randomUUID();
   const isProfessor = role === 'professor';
   const className = isProfessor ? 'Professor' : 'Turma A';
-  const aiCredits = 0;
+  const platformCredits = 0;
   const studentLimit = isProfessor ? 25 : null;
   const storageLimitBytes = isProfessor ? 5 * 1024 * 1024 * 1024 : null;
 
@@ -397,7 +399,7 @@ router.post('/signup', signupIpRateLimiter, selfSignupRateLimiter, async (req, r
     await db.query(
       `INSERT INTO users (
          id, full_name, email, phone, password_hash, role, class_name, is_active, owner_user_id,
-         ai_credits, ai_credits_updated_at, student_limit, storage_limit_bytes,
+         platform_credits, platform_credits_updated_at, student_limit, storage_limit_bytes,
          terms_accepted_at, terms_version, marketing_consent_at
        )
        VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, $8, $9, NOW(), $10, $11, NOW(), $12, $13)`,
@@ -410,7 +412,7 @@ router.post('/signup', signupIpRateLimiter, selfSignupRateLimiter, async (req, r
         role,
         className,
         null,
-        aiCredits,
+        platformCredits,
         studentLimit,
         storageLimitBytes,
         LEGAL_TERMS_VERSION,

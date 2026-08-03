@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Administração | Portal do Curso</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body class="admin-page">
@@ -13,7 +14,9 @@
   <div class="mobile-sidenav-backdrop" id="mobileSidenavBackdrop" hidden></div>
   <div class="page-shell">
     <aside class="sidenav" id="mobileSidenav">
-      <h1>Criatyve</h1>
+      <div class="portal-brand portal-brand-sidebar" data-portal-brand>
+        <span class="portal-brand-fallback">Criatyve</span>
+      </div>
       <p>Administração do portal em uma única tela.</p>
       <ul class="nav-menu">
         <li><button type="button" class="nav-link" data-target="adminAssistantSection">Assistente IA</button></li>
@@ -23,6 +26,7 @@
         <li><button type="button" class="nav-link" data-target="adminCoursesSection">Cursos</button></li>
         <li><button type="button" class="nav-link" data-target="adminChatsSection">Chats</button></li>
         <li><button type="button" class="nav-link" data-target="adminNotificationsSection">Notificações</button></li>
+        <li><button type="button" class="nav-link" data-target="adminFaceReviewsSection">Revisões faciais</button></li>
         <li><button type="button" class="nav-link" data-target="adminSettingsSection">Configurações</button></li>
       </ul>
       <a id="adminWhatsappSupportLink" class="sidenav-support-link" href="#" target="_blank" rel="noopener noreferrer" aria-label="Falar com suporte pelo WhatsApp">
@@ -31,12 +35,17 @@
       </a>
     </aside>
     <main class="main-panel">
-      <div class="panel header-panel">
+      <div class="header-panel">
         <div>
           <h2>Administração em tempo real</h2>
           <p>Monitore alunos, cursos e progresso antes de liberar novos módulos.</p>
         </div>
         <div class="admin-header-actions">
+          <button id="adminPlatformCreditsCard" class="platform-credits-card hidden" type="button" aria-label="Recarregar créditos">
+            <span>Créditos</span>
+            <strong id="adminPlatformCreditsValue">0</strong>
+            <small>Recarregar</small>
+          </button>
           <a class="primary-btn" href="interactive-creator.html">Criar aula interativa</a>
           <button class="secondary-btn logout-btn" type="button">Sair</button>
         </div>
@@ -213,7 +222,7 @@
               <input id="adminProfessorPassword" type="password" required minlength="12" placeholder="Minimo de 12 caracteres" />
             </div>
             <div class="field-group">
-              <label for="adminProfessorCredits">Créditos iniciais de IA</label>
+              <label for="adminProfessorCredits">Créditos iniciais da plataforma</label>
               <input id="adminProfessorCredits" type="number" min="0" step="0.5" value="0" />
             </div>
             <div class="field-group">
@@ -363,9 +372,146 @@
           </div>
         </div>
 
+        <div class="panel" id="adminFaceReviewsSection" data-section="adminFaceReviewsSection">
+          <div class="badge">REVISÃO HUMANA</div>
+          <h2>Confirmações faciais pendentes</h2>
+          <p class="muted">Após três tentativas, analise a situação e escolha uma alternativa. A imagem temporária é removida automaticamente em até 48 horas.</p>
+          <form id="faceManualGrantForm" class="face-manual-grant-form">
+            <div class="field-group">
+              <label for="faceManualStudentSelect">Aluno</label>
+              <select id="faceManualStudentSelect" required><option value="">Selecione o aluno</option></select>
+            </div>
+            <div class="field-group">
+              <label for="faceManualCourseSelect">Curso</label>
+              <select id="faceManualCourseSelect" required><option value="">Selecione o curso</option></select>
+            </div>
+            <div class="field-group">
+              <label for="faceManualModuleSelect">Módulo protegido</label>
+              <select id="faceManualModuleSelect" required disabled><option value="">Selecione o curso primeiro</option></select>
+            </div>
+            <div class="field-group">
+              <label for="faceManualGrantNote">Motivo da liberação</label>
+              <input id="faceManualGrantNote" maxlength="500" placeholder="Ex: aluno sem câmera ou necessidade de acessibilidade" />
+            </div>
+            <button class="secondary-btn" type="submit">Liberar acesso por 1 hora</button>
+          </form>
+          <div id="adminFaceReviewList" class="face-review-grid">
+            <p class="muted" style="margin:0;">Carregando revisões...</p>
+          </div>
+        </div>
+
         <div class="panel" id="adminSettingsSection" data-section="adminSettingsSection">
+          <h2>Configurações da conta</h2>
+          <p style="margin-top:0; color:#8b92b1; font-size:0.9rem;">Ajuste a foto do chat e a identidade visual que os alunos veem no portal e no visualizador de módulos.</p>
+          <form id="accountProfileForm">
+            <div class="profile-settings-row">
+              <div class="profile-avatar-preview" id="profileAvatarPreview" aria-hidden="true">?</div>
+              <div class="field-group">
+                <label>Foto do chat</label>
+                <div class="compact-inline">
+                  <button class="secondary-btn" id="profileImagePickBtn" type="button">Escolher foto</button>
+                  <button class="secondary-btn" id="profileImageClearBtn" type="button">Remover foto</button>
+                </div>
+                <input id="profileImageInput" type="file" accept="image/*" hidden />
+                <small style="color:#8b92b1;">Essa imagem aparece nas conversas dos cursos.</small>
+              </div>
+            </div>
+            <div class="form-actions" style="margin-top:1rem;">
+              <button class="primary-btn" type="submit">Salvar foto</button>
+            </div>
+          </form>
+          <form id="portalThemeForm" style="margin-top:1.5rem;">
+            <h3>Visual do portal do aluno</h3>
+            <div class="field-grid">
+              <div class="field-group">
+                <label for="portalBackgroundColor">Cor de fundo</label>
+                <input id="portalBackgroundColor" type="color" value="#f4f6ff" />
+              </div>
+              <div class="field-group">
+                <label for="portalTextColor">Cor dos textos fora dos cards</label>
+                <input id="portalTextColor" type="color" value="#101426" />
+              </div>
+              <div class="field-group">
+                <label for="portalCardBackgroundColor">Cor dos cards</label>
+                <input id="portalCardBackgroundColor" type="color" value="#ffffff" />
+              </div>
+              <div class="field-group">
+                <label for="portalCardTextColor">Cor dos textos nos cards</label>
+                <input id="portalCardTextColor" type="color" value="#101426" />
+              </div>
+              <div class="field-group">
+                <label for="portalSidebarBackgroundColor">Cor do menu lateral</label>
+                <input id="portalSidebarBackgroundColor" type="color" value="#070a1f" />
+              </div>
+              <div class="field-group">
+                <label for="portalSidebarTextColor">Cor dos textos do menu lateral</label>
+                <input id="portalSidebarTextColor" type="color" value="#ffffff" />
+              </div>
+              <div class="field-group">
+                <label for="portalAccentColor">Cor dos botões</label>
+                <input id="portalAccentColor" type="color" value="#6d63ff" />
+              </div>
+              <div class="field-group">
+                <label>Imagem de fundo</label>
+                <div class="compact-inline">
+                  <button class="secondary-btn" id="portalBackgroundPickBtn" type="button">Escolher imagem</button>
+                  <button class="secondary-btn" id="portalBackgroundClearBtn" type="button">Remover</button>
+                </div>
+                <input id="portalBackgroundImageInput" type="file" accept="image/*" hidden />
+              </div>
+              <div class="field-group portal-logo-field">
+                <label>Logo exibida aos alunos</label>
+                <div class="portal-logo-preview" id="portalLogoPreview">
+                  <span>Criatyve</span>
+                </div>
+                <div class="compact-inline">
+                  <button class="secondary-btn" id="portalLogoPickBtn" type="button">Escolher logo</button>
+                  <button class="secondary-btn" id="portalLogoClearBtn" type="button">Remover</button>
+                </div>
+                <input id="portalLogoImageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
+                <small>Use PNG ou WebP com fundo transparente para obter o melhor resultado.</small>
+              </div>
+            </div>
+            <div class="portal-theme-preview" id="portalThemePreview">
+              <div class="portal-theme-preview-sidebar">
+                <strong>Menu lateral</strong>
+                <small>Logo e navegação</small>
+              </div>
+              <strong>Administração em tempo real</strong>
+              <span>Texto fora dos cards usa a cor principal.</span>
+              <div class="portal-theme-preview-card">
+                <b>Configurações da conta</b>
+                <small>Este card usa cor e texto próprios.</small>
+              </div>
+              <button type="button" class="portal-theme-preview-button">Botão do portal</button>
+            </div>
+            <section class="portal-palette-manager" aria-labelledby="portalPaletteTitle">
+              <div>
+                <strong id="portalPaletteTitle">Paletas salvas</strong>
+                <small>Salve as cores atuais para reutilizá-las depois.</small>
+              </div>
+              <div class="portal-palette-save-row">
+                <input id="portalPaletteNameInput" maxlength="60" placeholder="Nome da paleta" />
+                <button class="secondary-btn" id="portalSavePaletteBtn" type="button">Salvar paleta de cores</button>
+              </div>
+              <div class="portal-palette-select-row">
+                <select id="portalColorPaletteSelect" aria-label="Paletas de cores salvas">
+                  <option value="">Escolha uma paleta salva</option>
+                </select>
+                <button class="secondary-btn danger" id="portalDeletePaletteBtn" type="button" disabled>Excluir paleta</button>
+              </div>
+            </section>
+            <div class="form-actions portal-theme-actions">
+              <button class="secondary-btn" id="portalThemeResetColorsBtn" type="button">Redefinir cores</button>
+              <button class="primary-btn" type="submit">Salvar visual</button>
+            </div>
+          </form>
+          <p id="accountSettingsStatus" style="margin:0.75rem 0 0; color:#8b92b1; font-size:0.9rem;"></p>
+        </div>
+
+        <div class="panel" id="adminAiSettingsPanel" data-section="adminSettingsSection">
           <h2>Integracao de IA</h2>
-          <p style="margin-top:0; color:#8b92b1; font-size:0.9rem;">Cada admin conecta sua propria IA. A chave fica salva no backend e o criador de slides so aplica mudancas apos confirmacao.</p>
+          <p style="margin-top:0; color:#8b92b1; font-size:0.9rem;">Apenas o admin configura provedores e custos de IA. Professores usam a integração definida pelo admin.</p>
           <p id="professorCreditsStatus" style="margin:0 0 1rem; color:#8b92b1; font-size:0.9rem;"></p>
           <form id="aiSettingsForm">
             <div class="field-group">
@@ -381,6 +527,23 @@
               <label for="aiImageCreditCostPerCall">Custo por chamada de Nano Banana / IA de imagem</label>
               <input id="aiImageCreditCostPerCall" type="number" min="0.1" step="0.1" value="1.0" />
               <small style="color:#8b92b1;">Usado em edição de imagem, Nano Banana, remover fundo, comparar imagens e imagens geradas nos slides.</small>
+            </div>
+            <div class="field-group">
+              <label for="threeDImportCreditCost">Custo por importação de modelo 3D</label>
+              <input id="threeDImportCreditCost" type="number" min="0.1" step="0.1" value="5" />
+              <small style="color:#8b92b1;">Busca, miniatura e prévia são gratuitas. O débito ocorre somente após salvar um modelo novo.</small>
+            </div>
+            <div class="admin-subpanel credit-package-admin">
+              <h3>Pacotes de recarga</h3>
+              <p class="muted">O preço mínimo permitido é R$ 30.</p>
+              <div id="adminCreditPackageList" class="credit-package-grid"></div>
+              <div class="credit-package-form">
+                <input id="creditPackageName" maxlength="80" placeholder="Nome do pacote" />
+                <input id="creditPackagePrice" type="number" min="30" step="0.01" value="30" placeholder="Preço" />
+                <input id="creditPackageCredits" type="number" min="0.01" step="0.01" value="100" placeholder="Créditos" />
+                <label class="credit-package-active"><input id="creditPackageActive" type="checkbox" checked /> Pacote ativo</label>
+                <button id="saveCreditPackageBtn" class="secondary-btn" type="button">Adicionar pacote</button>
+              </div>
             </div>
             <div class="field-group">
               <label for="aiProviderKey">Identificador do provedor</label>
@@ -541,6 +704,46 @@
         <p style="margin:0; color:#8b92b1;">Selecione um relatorio para abrir o historico.</p>
       </div>
       <iframe id="progressTimelineFrame" class="admin-report-frame hidden" title="Replay visual do aluno"></iframe>
+    </div>
+  </div>
+  <div id="creditTopupModal" class="admin-report-modal hidden" aria-hidden="true">
+    <div class="admin-report-modal-backdrop" data-credit-topup-close="true"></div>
+    <div class="admin-report-modal-card credit-topup-modal-card" role="dialog" aria-modal="true" aria-labelledby="creditTopupTitle">
+      <div class="credit-topup-hero">
+        <div class="credit-topup-heading">
+          <span class="credit-topup-icon" aria-hidden="true">C</span>
+          <div>
+          <p class="credit-topup-eyebrow">CARTEIRA CRIATYVE</p>
+          <h3 id="creditTopupTitle">Recarregar créditos</h3>
+          <p>Continue criando com IA, imagens e modelos 3D.</p>
+          </div>
+        </div>
+        <div class="credit-topup-hero-actions">
+          <div class="credit-topup-balance">
+            <small>Saldo atual</small>
+            <strong><span id="adminCreditTopupBalance">0</span> créditos</strong>
+          </div>
+          <button class="credit-topup-close" type="button" data-credit-topup-close="true" aria-label="Fechar">×</button>
+        </div>
+      </div>
+      <div class="credit-topup-content">
+        <div class="credit-topup-section-title">
+          <div>
+            <span>Escolha sua recarga</span>
+            <h4>Créditos que não expiram</h4>
+          </div>
+          <div class="credit-topup-secure"><span aria-hidden="true">✓</span> Pagamento protegido</div>
+        </div>
+        <div id="creditTopupPackageList" class="credit-package-grid">
+          <p class="muted">Carregando pacotes...</p>
+        </div>
+        <p id="creditTopupStatus" class="credit-topup-status" aria-live="polite"></p>
+        <div class="credit-topup-payment-strip">
+          <div><span class="payment-method-icon">PIX</span><strong>Pix</strong><small>Confirmação rápida</small></div>
+          <div><span class="payment-method-icon">••••</span><strong>Cartão</strong><small>Checkout seguro</small></div>
+          <p>O saldo é liberado somente após confirmação direta do Asaas.</p>
+        </div>
+      </div>
     </div>
   </div>
   <script src="script.js" type="module"></script>

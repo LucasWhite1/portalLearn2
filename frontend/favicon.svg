@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title>Criatyve</title>
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#20103d" />
+      <stop offset="100%" stop-color="#3d1674" />
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#c46bff" />
+      <stop offset="100%" stop-color="#7a2cff" />
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="18" fill="url(#bg)" />
+  <path d="M46 20.2c-2.9-3.8-7.6-6.2-12.9-6.2-8.8 0-16 7.2-16 16s7.2 16 16 16c5.3 0 10-2.4 12.9-6.2l-5.7-4.1c-1.7 2.3-4.3 3.7-7.2 3.7-5.2 0-9.4-4.2-9.4-9.4s4.2-9.4 9.4-9.4c2.9 0 5.5 1.4 7.2 3.7z" fill="url(#accent)" />
+</svg>

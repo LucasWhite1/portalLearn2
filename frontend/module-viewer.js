@@ -1,3 +1,10 @@
+import {
+  createThreeDStageController,
+  normalizeThreeDAttachment,
+  normalizeThreeDScene
+} from './modules/three-d-stage.js';
+import { runFaceVerification } from './modules/face-verification.js';
+
 const resolveApiBase = () => {
   if (window.__API_BASE__) {
     return window.__API_BASE__;
@@ -44,10 +51,115 @@ const IMAGE_FALLBACK_SRC =
 const getToken = () => localStorage.getItem(STORAGE_KEY);
 const getCurrentSessionUser = () => JSON.parse(localStorage.getItem('curso-platform-user') || '{}');
 
+const renderPortalBranding = (logoImage = '') => {
+  document.querySelectorAll('[data-portal-brand]').forEach((brand) => {
+    brand.replaceChildren();
+    if (logoImage) {
+      const image = document.createElement('img');
+      image.src = logoImage;
+      image.alt = 'Logo do professor';
+      image.addEventListener('error', () => {
+        brand.replaceChildren();
+        const fallback = document.createElement('span');
+        fallback.className = 'portal-brand-fallback';
+        fallback.textContent = 'Criatyve';
+        brand.appendChild(fallback);
+      }, { once: true });
+      brand.appendChild(image);
+      return;
+    }
+    const fallback = document.createElement('span');
+    fallback.className = 'portal-brand-fallback';
+    fallback.textContent = 'Criatyve';
+    brand.appendChild(fallback);
+  });
+};
+
+const getThemeContrastColor = (color = '') => {
+  const match = String(color).trim().match(/^#([0-9a-f]{6})$/i);
+  if (!match) return '#ffffff';
+  const value = Number.parseInt(match[1], 16);
+  const red = (value >> 16) & 255;
+  const green = (value >> 8) & 255;
+  const blue = value & 255;
+  return ((red * 299 + green * 587 + blue * 114) / 1000) >= 150 ? '#111827' : '#ffffff';
+};
+
+const applyPortalTheme = (theme = {}) => {
+  const backgroundColor = theme.portalBackgroundColor || '#f4f6ff';
+  const pageTextColor = theme.portalTextColor || '#101426';
+  const cardTextColor = theme.portalCardTextColor || '#101426';
+  const cardBackgroundColor = theme.portalCardBackgroundColor || '#ffffff';
+  const sidebarBackgroundColor = theme.portalSidebarBackgroundColor || '#070a1f';
+  const sidebarTextColor = theme.portalSidebarTextColor || '#ffffff';
+  const buttonColor = theme.portalButtonColor || theme.portalAccentColor || '#6d63ff';
+  const buttonTextColor = getThemeContrastColor(buttonColor);
+  const backgroundImage = typeof theme.portalBackgroundImage === 'string' ? theme.portalBackgroundImage.trim() : '';
+  document.documentElement.style.setProperty('--portal-bg', backgroundColor);
+  document.documentElement.style.setProperty('--portal-page-text', pageTextColor);
+  document.documentElement.style.setProperty('--portal-text', cardTextColor);
+  document.documentElement.style.setProperty('--portal-card-text', cardTextColor);
+  document.documentElement.style.setProperty('--portal-card-bg', cardBackgroundColor);
+  document.documentElement.style.setProperty('--portal-sidebar-bg', sidebarBackgroundColor);
+  document.documentElement.style.setProperty('--portal-sidebar-text', sidebarTextColor);
+  document.documentElement.style.setProperty('--portal-accent', buttonColor);
+  document.documentElement.style.setProperty('--portal-button', buttonColor);
+  document.documentElement.style.setProperty('--portal-button-text', buttonTextColor);
+  document.body.style.setProperty('--portal-bg', backgroundColor);
+  document.body.style.setProperty('--portal-page-text', pageTextColor);
+  document.body.style.setProperty('--portal-text', cardTextColor);
+  document.body.style.setProperty('--portal-card-text', cardTextColor);
+  document.body.style.setProperty('--portal-card-bg', cardBackgroundColor);
+  document.body.style.setProperty('--portal-sidebar-bg', sidebarBackgroundColor);
+  document.body.style.setProperty('--portal-sidebar-text', sidebarTextColor);
+  document.body.style.setProperty('--portal-accent', buttonColor);
+  document.body.style.setProperty('--portal-button', buttonColor);
+  document.body.style.setProperty('--portal-button-text', buttonTextColor);
+  document.body.style.color = pageTextColor;
+  document.body.style.backgroundColor = backgroundColor;
+  document.body.style.backgroundImage = backgroundImage
+    ? `linear-gradient(135deg, color-mix(in srgb, ${backgroundColor} 22%, transparent), color-mix(in srgb, ${backgroundColor} 8%, transparent)), url("${backgroundImage}")`
+    : '';
+  document.body.style.backgroundSize = backgroundImage ? 'cover' : '';
+  document.body.style.backgroundAttachment = backgroundImage ? 'fixed' : '';
+  document.body.style.backgroundPosition = backgroundImage ? 'center' : '';
+  renderPortalBranding(typeof theme.portalLogoImage === 'string' ? theme.portalLogoImage.trim() : '');
+};
+
+const loadViewerAccountTheme = async () => {
+  if (!getToken()) return;
+  try {
+    const response = await authorizedFetch('/api/student/profile');
+    const profile = await response.json();
+    if (profile?.theme) applyPortalTheme(profile.theme);
+    localStorage.setItem('curso-platform-user', JSON.stringify({
+      ...getCurrentSessionUser(),
+      fullName: profile?.full_name || getCurrentSessionUser().fullName,
+      profileImage: profile?.profile_image || ''
+    }));
+  } catch (error) {
+    console.warn('Tema do portal nao pode ser carregado', error);
+  }
+};
+
+let authRedirectPending = false;
+
+const redirectToLogin = () => {
+  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(USER_ROLE_KEY);
+  localStorage.removeItem('curso-platform-user');
+  if (authRedirectPending) return;
+  authRedirectPending = true;
+  if (!window.location.pathname.endsWith('/login.html')) {
+    window.location.replace('login.html');
+  }
+};
+
 const authorizedFetch = async (path, options = {}) => {
   const token = getToken();
   if (!token) {
-    throw new Error('Sem token válido');
+    redirectToLogin();
+    throw new Error('Sessão expirada');
   }
   const headers = {
     'Content-Type': 'application/json',
@@ -56,9 +168,7 @@ const authorizedFetch = async (path, options = {}) => {
   if (/^[0-9a-f]{48}$/i.test(token)) headers.Authorization = `Bearer ${token}`;
   const response = await fetch(`${API_BASE}${path}`, { ...options, headers, credentials: 'include' });
   if (response.status === 401) {
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem(USER_ROLE_KEY);
-    window.location.href = 'login.html';
+    redirectToLogin();
     throw new Error('Sessão expirada');
   }
   return response;
@@ -73,11 +183,23 @@ const fetchPublicModule = async (moduleId) => {
   return payload;
 };
 
-const fetchLiveStageModule = async (shareId) => {
+const fetchLiveStageModule = async (shareId, faceRetried = false) => {
   const response = await authorizedFetch(`/api/student/live-stage/${encodeURIComponent(shareId)}`);
   const payload = await response.json().catch(() => null);
+  if (
+    !response.ok &&
+    !faceRetried &&
+    payload?.code === 'FACE_VERIFICATION_REQUIRED' &&
+    payload?.moduleId
+  ) {
+    await verifyModuleFace({ id: payload.moduleId }, 'entry');
+    return fetchLiveStageModule(shareId, true);
+  }
   if (!response.ok) {
-    throw new Error(payload?.message || 'Nao foi possivel carregar o palco ao vivo.');
+    const error = new Error(payload?.message || 'Nao foi possivel carregar o palco ao vivo.');
+    error.code = payload?.code;
+    error.statusCode = response.status;
+    throw error;
   }
   return payload;
 };
@@ -182,6 +304,9 @@ let replayStatusGrid;
 let replayTimelineCard;
 let replayTimelineList;
 let viewerModules = [];
+let viewerThreeDStageController = null;
+let viewerThreeDStreamAbortController = null;
+let viewerThreeDTransformSequence = 0;
 let moduleStageDimensions = null;
 let replayPayload = null;
 let replayEvents = [];
@@ -1202,6 +1327,19 @@ const buildReplyQuoteMarkup = (message) => {
   `;
 };
 
+const renderChatAvatar = (message = {}) => {
+  const image = message.profile_image || '';
+  const name = message.full_name || 'Usuario';
+  const initials = String(name)
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0] || '')
+    .join('')
+    .toUpperCase() || '?';
+  return `<span class="chat-avatar" ${image ? `style="background-image:url('${escapeAttribute(image)}')"` : ''}>${image ? '' : escapeHtml(initials)}</span>`;
+};
+
 const formatProgressEventType = (type = '') => {
   const labels = {
     slide_view: 'Entrou no slide',
@@ -1428,9 +1566,6 @@ const createMediaCaptionOverlayNode = (element, mediaNode, stageNode) => {
 const wrapMediaNodeWithCaptions = (mediaNode, element) => {
   const shell = document.createElement('div');
   shell.className = 'builder-media-shell';
-  if (element?.type === 'audio' && !element.audioVisible && !element.captionsEnabled) {
-    shell.style.display = 'none';
-  }
   shell.appendChild(mediaNode);
   return shell;
 };
@@ -2274,7 +2409,7 @@ const normalizeAudioElement = (element) => {
     return;
   }
   normalizeMediaCaptionConfig(element, 'audio');
-  element.audioVisible = typeof element.audioVisible === 'boolean' ? element.audioVisible : true;
+  element.audioVisible = true;
   element.audioLoop = Boolean(element.audioLoop);
   element.collectStudentAudio = Boolean(element.collectStudentAudio);
   element.width = Math.max(180, Number(element.width) || 260);
@@ -2424,7 +2559,7 @@ const normalizeRuntimeActionConfig = (config = {}) => ({
   fontWeight: typeof config.fontWeight === 'string' && config.fontWeight ? config.fontWeight : DEFAULT_INSERT_TEXT_STYLE.fontWeight,
   fontSize: Number.isFinite(Number(config.fontSize)) ? Number(config.fontSize) : DEFAULT_INSERT_TEXT_STYLE.fontSize,
   videoTime: Number.isFinite(Number(config.videoTime)) ? Number(config.videoTime) : 0,
-  audioVisible: typeof config.audioVisible === 'boolean' ? config.audioVisible : true,
+  audioVisible: true,
   audioLoop: Boolean(config.audioLoop),
   quizQuestion:
     typeof config.quizQuestion === 'string' && config.quizQuestion
@@ -3193,7 +3328,7 @@ const renderReplayHeader = () => {
     )
     .join('');
   replayTimelineList.querySelectorAll('[data-replay-index]').forEach((button) =>
-    button.addEventListener('click', () => {
+    button.addEventListener('click', async () => {
       const index = Number(button.getAttribute('data-replay-index'));
       if (Number.isFinite(index)) {
         jumpToReplayEvent(index);
@@ -3577,7 +3712,8 @@ const normalizeElementAnimation = (element) => {
         width: Math.max(40, Number(frame?.width) || Number(element.width) || 40),
         height: Math.max(40, Number(frame?.height) || Number(element.height) || 40),
         rotation: Number.isFinite(Number(frame?.rotation)) ? ((Number(frame.rotation) % 360) + 360) % 360 : Number(element.rotation) || 0,
-        opacity: Number.isFinite(Number(frame?.opacity)) ? Math.min(Math.max(Number(frame.opacity), 0), 1) : 1
+        opacity: Number.isFinite(Number(frame?.opacity)) ? Math.min(Math.max(Number(frame.opacity), 0), 1) : 1,
+        attachment3d: normalizeThreeDAttachment(frame?.attachment3d)
       }))
       .filter((frame) => Number.isFinite(frame.x) && Number.isFinite(frame.y));
   }
@@ -4952,6 +5088,7 @@ const normalizeQuizElement = (element) => {
   element.quizButtonBackgroundColor = element.quizButtonBackgroundColor || '#6d63ff';
   element.points = Math.max(1, Number(element.points) || 1);
   element.lockOnWrong = Boolean(element.lockOnWrong);
+  element.hideOnCorrect = Boolean(element.hideOnCorrect);
 };
 
 const createQuizNode = (element, slide) => {
@@ -5088,6 +5225,9 @@ const createQuizNode = (element, slide) => {
     persistModuleQuizMetrics();
     persistCurrentSlideProgress({ force: true });
     updateNavigationState();
+    if (isCorrect && element.hideOnCorrect && setViewerElementHidden(currentSlide, element.id, true)) {
+      syncViewerElementVisibilityInDom(currentSlide, element.id, true);
+    }
   });
   return node;
 };
@@ -5220,7 +5360,7 @@ const createRuntimeElement = (type, source, slide) => {
       src: source.url || '',
       width: Math.max(180, Number(source.insertWidth) || 260),
       height: Math.max(54, Number(source.insertHeight) || 70),
-      audioVisible: typeof source.audioVisible === 'boolean' ? source.audioVisible : true,
+      audioVisible: true,
       audioLoop: Boolean(source.audioLoop)
     };
   }
@@ -5252,6 +5392,7 @@ const createRuntimeElement = (type, source, slide) => {
     quizButtonBackgroundColor: source.quizButtonBackgroundColor || '#6d63ff',
     points: Math.max(1, Number(source.points) || 1),
     lockOnWrong: Boolean(source.lockOnWrong),
+    hideOnCorrect: Boolean(source.hideOnCorrect),
     width: Math.max(40, Number(source.insertWidth) || 420),
     height: Math.max(40, Number(source.insertHeight) || 280)
   };
@@ -5397,8 +5538,8 @@ const applyViewerAudioPresentation = (node, element) => {
   node.loop = Boolean(element.audioLoop);
   node.preload = 'metadata';
   node.autoplay = false;
-  node.controls = Boolean(element.audioVisible);
-  node.style.display = element.audioVisible ? '' : 'none';
+  node.controls = true;
+  node.style.display = '';
 };
 
 const controlViewerAudioElement = (slide, targetElementId) => {
@@ -6007,6 +6148,9 @@ const applyElementAnimationStyles = (node, element, options = {}) => {
 
   if (element.animationType === MOTION_ANIMATION_TYPE) {
     node.style.animation = '';
+    if (typeof options.preservedElapsedSeconds === 'number') {
+      node.dataset.motionElapsedSeconds = String(options.preservedElapsedSeconds);
+    }
     const renderState = getElementRenderState(element);
     node.style.left = `${renderState.x}px`;
     node.style.top = `${renderState.y}px`;
@@ -6310,6 +6454,77 @@ const stopLiveStagePolling = () => {
     clearInterval(liveStagePollTimer);
     liveStagePollTimer = null;
   }
+  stopViewerThreeDTransformStream();
+};
+
+const stopViewerThreeDTransformStream = () => {
+  viewerThreeDStreamAbortController?.abort();
+  viewerThreeDStreamAbortController = null;
+  viewerThreeDTransformSequence = 0;
+};
+
+const applyViewerLiveThreeDTransform = (transform) => {
+  const sequence = Number(transform?.sequence) || 0;
+  if (sequence && sequence < viewerThreeDTransformSequence) return;
+  viewerThreeDTransformSequence = Math.max(viewerThreeDTransformSequence, sequence);
+  const module = getCurrentModule();
+  const slide = (module?.builder_data?.slides || []).find((entry) => entry?.id === transform?.slideId);
+  if (!slide?.threeDScene?.enabled || slide.threeDScene.controlMode === 'student') return;
+  slide.threeDScene = normalizeThreeDScene({
+    ...slide.threeDScene,
+    quaternion: transform.quaternion,
+    position: Array.isArray(transform.position) ? transform.position : slide.threeDScene.position,
+    zoom: transform.zoom
+  });
+  if (getCurrentSlide()?.id === slide.id) {
+    ensureViewerThreeDStageController().setSceneState(slide.threeDScene);
+  }
+};
+
+const startViewerThreeDTransformStream = async () => {
+  stopViewerThreeDTransformStream();
+  if (!viewerState.liveShareId) return;
+  const abortController = new AbortController();
+  viewerThreeDStreamAbortController = abortController;
+  try {
+    const response = await authorizedFetch(
+      `/api/student/live-stage/${encodeURIComponent(viewerState.liveShareId)}/3d-stream`,
+      {
+        signal: abortController.signal,
+        headers: { Accept: 'text/event-stream' }
+      }
+    );
+    if (!response.ok || !response.body) throw new Error('Canal 3D indisponível.');
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let pending = '';
+    while (!abortController.signal.aborted) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      pending += decoder.decode(value, { stream: true });
+      const messages = pending.split(/\r?\n\r?\n/);
+      pending = messages.pop() || '';
+      messages.forEach((message) => {
+        const eventType = message.match(/^event:\s*(.+)$/m)?.[1]?.trim();
+        const data = message.match(/^data:\s*(.+)$/m)?.[1];
+        if (eventType !== 'transform' || !data) return;
+        try {
+          applyViewerLiveThreeDTransform(JSON.parse(data));
+        } catch (error) {
+          console.warn('Transformação 3D ao vivo inválida.', error);
+        }
+      });
+    }
+  } catch (error) {
+    if (!abortController.signal.aborted) {
+      console.warn('Canal 3D ao vivo interrompido.', error);
+      setTimeout(() => {
+        if (viewerState.liveShareId && viewerThreeDStreamAbortController === abortController) {
+          void startViewerThreeDTransformStream();
+        }
+      }, 1500);
+    }
+  }
 };
 
 const startLiveStagePolling = () => {
@@ -6317,6 +6532,7 @@ const startLiveStagePolling = () => {
   if (!viewerState.liveShareId) {
     return;
   }
+  void startViewerThreeDTransformStream();
   liveStagePollTimer = setInterval(async () => {
     try {
       const liveModule = await fetchLiveStageModule(viewerState.liveShareId);
@@ -6783,6 +6999,96 @@ const requestStudentCameraWithStatus = async () => {
   }
 };
 
+let facePeriodicTimer = null;
+
+const getViewerFaceSettings = (module) => {
+  const raw = module?.builder_data?.moduleSettings?.faceVerification;
+  const enabled = Boolean(raw?.enabled) && !Boolean(module?.builder_data?.moduleSettings?.isPublic);
+  return {
+    enabled,
+    verifyOnEntry: enabled && raw?.verifyOnEntry !== false,
+    verifyDuringModule: enabled && Boolean(raw?.verifyDuringModule),
+    verifyOnCompletion: enabled && Boolean(raw?.verifyOnCompletion)
+  };
+};
+
+const fetchProtectedModuleContent = async (module) => {
+  const response = await authorizedFetch(`/api/student/modules/${encodeURIComponent(module.id)}/content`);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload?.message || 'Não foi possível liberar o conteúdo protegido.');
+    error.code = payload?.code;
+    error.statusCode = response.status;
+    throw error;
+  }
+  Object.assign(module, payload, {
+    courseId: payload.courseId || payload.course_id || module.courseId,
+    courseTitle: payload.courseTitle || module.courseTitle,
+    courseProgress: module.courseProgress || {},
+    faceContentProtected: false
+  });
+  return module;
+};
+
+const showFaceProfileRequired = () => {
+  const goToProfile = confirm(
+    'Este módulo exige um cadastro facial. Deseja abrir as configurações do perfil para cadastrar seu rosto?'
+  );
+  if (goToProfile) {
+    window.location.href = 'portal.html?section=studentSettingsSection&faceSetup=1';
+  }
+};
+
+const verifyModuleFace = async (module, purpose) => {
+  try {
+    return await runFaceVerification({ mode: 'module', moduleId: module.id, purpose });
+  } catch (error) {
+    if (error.code === 'FACE_PROFILE_REQUIRED' || error.statusCode === 428) {
+      showFaceProfileRequired();
+    } else if (error.code !== 'FACE_CAPTURE_CANCELED') {
+      alert(error.message || 'Não foi possível confirmar o rosto.');
+    }
+    throw error;
+  }
+};
+
+const prepareModuleFaceAccess = async (module) => {
+  if (!module || viewerState.isPublic || isReplayMode() || isLiveShareMode()) return module;
+  const settings = getViewerFaceSettings(module);
+  if (!settings.enabled) return module;
+  if (settings.verifyOnEntry && module.faceContentProtected) {
+    await verifyModuleFace(module, 'entry');
+  } else if (settings.verifyDuringModule && module.faceContentProtected) {
+    await verifyModuleFace(module, 'periodic');
+  }
+  if (module.faceContentProtected) {
+    await fetchProtectedModuleContent(module);
+  }
+  return module;
+};
+
+const schedulePeriodicFaceVerification = (module) => {
+  if (facePeriodicTimer) {
+    clearTimeout(facePeriodicTimer);
+    facePeriodicTimer = null;
+  }
+  const settings = getViewerFaceSettings(module);
+  if (!settings.verifyDuringModule || viewerState.isPublic || isReplayMode() || isLiveShareMode()) return;
+  const delay = (15 + Math.random() * 15) * 60 * 1000;
+  facePeriodicTimer = setTimeout(async () => {
+    if (getCurrentModule()?.id !== module.id || document.hidden) {
+      schedulePeriodicFaceVerification(module);
+      return;
+    }
+    try {
+      await verifyModuleFace(module, 'periodic');
+      schedulePeriodicFaceVerification(module);
+    } catch (error) {
+      disableNavigation();
+    }
+  }, delay);
+};
+
 const loadModule = (modules) => {
   const unlockedModuleIds = getUnlockedModuleIds(modules);
   let module = modules.find((mod) => mod.id === viewerState.moduleId);
@@ -6836,6 +7142,7 @@ const loadModule = (modules) => {
   hydrateViewerInitiallyHiddenFromModule(module);
   viewerState.slideIndex = Math.min(Math.max(viewerState.slideIndex, 0), slides.length - 1);
   renderSlide(slides[viewerState.slideIndex]);
+  schedulePeriodicFaceVerification(module);
   if (moduleStageHint) {
     moduleStageHint.style.display = 'none';
   }
@@ -6845,9 +7152,52 @@ const loadModule = (modules) => {
   updateNavigationState();
 };
 
+const loadViewerThreeDAssetBuffer = async (assetId, variant) => {
+  const module = getCurrentModule();
+  let response;
+  if (viewerState.isPublic) {
+    const token = module?.threeDAssetTokens?.[assetId] || '';
+    const query = new URLSearchParams({
+      moduleId: module?.id || viewerState.moduleId || '',
+      token,
+      variant
+    });
+    response = await fetch(
+      `${API_BASE}/api/student/public/3d-assets/${encodeURIComponent(assetId)}/file?${query.toString()}`
+    );
+  } else {
+    const query = new URLSearchParams({ variant });
+    if (viewerState.liveShareId) query.set('liveShareId', viewerState.liveShareId);
+    else query.set('moduleId', module?.id || viewerState.moduleId || '');
+    response = await authorizedFetch(
+      `/api/student/3d-assets/${encodeURIComponent(assetId)}/file?${query.toString()}`
+    );
+  }
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.message || 'Não foi possível carregar o modelo 3D.');
+  }
+  return response.arrayBuffer();
+};
+
+const ensureViewerThreeDStageController = () => {
+  if (viewerThreeDStageController) return viewerThreeDStageController;
+  viewerThreeDStageController = createThreeDStageController({
+    mode: 'viewer',
+    loadAssetBuffer: loadViewerThreeDAssetBuffer,
+    canControl: (scene) => !isReplayMode() && scene?.controlMode === 'student',
+    onSceneChange: (scene) => {
+      const slide = getCurrentSlide();
+      if (slide) slide.threeDScene = normalizeThreeDScene(scene);
+    }
+  });
+  return viewerThreeDStageController;
+};
+
 const renderSlide = (slide) => {
   if (!moduleStage) return;
   if (!slide) {
+    viewerThreeDStageController?.unmount();
     syncVisibleViewerCameraSessions(new Set());
     syncVisibleStudentPeers(new Set());
     return;
@@ -6881,6 +7231,12 @@ const renderSlide = (slide) => {
     )
   );
   wrapper.innerHTML = '';
+  const threeDEnabled = Boolean(slide?.threeDScene?.enabled);
+  if (threeDEnabled) {
+    void ensureViewerThreeDStageController().mount(wrapper, slide);
+  } else {
+    viewerThreeDStageController?.unmount();
+  }
   const backgroundStyles = getSlideBackgroundStyles(slide);
   renderViewerBackgroundMedia(moduleStage, slide);
   moduleStage.style.backgroundImage = backgroundStyles.backgroundImage;
@@ -6898,8 +7254,13 @@ const renderSlide = (slide) => {
     .filter((element) => isViewerElementVisibleByBranch(slide, element))
     .forEach((element) => {
       const node = createRendererNode(element, slide);
-      wrapper.appendChild(node);
-      if (['audio', 'video'].includes(element.type) && !(element.type === 'audio' && element.collectStudentAudio)) {
+      const attachedToThreeD = threeDEnabled
+        && normalizeThreeDAttachment(element.attachment3d)
+        && viewerThreeDStageController?.attachElement(node, element);
+      if (!attachedToThreeD) {
+        wrapper.appendChild(node);
+      }
+      if (!attachedToThreeD && ['audio', 'video'].includes(element.type) && !(element.type === 'audio' && element.collectStudentAudio)) {
         const mediaNode = node instanceof Element ? node.querySelector?.('audio, video') || (node.matches?.('audio,video') ? node : null) : null;
         const overlayNode = createMediaCaptionOverlayNode(element, mediaNode, wrapper);
         if (overlayNode) {
@@ -6924,6 +7285,8 @@ const renderSlide = (slide) => {
     });
   }
   performStageScaleUpdate();
+  viewerThreeDStageController?.resize();
+  viewerThreeDStageController?.requestRender();
   ensureViewerPenOverlay(slide);
   ensureViewerLiveCursorOverlay();
   updateViewerPenToolState(slide);
@@ -7357,12 +7720,27 @@ const handleViewerKeyTriggerEvent = (event) => {
   return executed;
 };
 
-const changeSlide = (direction, options = {}) => {
+const changeSlide = async (direction, options = {}) => {
   const module = viewerModules.find((mod) => mod.id === viewerState.moduleId);
   if (!module) return;
   const slides = module.builder_data?.slides || [];
   if (!slides.length) return;
   const ignoreRestrictions = Boolean(options.ignoreRestrictions);
+  const isCompletionAttempt = direction > 0 && viewerState.slideIndex >= slides.length - 1;
+  const faceSettings = getViewerFaceSettings(module);
+  if (
+    isCompletionAttempt &&
+    faceSettings.verifyOnCompletion &&
+    Number(module._faceCompletionVerifiedUntil || 0) <= Date.now()
+  ) {
+    try {
+      await verifyModuleFace(module, 'completion');
+      module._faceCompletionVerifiedUntil = Date.now() + 4.5 * 60 * 1000;
+    } catch (error) {
+      updateNavigationState();
+      return;
+    }
+  }
   if (lastTrackedVideoPosition > 0) {
     persistVideoProgress(lastTrackedVideoPosition, { force: true });
   }
@@ -7459,7 +7837,7 @@ const renderModuleList = () => {
     )
     .join('');
   moduleList.querySelectorAll('button[data-module-id]').forEach((button) =>
-    button.addEventListener('click', () => {
+    button.addEventListener('click', async () => {
       const moduleId = button.dataset.moduleId;
       if (!moduleId || moduleId === viewerState.moduleId) return;
       const targetModule = viewerModules.find((module) => module.id === moduleId);
@@ -7471,10 +7849,17 @@ const renderModuleList = () => {
         persistVideoProgress(lastTrackedVideoPosition, { force: true });
       }
       persistCurrentSlideProgress({ force: true });
-      viewerState.moduleId = moduleId;
-      viewerState.slideIndex = 0;
-      loadModule(viewerModules);
-      renderModuleList();
+      try {
+        await prepareModuleFaceAccess(targetModule);
+        viewerState.moduleId = moduleId;
+        viewerState.slideIndex = 0;
+        loadModule(viewerModules);
+        renderModuleList();
+      } catch (error) {
+        if (error.code !== 'FACE_CAPTURE_CANCELED') {
+          console.warn('Acesso facial ao modulo nao concluido:', error.message);
+        }
+      }
     })
   );
   if (isReplayMode()) {
@@ -7485,6 +7870,7 @@ const renderModuleList = () => {
 const initModuleViewerPage = async () => {
   loadPersistedQuizAttempts();
   loadPersistedButtonRules();
+  await loadViewerAccountTheme();
   moduleStage = document.getElementById('moduleStage');
   moduleStageShell = document.getElementById('moduleStageShell');
   if (typeof ResizeObserver === 'function' && moduleStageShell) {
@@ -7700,6 +8086,10 @@ const initModuleViewerPage = async () => {
         viewerState.moduleId = getRecommendedModule(viewerModules)?.id || viewerModules[0].id;
       }
     }
+    const initialModule = viewerModules.find((module) => module.id === viewerState.moduleId);
+    if (initialModule) {
+      await prepareModuleFaceAccess(initialModule);
+    }
     renderModuleList();
     loadModule(viewerModules);
   } catch (error) {
@@ -7746,6 +8136,7 @@ const renderViewerChatMessages = (messages) => {
     const label = isAdmin ? `👨‍🏫 ${safeName} (Professor)` : safeName;
     return `
       <div class="chat-bubble ${bubbleClass}">
+        ${renderChatAvatar(msg)}
         ${buildReplyQuoteMarkup(msg)}
         ${!isMine ? `<strong style="font-size:0.78rem;display:block;margin-bottom:0.2rem;">${label}</strong>` : ''}
         ${safeMessage}

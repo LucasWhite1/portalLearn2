@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const LIVE_STAGE_SHARE_TTL_MS = 1000 * 60 * 60 * 4;
 const LIVE_STAGE_CURSOR_TTL_MS = 1000 * 4;
 const liveStageShares = new Map();
+const threeDTransformListeners = new Map();
 
 const createShareId = () => crypto.randomBytes(16).toString('hex');
 
@@ -11,6 +12,7 @@ const cleanupExpiredShares = () => {
   liveStageShares.forEach((share, shareId) => {
     if (!share || now - share.updatedAt > LIVE_STAGE_SHARE_TTL_MS) {
       liveStageShares.delete(shareId);
+      threeDTransformListeners.delete(shareId);
       return;
     }
     if (Array.isArray(share.cursorPositions)) {
@@ -60,6 +62,8 @@ const createShare = ({ ownerUserId, ownerRole = null, payload }) => {
     rejectedCameraRequests: [],
     drawingStrokes: [],
     cursorPositions: [],
+    threeDTransform: null,
+    threeDTransformRevision: 0,
     payload: clonePayload(payload)
   };
   liveStageShares.set(shareId, entry);
@@ -84,6 +88,42 @@ const updateShare = (shareId, ownerUserId, payload) => {
   };
   liveStageShares.set(shareId, next);
   return getShare(shareId);
+};
+
+const updateThreeDTransform = (shareId, ownerUserId, transform) => {
+  cleanupExpiredShares();
+  const current = liveStageShares.get(shareId);
+  if (!current || current.ownerUserId !== ownerUserId) return null;
+  current.threeDTransformRevision = Number(current.threeDTransformRevision || 0) + 1;
+  current.threeDTransform = {
+    ...clonePayload(transform),
+    revision: current.threeDTransformRevision,
+    updatedAt: Date.now()
+  };
+  const message = `event: transform\ndata: ${JSON.stringify(current.threeDTransform)}\n\n`;
+  (threeDTransformListeners.get(shareId) || new Set()).forEach((listener) => {
+    try {
+      listener(message);
+    } catch (error) {
+      // A desconexão será removida pelo fechamento da resposta.
+    }
+  });
+  return clonePayload(current.threeDTransform);
+};
+
+const subscribeThreeDTransforms = (shareId, listener) => {
+  cleanupExpiredShares();
+  if (!liveStageShares.has(shareId) || typeof listener !== 'function') return () => {};
+  const listeners = threeDTransformListeners.get(shareId) || new Set();
+  listeners.add(listener);
+  threeDTransformListeners.set(shareId, listeners);
+  const current = liveStageShares.get(shareId)?.threeDTransform;
+  if (current) listener(`event: transform\ndata: ${JSON.stringify(current)}\n\n`);
+  return () => {
+    const activeListeners = threeDTransformListeners.get(shareId);
+    activeListeners?.delete(listener);
+    if (!activeListeners?.size) threeDTransformListeners.delete(shareId);
+  };
 };
 
 const addCameraRequest = (shareId, request) => {
@@ -280,6 +320,7 @@ const deleteShare = (shareId, ownerUserId) => {
     return false;
   }
   liveStageShares.delete(shareId);
+  threeDTransformListeners.delete(shareId);
   return true;
 };
 
@@ -288,6 +329,8 @@ module.exports = {
   getShare,
   listShares,
   updateShare,
+  updateThreeDTransform,
+  subscribeThreeDTransforms,
   addCameraRequest,
   removeCameraRequest,
   getCameraRequestState,

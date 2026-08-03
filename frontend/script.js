@@ -11,6 +11,8 @@
   return window.location.origin;
 };
 
+import { getFaceStatus, revokeFaceProfile, runFaceVerification } from './modules/face-verification.js';
+
 const API_BASE = resolveApiBase();
 const STORAGE_KEY = 'curso-platform-token';
 const USER_ROLE_KEY = 'curso-platform-role';
@@ -44,6 +46,10 @@ let selectedNotificationAttachment = null;
 let adminAssistantHistory = [];
 let adminAssistantProposalId = '';
 let adminAssistantBusy = false;
+let pendingProfileImage = '';
+let pendingPortalBackgroundImage = '';
+let pendingPortalLogoImage = '';
+let portalColorPalettes = [];
 
 const getCurrentUserRole = () => localStorage.getItem(USER_ROLE_KEY) || '';
 const getCurrentUserData = () => {
@@ -52,6 +58,10 @@ const getCurrentUserData = () => {
   } catch (error) {
     return {};
   }
+};
+const setCurrentUserData = (patch = {}) => {
+  const current = getCurrentUserData();
+  localStorage.setItem('curso-platform-user', JSON.stringify({ ...current, ...patch }));
 };
 const isGlobalAdminUser = () => getCurrentUserRole() === 'admin';
 const formatCreditNumber = (value) => {
@@ -80,6 +90,24 @@ const escapeHtml = (value) =>
     .replace(/'/g, '&#39;');
 
 const escapeAttribute = escapeHtml;
+
+const formatOwnerLabel = (item = {}) => {
+  if (item.owner_name) return item.owner_name;
+  if (item.owner_user_id) return 'Professor não encontrado';
+  return 'Admin global / sem professor';
+};
+
+const renderOwnerMeta = (item = {}, options = {}) => {
+  if (!isGlobalAdminUser()) return '';
+  const label = formatOwnerLabel(item);
+  const email = item.owner_email || '';
+  const prefix = options.prefix || 'Professor';
+  return `
+    <small class="${options.className || ''}" style="color:#5f678a; display:block; margin-top:0.35rem; font-size:0.78rem;">
+      ${escapeHtml(prefix)}: <strong>${escapeHtml(label)}</strong>${email ? ` • ${escapeHtml(email)}` : ''}
+    </small>
+  `;
+};
 
 const URL_IN_TEXT_REGEX = /(?:https?:\/\/|www\.)[^\s<>"')\]]+/gi;
 const MAX_NOTIFICATION_FILE_BYTES = 8 * 1024 * 1024;
@@ -292,6 +320,19 @@ const buildReplyQuoteMarkup = (message) => {
   `;
 };
 
+const renderChatAvatar = (message = {}) => {
+  const image = message.profile_image || '';
+  const name = message.full_name || 'Usuário';
+  const initials = String(name)
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0] || '')
+    .join('')
+    .toUpperCase() || '?';
+  return `<span class="chat-avatar" ${image ? `style="background-image:url('${escapeAttribute(image)}')"` : ''}>${image ? '' : escapeHtml(initials)}</span>`;
+};
+
 let pendingCourseCoverImage = '';
 
 const readLocalImageFile = (input) =>
@@ -313,6 +354,432 @@ const getModuleCoverImage = (module) => {
 };
 
 const getCourseCoverImage = (course) => (typeof course?.cover_image === 'string' ? course.cover_image.trim() : '');
+
+const renderPortalBranding = (logoImage = '') => {
+  document.querySelectorAll('[data-portal-brand]').forEach((brand) => {
+    brand.replaceChildren();
+    if (logoImage) {
+      const image = document.createElement('img');
+      image.src = logoImage;
+      image.alt = 'Logo do professor';
+      image.addEventListener('error', () => {
+        brand.replaceChildren();
+        const fallback = document.createElement('span');
+        fallback.className = 'portal-brand-fallback';
+        fallback.textContent = 'Criatyve';
+        brand.appendChild(fallback);
+      }, { once: true });
+      brand.appendChild(image);
+      return;
+    }
+    const fallback = document.createElement('span');
+    fallback.className = 'portal-brand-fallback';
+    fallback.textContent = 'Criatyve';
+    brand.appendChild(fallback);
+  });
+};
+
+const getThemeContrastColor = (color = '') => {
+  const match = String(color).trim().match(/^#([0-9a-f]{6})$/i);
+  if (!match) return '#ffffff';
+  const value = Number.parseInt(match[1], 16);
+  const red = (value >> 16) & 255;
+  const green = (value >> 8) & 255;
+  const blue = value & 255;
+  return ((red * 299 + green * 587 + blue * 114) / 1000) >= 150 ? '#111827' : '#ffffff';
+};
+
+const applyPortalTheme = (theme = {}) => {
+  const backgroundColor = theme.portalBackgroundColor || '#f4f6ff';
+  const pageTextColor = theme.portalTextColor || '#101426';
+  const cardTextColor = theme.portalCardTextColor || '#101426';
+  const cardBackgroundColor = theme.portalCardBackgroundColor || '#ffffff';
+  const sidebarBackgroundColor = theme.portalSidebarBackgroundColor || '#070a1f';
+  const sidebarTextColor = theme.portalSidebarTextColor || '#ffffff';
+  const buttonColor = theme.portalButtonColor || theme.portalAccentColor || '#6d63ff';
+  const buttonTextColor = getThemeContrastColor(buttonColor);
+  const backgroundImage = typeof theme.portalBackgroundImage === 'string' ? theme.portalBackgroundImage.trim() : '';
+  document.documentElement.style.setProperty('--portal-bg', backgroundColor);
+  document.documentElement.style.setProperty('--portal-page-text', pageTextColor);
+  document.documentElement.style.setProperty('--portal-text', cardTextColor);
+  document.documentElement.style.setProperty('--portal-card-text', cardTextColor);
+  document.documentElement.style.setProperty('--portal-card-bg', cardBackgroundColor);
+  document.documentElement.style.setProperty('--portal-sidebar-bg', sidebarBackgroundColor);
+  document.documentElement.style.setProperty('--portal-sidebar-text', sidebarTextColor);
+  document.documentElement.style.setProperty('--portal-accent', buttonColor);
+  document.documentElement.style.setProperty('--portal-button', buttonColor);
+  document.documentElement.style.setProperty('--portal-button-text', buttonTextColor);
+  document.body.style.setProperty('--portal-bg', backgroundColor);
+  document.body.style.setProperty('--portal-page-text', pageTextColor);
+  document.body.style.setProperty('--portal-text', cardTextColor);
+  document.body.style.setProperty('--portal-card-text', cardTextColor);
+  document.body.style.setProperty('--portal-card-bg', cardBackgroundColor);
+  document.body.style.setProperty('--portal-sidebar-bg', sidebarBackgroundColor);
+  document.body.style.setProperty('--portal-sidebar-text', sidebarTextColor);
+  document.body.style.setProperty('--portal-accent', buttonColor);
+  document.body.style.setProperty('--portal-button', buttonColor);
+  document.body.style.setProperty('--portal-button-text', buttonTextColor);
+  document.body.style.color = pageTextColor;
+  document.body.style.backgroundColor = backgroundColor;
+  if (backgroundImage) {
+    document.body.style.backgroundImage = `linear-gradient(135deg, color-mix(in srgb, ${backgroundColor} 22%, transparent), color-mix(in srgb, ${backgroundColor} 8%, transparent)), url("${backgroundImage}")`;
+    document.body.style.backgroundSize = 'cover';
+    document.body.style.backgroundAttachment = 'fixed';
+    document.body.style.backgroundPosition = 'center';
+  } else {
+    document.body.style.backgroundImage = 'none';
+    document.body.style.backgroundColor = backgroundColor;
+  }
+  renderPortalBranding(typeof theme.portalLogoImage === 'string' ? theme.portalLogoImage.trim() : '');
+};
+
+const renderProfileAvatarPreview = (image = '', name = '') => {
+  const preview = document.getElementById('profileAvatarPreview');
+  if (!preview) return;
+  const initials = String(name || getCurrentUserData().fullName || '?')
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0] || '')
+    .join('')
+    .toUpperCase() || '?';
+  if (image) {
+    preview.style.backgroundImage = `url("${image}")`;
+    preview.textContent = '';
+  } else {
+    preview.style.backgroundImage = '';
+    preview.textContent = initials;
+  }
+};
+
+const renderPortalLogoPreview = (image = '') => {
+  const preview = document.getElementById('portalLogoPreview');
+  if (!preview) return;
+  preview.replaceChildren();
+  if (image) {
+    const logo = document.createElement('img');
+    logo.src = image;
+    logo.alt = 'Prévia da logo';
+    preview.appendChild(logo);
+    return;
+  }
+  const fallback = document.createElement('span');
+  fallback.textContent = 'Criatyve';
+  preview.appendChild(fallback);
+};
+
+const syncPortalThemePreview = () => {
+  const preview = document.getElementById('portalThemePreview');
+  if (!preview) return;
+  const backgroundColor = document.getElementById('portalBackgroundColor')?.value || '#f4f6ff';
+  const pageTextColor = document.getElementById('portalTextColor')?.value || '#101426';
+  const cardTextColor = document.getElementById('portalCardTextColor')?.value || '#101426';
+  const cardBackgroundColor = document.getElementById('portalCardBackgroundColor')?.value || '#ffffff';
+  const sidebarBackgroundColor = document.getElementById('portalSidebarBackgroundColor')?.value || '#070a1f';
+  const sidebarTextColor = document.getElementById('portalSidebarTextColor')?.value || '#ffffff';
+  const buttonColor = document.getElementById('portalAccentColor')?.value || '#6d63ff';
+  preview.style.color = pageTextColor;
+  preview.style.borderColor = buttonColor;
+  preview.style.backgroundColor = backgroundColor;
+  preview.style.backgroundImage = pendingPortalBackgroundImage
+    ? `linear-gradient(135deg, color-mix(in srgb, ${backgroundColor} 22%, transparent), color-mix(in srgb, ${backgroundColor} 8%, transparent)), url("${pendingPortalBackgroundImage}")`
+    : '';
+  preview.style.setProperty('--preview-card-bg', cardBackgroundColor);
+  preview.style.setProperty('--preview-card-text', cardTextColor);
+  preview.style.setProperty('--preview-button', buttonColor);
+  preview.style.setProperty('--preview-button-text', getThemeContrastColor(buttonColor));
+  preview.style.setProperty('--preview-sidebar-bg', sidebarBackgroundColor);
+  preview.style.setProperty('--preview-sidebar-text', sidebarTextColor);
+};
+
+const getPortalColorFormValues = () => ({
+  portalBackgroundColor: document.getElementById('portalBackgroundColor')?.value || '#f4f6ff',
+  portalTextColor: document.getElementById('portalTextColor')?.value || '#101426',
+  portalCardTextColor: document.getElementById('portalCardTextColor')?.value || '#101426',
+  portalCardBackgroundColor: document.getElementById('portalCardBackgroundColor')?.value || '#ffffff',
+  portalSidebarBackgroundColor: document.getElementById('portalSidebarBackgroundColor')?.value || '#070a1f',
+  portalSidebarTextColor: document.getElementById('portalSidebarTextColor')?.value || '#ffffff',
+  portalButtonColor: document.getElementById('portalAccentColor')?.value || '#6d63ff'
+});
+
+const applyPortalColorFormValues = (colors = {}) => {
+  const fieldMap = {
+    portalBackgroundColor: 'portalBackgroundColor',
+    portalTextColor: 'portalTextColor',
+    portalCardTextColor: 'portalCardTextColor',
+    portalCardBackgroundColor: 'portalCardBackgroundColor',
+    portalSidebarBackgroundColor: 'portalSidebarBackgroundColor',
+    portalSidebarTextColor: 'portalSidebarTextColor',
+    portalButtonColor: 'portalAccentColor'
+  };
+  Object.entries(fieldMap).forEach(([key, id]) => {
+    const input = document.getElementById(id);
+    if (input && /^#[0-9a-f]{6}$/i.test(colors[key] || '')) {
+      input.value = colors[key];
+    }
+  });
+  syncPortalThemePreview();
+};
+
+const renderPortalColorPalettes = (selectedId = '') => {
+  const select = document.getElementById('portalColorPaletteSelect');
+  const deleteButton = document.getElementById('portalDeletePaletteBtn');
+  if (!select) return;
+  select.replaceChildren(new Option('Escolha uma paleta salva', ''));
+  portalColorPalettes.forEach((palette) => {
+    select.appendChild(new Option(palette.name, palette.id));
+  });
+  select.value = portalColorPalettes.some((palette) => palette.id === selectedId) ? selectedId : '';
+  if (deleteButton) deleteButton.disabled = !select.value;
+};
+
+const setAccountSettingsStatus = (message, color = '#6d63ff') => {
+  const status = document.getElementById('accountSettingsStatus');
+  if (!status) return;
+  status.textContent = message;
+  status.style.color = color;
+};
+
+const loadAccountSettings = async () => {
+  const hasProfileForm = document.getElementById('accountProfileForm') || document.getElementById('studentProfileForm');
+  if (!hasProfileForm) return null;
+  const response = await authorizedFetch('/api/student/profile');
+  const profile = await response.json();
+  pendingProfileImage = profile.profile_image || '';
+  pendingPortalBackgroundImage = profile.theme?.portalBackgroundImage || '';
+  pendingPortalLogoImage = profile.theme?.portalLogoImage || '';
+  portalColorPalettes = Array.isArray(profile.colorPalettes) ? profile.colorPalettes : [];
+  setCurrentUserData({
+    fullName: profile.full_name,
+    role: profile.role,
+    profileImage: pendingProfileImage
+  });
+  renderProfileAvatarPreview(pendingProfileImage, profile.full_name);
+  if (document.getElementById('portalThemeForm')) {
+    document.getElementById('portalBackgroundColor').value = profile.theme?.portalBackgroundColor || '#f4f6ff';
+    document.getElementById('portalTextColor').value = profile.theme?.portalTextColor || '#101426';
+    document.getElementById('portalCardTextColor').value = profile.theme?.portalCardTextColor || '#101426';
+    document.getElementById('portalCardBackgroundColor').value = profile.theme?.portalCardBackgroundColor || '#ffffff';
+    document.getElementById('portalSidebarBackgroundColor').value = profile.theme?.portalSidebarBackgroundColor || '#070a1f';
+    document.getElementById('portalSidebarTextColor').value = profile.theme?.portalSidebarTextColor || '#ffffff';
+    document.getElementById('portalAccentColor').value = profile.theme?.portalButtonColor || profile.theme?.portalAccentColor || '#6d63ff';
+    renderPortalLogoPreview(pendingPortalLogoImage);
+    renderPortalColorPalettes();
+    syncPortalThemePreview();
+  }
+  applyPortalTheme(profile.theme || {});
+  return profile;
+};
+
+const setupAccountSettingsForms = () => {
+  document.getElementById('profileImagePickBtn')?.addEventListener('click', () => {
+    document.getElementById('profileImageInput')?.click();
+  });
+  document.getElementById('profileImageClearBtn')?.addEventListener('click', () => {
+    pendingProfileImage = '';
+    renderProfileAvatarPreview('');
+  });
+  document.getElementById('profileImageInput')?.addEventListener('change', async (event) => {
+    pendingProfileImage = await readLocalImageFile(event.target);
+    renderProfileAvatarPreview(pendingProfileImage);
+  });
+  document.getElementById('portalBackgroundPickBtn')?.addEventListener('click', () => {
+    document.getElementById('portalBackgroundImageInput')?.click();
+  });
+  document.getElementById('portalBackgroundClearBtn')?.addEventListener('click', () => {
+    pendingPortalBackgroundImage = '';
+    syncPortalThemePreview();
+  });
+  document.getElementById('portalBackgroundImageInput')?.addEventListener('change', async (event) => {
+    pendingPortalBackgroundImage = await readLocalImageFile(event.target);
+    syncPortalThemePreview();
+  });
+  document.getElementById('portalLogoPickBtn')?.addEventListener('click', () => {
+    document.getElementById('portalLogoImageInput')?.click();
+  });
+  document.getElementById('portalLogoClearBtn')?.addEventListener('click', () => {
+    pendingPortalLogoImage = '';
+    renderPortalLogoPreview('');
+  });
+  document.getElementById('portalLogoImageInput')?.addEventListener('change', async (event) => {
+    pendingPortalLogoImage = await readLocalImageFile(event.target);
+    renderPortalLogoPreview(pendingPortalLogoImage);
+  });
+  ['portalBackgroundColor', 'portalTextColor', 'portalCardTextColor', 'portalCardBackgroundColor', 'portalSidebarBackgroundColor', 'portalSidebarTextColor', 'portalAccentColor'].forEach((id) => {
+    document.getElementById(id)?.addEventListener('input', syncPortalThemePreview);
+  });
+  document.getElementById('portalColorPaletteSelect')?.addEventListener('change', (event) => {
+    const palette = portalColorPalettes.find((item) => item.id === event.target.value);
+    const deleteButton = document.getElementById('portalDeletePaletteBtn');
+    if (deleteButton) deleteButton.disabled = !palette;
+    if (!palette) return;
+    applyPortalColorFormValues(palette.colors);
+    setAccountSettingsStatus(`Paleta "${palette.name}" aplicada. Clique em Salvar visual para publicar.`);
+  });
+  document.getElementById('portalSavePaletteBtn')?.addEventListener('click', async () => {
+    const nameInput = document.getElementById('portalPaletteNameInput');
+    const name = nameInput?.value?.trim() || '';
+    if (!name) {
+      setAccountSettingsStatus('Informe um nome para salvar a paleta.', '#dc2626');
+      nameInput?.focus();
+      return;
+    }
+    try {
+      const response = await authorizedFetch('/api/student/profile/color-palettes', {
+        method: 'POST',
+        body: JSON.stringify({ name, colors: getPortalColorFormValues() })
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.message || 'Não foi possível salvar a paleta.');
+      portalColorPalettes = Array.isArray(result.colorPalettes) ? result.colorPalettes : portalColorPalettes;
+      renderPortalColorPalettes(result.palette?.id || '');
+      if (nameInput) nameInput.value = '';
+      setAccountSettingsStatus('Paleta de cores salva com sucesso.', '#16a34a');
+    } catch (error) {
+      setAccountSettingsStatus(error.message, '#dc2626');
+    }
+  });
+  document.getElementById('portalDeletePaletteBtn')?.addEventListener('click', async () => {
+    const select = document.getElementById('portalColorPaletteSelect');
+    const paletteId = select?.value || '';
+    if (!paletteId) return;
+    try {
+      const response = await authorizedFetch(`/api/student/profile/color-palettes/${encodeURIComponent(paletteId)}`, {
+        method: 'DELETE'
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.message || 'Não foi possível excluir a paleta.');
+      portalColorPalettes = Array.isArray(result.colorPalettes) ? result.colorPalettes : [];
+      renderPortalColorPalettes();
+      setAccountSettingsStatus('Paleta excluída.', '#16a34a');
+    } catch (error) {
+      setAccountSettingsStatus(error.message, '#dc2626');
+    }
+  });
+  document.getElementById('portalThemeResetColorsBtn')?.addEventListener('click', () => {
+    const defaults = {
+      portalBackgroundColor: '#f4f6ff',
+      portalTextColor: '#101426',
+      portalCardTextColor: '#101426',
+      portalCardBackgroundColor: '#ffffff',
+      portalSidebarBackgroundColor: '#070a1f',
+      portalSidebarTextColor: '#ffffff',
+      portalAccentColor: '#6d63ff'
+    };
+    Object.entries(defaults).forEach(([id, value]) => {
+      const input = document.getElementById(id);
+      if (input) input.value = value;
+    });
+    syncPortalThemePreview();
+    setAccountSettingsStatus('Cores padrão restauradas. Clique em Salvar visual para confirmar.');
+  });
+  const saveProfile = async (includeTheme = false) => {
+    const payload = { profileImage: pendingProfileImage };
+    if (includeTheme) {
+      payload.portalBackgroundColor = document.getElementById('portalBackgroundColor')?.value || '#f4f6ff';
+      payload.portalBackgroundImage = pendingPortalBackgroundImage;
+      payload.portalLogoImage = pendingPortalLogoImage;
+      payload.portalTextColor = document.getElementById('portalTextColor')?.value || '#101426';
+      payload.portalCardTextColor = document.getElementById('portalCardTextColor')?.value || '#101426';
+      payload.portalCardBackgroundColor = document.getElementById('portalCardBackgroundColor')?.value || '#ffffff';
+      payload.portalSidebarBackgroundColor = document.getElementById('portalSidebarBackgroundColor')?.value || '#070a1f';
+      payload.portalSidebarTextColor = document.getElementById('portalSidebarTextColor')?.value || '#ffffff';
+      payload.portalButtonColor = document.getElementById('portalAccentColor')?.value || '#6d63ff';
+      payload.portalAccentColor = payload.portalButtonColor;
+    }
+    const response = await authorizedFetch('/api/student/profile', {
+      method: 'PUT',
+      body: JSON.stringify(payload)
+    });
+    const result = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(result?.message || 'Não foi possível salvar as configurações.');
+    setCurrentUserData({ profileImage: pendingProfileImage });
+    if (includeTheme && result?.theme) {
+      pendingPortalLogoImage = result.theme.portalLogoImage || '';
+      renderPortalLogoPreview(pendingPortalLogoImage);
+      applyPortalTheme(result.theme);
+    }
+    setAccountSettingsStatus('Configurações salvas com sucesso.', '#16a34a');
+  };
+  document.getElementById('accountProfileForm')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    await saveProfile(false);
+  });
+  document.getElementById('studentProfileForm')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    await saveProfile(false);
+  });
+  document.getElementById('portalThemeForm')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    await saveProfile(true);
+  });
+};
+
+const setupFaceProfile = () => {
+  const statusElement = document.getElementById('faceProfileStatus');
+  const enrollButton = document.getElementById('faceEnrollBtn');
+  const revokeButton = document.getElementById('faceRevokeBtn');
+  const consentToggle = document.getElementById('faceConsentToggle');
+  if (!statusElement || !enrollButton || !consentToggle) return;
+
+  const renderStatus = (status) => {
+    const enrolled = status?.enrolled === true;
+    statusElement.textContent = enrolled
+      ? `Rosto cadastrado${status.enrolledAt ? ` em ${new Date(status.enrolledAt).toLocaleDateString('pt-BR')}` : ''}.`
+      : status?.status === 'reenrollment_required'
+        ? 'Um novo cadastro facial foi solicitado.'
+        : 'Nenhum rosto cadastrado.';
+    statusElement.classList.toggle('is-active', enrolled);
+    enrollButton.textContent = enrolled ? 'Refazer cadastro' : 'Cadastrar rosto';
+    revokeButton.hidden = !enrolled;
+    consentToggle.checked = enrolled;
+    consentToggle.disabled = enrolled;
+  };
+
+  const refresh = async () => {
+    try {
+      renderStatus(await getFaceStatus());
+    } catch (error) {
+      statusElement.textContent = error.message || 'Não foi possível consultar o cadastro facial.';
+    }
+  };
+
+  enrollButton.addEventListener('click', async () => {
+    if (!consentToggle.checked) {
+      alert('Leia e marque o consentimento biométrico antes de continuar.');
+      return;
+    }
+    enrollButton.disabled = true;
+    try {
+      await runFaceVerification({ mode: 'enrollment', consentAccepted: true });
+      await refresh();
+      alert('Cadastro facial concluído. As capturas temporárias foram descartadas.');
+    } catch (error) {
+      if (error.code !== 'FACE_CAPTURE_CANCELED') {
+        alert(error.message || 'Não foi possível cadastrar o rosto.');
+      }
+    } finally {
+      enrollButton.disabled = false;
+    }
+  });
+
+  revokeButton.addEventListener('click', async () => {
+    if (!confirm('Revogar o cadastro facial? Módulos protegidos exigirão um novo cadastro.')) return;
+    revokeButton.disabled = true;
+    try {
+      await revokeFaceProfile();
+      consentToggle.disabled = false;
+      consentToggle.checked = false;
+      await refresh();
+    } catch (error) {
+      alert(error.message || 'Não foi possível revogar o cadastro facial.');
+    } finally {
+      revokeButton.disabled = false;
+    }
+  });
+
+  void refresh();
+};
 
 const setHorizontalCourseScroll = (container, itemCount, threshold) => {
   if (!container) return;
@@ -518,6 +985,18 @@ const loadAdminClasses = async () => {
 const getToken = () => localStorage.getItem(STORAGE_KEY);
 const setToken = (token) => localStorage.setItem(STORAGE_KEY, token);
 const clearToken = () => localStorage.removeItem(STORAGE_KEY);
+let authRedirectPending = false;
+
+const redirectToLogin = () => {
+  clearToken();
+  localStorage.removeItem(USER_ROLE_KEY);
+  localStorage.removeItem('curso-platform-user');
+  if (authRedirectPending) return;
+  authRedirectPending = true;
+  if (!window.location.pathname.endsWith('/login.html')) {
+    window.location.replace('login.html');
+  }
+};
 
 const parseJsonSafely = async (response) => {
   const raw = await response.text();
@@ -534,17 +1013,17 @@ const parseJsonSafely = async (response) => {
 const authorizedFetch = async (path, options = {}) => {
   const token = getToken();
   if (!token) {
-    throw new Error('Sem token válido');
+    redirectToLogin();
+    throw new Error('Sessão expirada');
   }
-  const headers = {
-    'Content-Type': 'application/json',
-    ...(options.headers || {})
-  };
+  const headers = { ...(options.headers || {}) };
+  if (!(options.body instanceof FormData) && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json';
+  }
   if (/^[0-9a-f]{48}$/i.test(token)) headers.Authorization = `Bearer ${token}`;
   const response = await fetch(`${API_BASE}${path}`, { ...options, headers, credentials: 'include' });
   if (response.status === 401) {
-    clearToken();
-    window.location.href = 'login.html';
+    redirectToLogin();
     throw new Error('Sessão expirada');
   }
   return response;
@@ -687,7 +1166,11 @@ const setupSideNavigation = () => {
 
   // Ativa a primeira aba ao carregar
   if (hasSections) {
-    const firstBtn = document.querySelector('.nav-link[data-target]');
+    const requestedSection = new URLSearchParams(window.location.search).get('section');
+    const requestedButton = requestedSection
+      ? document.querySelector(`.nav-link[data-target="${CSS.escape(requestedSection)}"]`)
+      : null;
+    const firstBtn = requestedButton || document.querySelector('.nav-link[data-target]');
     if (firstBtn) showSectionById(firstBtn.dataset.target, firstBtn);
   }
 
@@ -855,6 +1338,8 @@ const renderModulePerformanceToggle = (row = {}, scope = 'pending') => {
 const renderReportRows = (row = {}, scope = 'pending') => {
   const panelKey = buildReportModulePanelKey(row, scope);
   const isCorrected = scope === 'corrected';
+  const showOwnerColumn = isGlobalAdminUser();
+  const detailColspan = showOwnerColumn ? 7 : 6;
   return `
     <tr>
       <td data-label="Aluno">
@@ -862,6 +1347,12 @@ const renderReportRows = (row = {}, scope = 'pending') => {
         <small style="display:block; color:#8b92b1;">${escapeHtml(row.email)}</small>
       </td>
       <td data-label="Curso">${escapeHtml(row.course_title)}</td>
+      ${showOwnerColumn ? `
+        <td data-label="Professor">
+          <strong>${escapeHtml(formatOwnerLabel(row))}</strong>
+          ${row.owner_email ? `<small style="display:block; color:#8b92b1;">${escapeHtml(row.owner_email)}</small>` : ''}
+        </td>
+      ` : ''}
       <td data-label="Módulo atual">${escapeHtml(row.current_module || 'Módulo 1')}</td>
       <td data-label="Desempenho">${renderModulePerformanceToggle(row, scope)}</td>
       <td data-label="${isCorrected ? 'Corrigido em' : 'Atualizado em'}">${formatDate(isCorrected ? row.report_corrected_at : row.updated_at)}</td>
@@ -877,7 +1368,7 @@ const renderReportRows = (row = {}, scope = 'pending') => {
       </td>
     </tr>
     <tr class="module-performance-detail-row" data-module-performance-panel="${escapeAttribute(panelKey)}" hidden>
-      <td colspan="6">
+      <td colspan="${detailColspan}">
         <div class="module-performance-detail-card">
           <div class="module-performance-detail-head">
             <strong>Desempenho por módulos</strong>
@@ -1398,6 +1889,10 @@ const renderDashboard = async () => {
     if (nameElem) {
       nameElem.textContent = profile.full_name;
     }
+    pendingProfileImage = profile.profile_image || '';
+    setCurrentUserData({ fullName: profile.full_name, role: profile.role, profileImage: pendingProfileImage });
+    renderProfileAvatarPreview(pendingProfileImage, profile.full_name);
+    applyPortalTheme(profile.theme || {});
     renderCourses(courses);
     const secondaryLoads = [
       loadLiveStageShares(),
@@ -1482,7 +1977,7 @@ const persistAuthSession = (data) => {
   localStorage.setItem('curso-platform-user', JSON.stringify({
     fullName: data.user.fullName,
     role: data.user.role,
-    aiCredits: data.user.aiCredits ?? null,
+    platformCredits: data.user.platformCredits ?? null,
     studentLimit: data.user.studentLimit ?? null,
     storageLimitBytes: data.user.storageLimitBytes ?? null
   }));
@@ -1858,16 +2353,31 @@ const loadAdminStudents = async () => {
     const response = await authorizedFetch('/api/admin/students');
     const students = await response.json();
     adminStudentsCache = students;
+    syncFaceManualGrantOptions();
     const tbody = document.querySelector('#studentsTable tbody');
+    const headerRow = document.querySelector('#studentsTable thead tr');
+    const showOwnerColumn = isGlobalAdminUser();
+    const ownerHeader = headerRow?.querySelector('[data-student-owner-header]');
+    if (headerRow && showOwnerColumn && !ownerHeader) {
+      const th = document.createElement('th');
+      th.dataset.studentOwnerHeader = 'true';
+      th.textContent = 'Professor';
+      headerRow.insertBefore(th, headerRow.children[2] || null);
+    } else if (!showOwnerColumn && ownerHeader) {
+      ownerHeader.remove();
+    }
     if (!tbody) return;
     tbody.innerHTML = '';
+    const emptyColspan = showOwnerColumn ? 6 : 5;
     if (!students.length) {
-      tbody.innerHTML = '<tr><td colspan="5" style="color:#8b92b1;">Nenhum aluno cadastrado.</td></tr>';
+      tbody.innerHTML = `<tr><td colspan="${emptyColspan}" style="color:#8b92b1;">Nenhum aluno cadastrado.</td></tr>`;
       updateEnrollmentStudentSelect();
       updateNotificationStudentSelect();
       return;
     }
     students.forEach((student) => {
+      const ownerName = student.owner_name || (student.owner_user_id ? 'Professor não encontrado' : 'Seu aluno / sem professor');
+      const ownerEmail = student.owner_email || '';
       const row = document.createElement('tr');
       row.innerHTML = `
         <td data-label="Aluno">
@@ -1875,6 +2385,12 @@ const loadAdminStudents = async () => {
           <span style="font-size:0.85rem;color:#8b92b1;">${escapeHtml(student.email)}</span>
         </td>
         <td data-label="Turma">${escapeHtml(student.class_name || 'Sem turma')}</td>
+        ${showOwnerColumn ? `
+          <td data-label="Professor">
+            <strong>${escapeHtml(ownerName)}</strong>
+            ${ownerEmail ? `<span style="font-size:0.85rem;color:#8b92b1;">${escapeHtml(ownerEmail)}</span>` : ''}
+          </td>
+        ` : ''}
         <td data-label="Telefone">${escapeHtml(student.phone || '—')}</td>
         <td data-label="Status">
           <span class="toggle-pill" style="background:${student.is_active ? 'rgba(109, 99, 255, 0.15)' : '#fff0f0'}; color:${student.is_active ? '#6d63ff' : '#ff6b6b'};">
@@ -1901,29 +2417,46 @@ const loadAdminStudents = async () => {
   }
 };
 
+const publishPlatformCreditBalance = (balance) => {
+  const normalized = Number(balance);
+  if (!Number.isFinite(normalized)) return;
+  localStorage.setItem('curso-platform-credit-sync', JSON.stringify({
+    balance: Number(normalized.toFixed(2)),
+    at: Date.now()
+  }));
+};
+
 const renderProfessorCreditsStatus = (payload = null) => {
   const node = document.getElementById('professorCreditsStatus');
-  if (!node) return;
   const role = getCurrentUserRole();
   if (role !== 'professor') {
-    node.textContent = '';
+    if (node) node.textContent = '';
     return;
   }
-  const credits = Number(payload?.aiCredits);
-  const safeCredits = Number.isFinite(credits) ? Math.max(0, Number(credits.toFixed(2))) : 0;
-  const safeCostPerCall = 0;
-  node.textContent = `Seus créditos de IA disponíveis: ${safeCredits}`;
-  node.textContent = `Seus créditos de IA disponíveis: ${formatCreditNumber(safeCredits)} | custo por chamada: ${formatCreditNumber(safeCostPerCall)}`;
-  node.textContent = `Seus creditos de IA disponiveis: ${formatCreditNumber(safeCredits)}`;
-  node.style.color = safeCredits > 0 ? '#6d63ff' : '#ff6b6b';
+  const credits = Number(payload?.platformCredits);
+  const safeCredits = Number.isFinite(credits) ? Number(credits.toFixed(2)) : 0;
+  if (node) {
+    node.textContent = `Seus créditos disponíveis: ${formatCreditNumber(safeCredits)}`;
+    node.style.color = safeCredits > 10 ? '#16835d' : safeCredits >= 0 ? '#d47a0a' : '#c63838';
+  }
+  const card = document.getElementById('adminPlatformCreditsCard');
+  const value = document.getElementById('adminPlatformCreditsValue');
+  if (card) {
+    card.classList.remove('hidden', 'is-low', 'is-negative');
+    card.classList.toggle('is-low', safeCredits >= 0 && safeCredits <= 10);
+    card.classList.toggle('is-negative', safeCredits < 0);
+  }
+  if (value) value.textContent = formatCreditNumber(safeCredits);
   const storedUser = getCurrentUserData();
+  const balanceChanged = Number(storedUser.platformCredits) !== safeCredits;
   localStorage.setItem('curso-platform-user', JSON.stringify({
     ...storedUser,
     role,
-    aiCredits: safeCredits,
+    platformCredits: safeCredits,
     studentLimit: payload?.studentLimit ?? storedUser.studentLimit ?? null,
     storageLimitBytes: payload?.storageLimitBytes ?? storedUser.storageLimitBytes ?? null
   }));
+  if (balanceChanged) publishPlatformCreditBalance(safeCredits);
   renderStudentSignupLinkPanel();
 };
 
@@ -1934,12 +2467,165 @@ const loadProfessorCreditsStatus = async () => {
     return;
   }
   try {
-    const response = await authorizedFetch('/api/admin/me/professor-credits');
+    const response = await authorizedFetch('/api/admin/me/platform-credits');
     const payload = await response.json();
     renderProfessorCreditsStatus(payload);
   } catch (error) {
-    renderProfessorCreditsStatus({ aiCredits: getCurrentUserData().aiCredits ?? 0 });
+    renderProfessorCreditsStatus({ platformCredits: getCurrentUserData().platformCredits ?? 0 });
   }
+};
+
+let editingCreditPackageId = null;
+
+const renderCreditPackages = (packages, container, { admin = false } = {}) => {
+  if (!container) return;
+  if (!packages.length) {
+    container.innerHTML = '<p class="muted">Nenhum pacote disponível.</p>';
+    return;
+  }
+  const bestPackage = admin
+    ? null
+    : packages.reduce((best, item) => {
+      const unitPrice = Number(item.price) / Math.max(Number(item.credits), 0.01);
+      const bestUnitPrice = best
+        ? Number(best.price) / Math.max(Number(best.credits), 0.01)
+        : Number.POSITIVE_INFINITY;
+      return unitPrice < bestUnitPrice ? item : best;
+    }, null);
+  container.innerHTML = packages.map((item) => `
+    <article class="credit-package-card${item.active ? '' : ' is-disabled'}${bestPackage?.id === item.id ? ' is-featured' : ''}">
+      ${bestPackage?.id === item.id ? '<span class="credit-package-ribbon">Melhor escolha</span>' : ''}
+      <span class="credit-package-kicker">${admin ? 'Pacote configurado' : 'Recarga avulsa'}</span>
+      <span>${escapeHtml(item.name)}</span>
+      <strong>${formatCreditNumber(item.credits)} créditos</strong>
+      <p>${Number(item.price).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</p>
+      ${admin ? '' : `<small class="credit-package-unit-price">${(Number(item.price) / Math.max(Number(item.credits), 0.01)).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })} por crédito</small>`}
+      ${admin
+        ? `<small>${item.active ? 'Ativo' : 'Inativo'}</small>
+           <div class="credit-package-actions">
+             <button class="secondary-btn small" type="button"
+               data-credit-package-edit="${escapeAttribute(item.id)}"
+               data-package-name="${escapeAttribute(item.name)}"
+               data-package-price="${escapeAttribute(item.price)}"
+               data-package-credits="${escapeAttribute(item.credits)}"
+               data-package-active="${item.active ? 'true' : 'false'}">Editar</button>
+             <button class="secondary-btn small" type="button"
+               data-credit-package-toggle="${escapeAttribute(item.id)}"
+               data-package-name="${escapeAttribute(item.name)}"
+               data-package-price="${escapeAttribute(item.price)}"
+               data-package-credits="${escapeAttribute(item.credits)}"
+               data-package-active="${item.active ? 'true' : 'false'}">${item.active ? 'Desativar' : 'Ativar'}</button>
+           </div>`
+        : `<button class="primary-btn" type="button" data-credit-package-checkout="${escapeAttribute(item.id)}">Escolher pacote <span aria-hidden="true">→</span></button>`}
+    </article>
+  `).join('');
+};
+
+const loadCreditPackages = async ({ admin = false } = {}) => {
+  const response = await authorizedFetch('/api/admin/credit-packages');
+  const payload = await response.json().catch(() => []);
+  if (!response.ok) throw new Error(payload?.message || 'Não foi possível carregar os pacotes.');
+  renderCreditPackages(payload, document.getElementById(admin ? 'adminCreditPackageList' : 'creditTopupPackageList'), { admin });
+  return payload;
+};
+
+const openCreditTopupModal = async () => {
+  const modal = document.getElementById('creditTopupModal');
+  if (!modal || getCurrentUserRole() !== 'professor') return;
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+  const balance = document.getElementById('adminCreditTopupBalance');
+  if (balance) {
+    balance.textContent = formatCreditNumber(getCurrentUserData().platformCredits ?? 0);
+  }
+  const status = document.getElementById('creditTopupStatus');
+  if (status) status.textContent = 'Carregando pacotes...';
+  try {
+    await loadCreditPackages();
+    if (status) status.textContent = 'Pagamento avulso por Pix ou cartão, sem recorrência.';
+  } catch (error) {
+    if (status) status.textContent = error.message;
+  }
+};
+
+const closeCreditTopupModal = () => {
+  const modal = document.getElementById('creditTopupModal');
+  modal?.classList.add('hidden');
+  modal?.setAttribute('aria-hidden', 'true');
+};
+
+const resumeCreditTopup = async () => {
+  const params = new URLSearchParams(window.location.search);
+  const callbackStatus = params.get('creditTopup');
+  const orderId = params.get('order');
+  if (!callbackStatus || !orderId || getCurrentUserRole() !== 'professor') return;
+  await openCreditTopupModal();
+  const status = document.getElementById('creditTopupStatus');
+  if (callbackStatus !== 'success') {
+    if (status) status.textContent = callbackStatus === 'expired'
+      ? 'O checkout expirou. Escolha um pacote para tentar novamente.'
+      : 'A recarga foi cancelada.';
+    return;
+  }
+  if (status) status.textContent = 'Pagamento recebido. Aguardando confirmação segura do Asaas...';
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const response = await authorizedFetch(`/api/admin/credit-topups/${encodeURIComponent(orderId)}`);
+    const order = await response.json().catch(() => ({}));
+    if (response.ok && order.status === 'PAID') {
+      await loadProfessorCreditsStatus();
+      if (status) status.textContent = `${formatCreditNumber(order.credits)} créditos adicionados ao saldo.`;
+      params.delete('creditTopup');
+      params.delete('order');
+      history.replaceState({}, '', `${location.pathname}${params.size ? `?${params}` : ''}${location.hash}`);
+      return;
+    }
+    if (['CANCELED', 'EXPIRED', 'REFUNDED', 'CHARGEBACK'].includes(order.status)) {
+      if (status) status.textContent = `A recarga não foi concluída (${order.status}).`;
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+  if (status) status.textContent = 'A confirmação ainda está em processamento. O saldo será atualizado automaticamente após o webhook.';
+};
+
+const initPlatformCredits = () => {
+  if (getCurrentUserRole() === 'professor') {
+    document.getElementById('adminPlatformCreditsCard')?.classList.remove('hidden');
+    loadProfessorCreditsStatus();
+  }
+  document.getElementById('adminPlatformCreditsCard')?.addEventListener('click', openCreditTopupModal);
+  document.getElementById('creditTopupModal')?.addEventListener('click', async (event) => {
+    if (event.target.closest('[data-credit-topup-close]')) {
+      closeCreditTopupModal();
+      return;
+    }
+    const button = event.target.closest('[data-credit-package-checkout]');
+    if (!button) return;
+    const status = document.getElementById('creditTopupStatus');
+    button.disabled = true;
+    if (status) status.textContent = 'Criando checkout seguro...';
+    try {
+      const response = await authorizedFetch('/api/admin/credit-topups/checkout', {
+        method: 'POST',
+        body: JSON.stringify({ packageId: button.dataset.creditPackageCheckout })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.message || 'Não foi possível criar o checkout.');
+      window.location.assign(payload.order.checkoutUrl);
+    } catch (error) {
+      button.disabled = false;
+      if (status) status.textContent = error.message;
+    }
+  });
+  window.addEventListener('storage', (event) => {
+    if (event.key !== 'curso-platform-credit-sync' || !event.newValue) return;
+    try {
+      renderProfessorCreditsStatus({ platformCredits: JSON.parse(event.newValue).balance });
+    } catch {
+      // Ignore malformed values from older tabs.
+    }
+  });
+  void resumeCreditTopup();
 };
 
 const renderStudentSignupLinkPanel = () => {
@@ -2038,7 +2724,7 @@ const renderAdminProfessors = () => {
       <div class="module-list-item">
         <h4>${escapeHtml(professor.full_name)}</h4>
         <p>${escapeHtml(professor.email)}${professor.phone ? ` • ${escapeHtml(professor.phone)}` : ''}</p>
-        <p>Créditos de IA: <strong>${Number(professor.aiCredits || 0)}</strong></p>
+        <p>Créditos da plataforma: <strong>${Number(professor.platformCredits || 0)}</strong></p>
         <p>Alunos: <strong>${Number(professor.studentCount || 0)}</strong>${professor.studentLimit ? ` / ${Number(professor.studentLimit)}` : ' / sem limite'}</p>
         <p>Armazenamento: <strong>${formatStorageAmount(professor.storageUsedBytes || 0)}</strong>${professor.storageLimitBytes ? ` / ${formatStorageAmount(professor.storageLimitBytes)}` : ' / sem limite'}</p>
         <p>Status: ${professor.is_active ? 'Ativo' : 'Bloqueado'}</p>
@@ -2088,6 +2774,7 @@ const loadAdminCourses = async () => {
     const response = await authorizedFetch('/api/admin/courses');
     const courses = await response.json();
     adminCoursesCache = courses;
+    syncFaceManualGrantOptions();
     if (!courses.length) {
       container.innerHTML = '<p style="margin:0; color:#8b92b1;">Nenhum curso cadastrado.</p>';
       updateEnrollmentCourseSelect();
@@ -2109,6 +2796,7 @@ const loadAdminCourses = async () => {
               <strong>${escapeHtml(course.title)}</strong>
               <p style="margin:0; color:#8b92b1; font-size:0.85rem;">${escapeHtml(course.slug)}</p>
               <small style="color:#8b92b1; font-size:0.8rem;">${escapeHtml(course.description || 'Sem descri\u00e7\u00e3o')}</small>
+              ${renderOwnerMeta(course)}
               <div class="admin-course-meta">
                 <small style="color:#6d63ff; display:block; margin-top:0.35rem; font-size:0.75rem;">${course.module_count || 0} m\u00f3dulo(s)</small>
                 <small class="admin-course-store-badge ${coverImage ? 'is-visible' : ''}">${coverImage ? 'Com capa' : 'Sem capa'}</small>
@@ -2278,6 +2966,7 @@ const renderAdminChatMessages = (messages) => {
     const time = new Date(msg.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
     return `
       <div class="chat-bubble ${isAdmin ? 'mine' : 'theirs'}" data-admin-chat-message-id="${msg.id}">
+        ${renderChatAvatar(msg)}
         ${buildReplyQuoteMarkup(msg)}
         <strong style="font-size:0.78rem; display:block; margin-bottom:0.2rem;">${isAdmin ? `Professor ${safeName}` : safeName}</strong>
         ${safeMessage}
@@ -2307,6 +2996,7 @@ const renderAdminChatCourseList = () => {
         ${Number(course.unread_count) > 0 ? `<span class="unread-badge">${Number(course.unread_count)}</span>` : ''}
       </div>
       <p style="color:#5f678a; font-size:0.83rem;">${escapeHtml(truncateChatPreview(course.last_message || 'Sem mensagens ainda.', 72))}</p>
+      ${renderOwnerMeta(course)}
       <small style="color:#8b92b1;">${course.last_message_created_at ? new Date(course.last_message_created_at).toLocaleString('pt-BR') : 'Aguardando conversa'}</small>
     </button>
   `).join('');
@@ -2339,7 +3029,10 @@ const openAdminCourseChat = async (courseId) => {
     title.textContent = activeCourse?.title || 'Chat do curso';
   }
   if (subtitle) {
-    subtitle.textContent = activeCourse?.slug ? `Curso: ${activeCourse.slug}` : 'Acompanhe a conversa deste curso.';
+    const ownerText = isGlobalAdminUser() && activeCourse
+      ? ` • Professor: ${formatOwnerLabel(activeCourse)}`
+      : '';
+    subtitle.textContent = activeCourse?.slug ? `Curso: ${activeCourse.slug}${ownerText}` : `Acompanhe a conversa deste curso.${ownerText}`;
   }
   if (messages) {
     messages.innerHTML = '<p style="margin:0; color:#8b92b1; text-align:center;">Carregando mensagens...</p>';
@@ -2370,12 +3063,25 @@ const loadReports = async () => {
   const tbody = document.getElementById('reportsTableBody');
   const correctedTbody = document.getElementById('correctedReportsTableBody');
   if (!tbody || !correctedTbody) return;
+  const showOwnerColumn = isGlobalAdminUser();
+  document.querySelectorAll('.progress-table.admin-responsive-table thead tr').forEach((headerRow) => {
+    const ownerHeader = headerRow.querySelector('[data-report-owner-header]');
+    if (showOwnerColumn && !ownerHeader) {
+      const th = document.createElement('th');
+      th.dataset.reportOwnerHeader = 'true';
+      th.textContent = 'Professor';
+      headerRow.insertBefore(th, headerRow.children[2] || null);
+    } else if (!showOwnerColumn && ownerHeader) {
+      ownerHeader.remove();
+    }
+  });
+  const emptyColspan = showOwnerColumn ? 7 : 6;
   try {
     const response = await authorizedFetch('/api/admin/reports');
     const data = await response.json();
     if (!data.length) {
-      tbody.innerHTML = '<tr><td colspan="6" style="color:#8b92b1;">Nenhum progresso registrado.</td></tr>';
-      correctedTbody.innerHTML = '<tr><td colspan="6" style="color:#8b92b1;">Nenhum relatório corrigido ainda.</td></tr>';
+      tbody.innerHTML = `<tr><td colspan="${emptyColspan}" style="color:#8b92b1;">Nenhum progresso registrado.</td></tr>`;
+      correctedTbody.innerHTML = `<tr><td colspan="${emptyColspan}" style="color:#8b92b1;">Nenhum relatório corrigido ainda.</td></tr>`;
       return;
     }
     const pendingReports = data.filter((row) => !row.report_corrected_at);
@@ -2384,12 +3090,12 @@ const loadReports = async () => {
       ? pendingReports
           .map((row) => renderReportRows(row, 'pending'))
           .join('')
-      : '<tr><td colspan="6" style="color:#8b92b1;">Nenhum relatório pendente no momento.</td></tr>';
+      : `<tr><td colspan="${emptyColspan}" style="color:#8b92b1;">Nenhum relatório pendente no momento.</td></tr>`;
     correctedTbody.innerHTML = correctedReports.length
       ? correctedReports
           .map((row) => renderReportRows(row, 'corrected'))
           .join('')
-      : '<tr><td colspan="6" style="color:#8b92b1;">Nenhum relatório corrigido ainda.</td></tr>';
+      : `<tr><td colspan="${emptyColspan}" style="color:#8b92b1;">Nenhum relatório corrigido ainda.</td></tr>`;
     return;
     tbody.innerHTML = data
       .map(
@@ -2418,7 +3124,7 @@ const loadReports = async () => {
       .join('');
     correctedTbody.innerHTML = correctedTbody.innerHTML || '<tr><td colspan="6" style="color:#8b92b1;">Nenhum relatório corrigido ainda.</td></tr>';
   } catch (error) {
-    tbody.innerHTML = '<tr><td colspan="6" style="color:#ff6b6b;">Não foi possível carregar os relatórios.</td></tr>';
+    tbody.innerHTML = `<tr><td colspan="${emptyColspan}" style="color:#ff6b6b;">Não foi possível carregar os relatórios.</td></tr>`;
   }
 };
 
@@ -2569,9 +3275,10 @@ const renderAiSettingsStatus = (settings) => {
     imageProvider?.connected && imageProvider?.isEnabled
       ? ' • imagem ativa'
       : ' • imagem não configurada';
-  const textCost = settings.aiTextCreditCostPerCall || settings.aiCreditCostPerCall || 0.5;
-  const imageCost = settings.aiImageCreditCostPerCall || 1.0;
-  statusNode.textContent = `Integração de IA ${statusLabel} • ${confirmationLabel}${imageLabel} • texto: ${formatCreditNumber(textCost)} • imagem: ${formatCreditNumber(imageCost)}`;
+  const textCost = settings.platformCreditCosts?.text || 0.5;
+  const imageCost = settings.platformCreditCosts?.image || 1.0;
+  const threeDCost = settings.platformCreditCosts?.threeDImport || 5;
+  statusNode.textContent = `Integração de IA ${statusLabel} • ${confirmationLabel}${imageLabel} • texto: ${formatCreditNumber(textCost)} • imagem: ${formatCreditNumber(imageCost)} • 3D: ${formatCreditNumber(threeDCost)}`;
   statusNode.style.color = settings.isEnabled ? '#6d63ff' : '#8b92b1';
 };
 
@@ -2588,9 +3295,11 @@ const fillAiSettingsForm = (settings) => {
     settings?.imageProvider?.baseUrl || 'https://generativelanguage.googleapis.com/v1beta';
   document.getElementById('aiImageModel').value = settings?.imageProvider?.model || 'gemini-2.5-flash-image';
   const aiTextCreditCostInput = document.getElementById('aiTextCreditCostPerCall');
-  if (aiTextCreditCostInput) aiTextCreditCostInput.value = settings?.aiTextCreditCostPerCall || settings?.aiCreditCostPerCall || 0.5;
+  if (aiTextCreditCostInput) aiTextCreditCostInput.value = settings?.platformCreditCosts?.text || 0.5;
   const aiImageCreditCostInput = document.getElementById('aiImageCreditCostPerCall');
-  if (aiImageCreditCostInput) aiImageCreditCostInput.value = settings?.aiImageCreditCostPerCall || 1.0;
+  if (aiImageCreditCostInput) aiImageCreditCostInput.value = settings?.platformCreditCosts?.image || 1.0;
+  const threeDCostInput = document.getElementById('threeDImportCreditCost');
+  if (threeDCostInput) threeDCostInput.value = settings?.platformCreditCosts?.threeDImport || 5;
   document.getElementById('aiSystemPrompt').value = settings?.systemPrompt || '';
   document.getElementById('aiRequireConfirmation').checked = settings?.requireConfirmation !== false;
   document.getElementById('aiEnabled').checked = settings?.isEnabled !== false;
@@ -2628,6 +3337,7 @@ const loadAdminNotifications = async () => {
             <h4>${linkifyText(notification.message)}</h4>
             ${renderNotificationAttachments(notification.attachments)}
             <p>Destino: ${escapeHtml(notification.target_type)}${notification.target_value ? ` • ${escapeHtml(notification.target_value)}` : ''}</p>
+            ${renderOwnerMeta(notification)}
             <p>${escapeHtml(new Date(notification.created_at).toLocaleString('pt-BR'))}</p>
             <div class="actions">
               <button class="secondary-btn danger" type="button" data-notification-id="${escapeHtml(notification.id)}">Apagar</button>
@@ -2794,8 +3504,8 @@ const sendAdminAssistantMessage = async (messageValue = '') => {
     );
     adminAssistantHistory = adminAssistantHistory.slice(-12);
     renderAdminAssistantProposal(payload);
-    if (Number.isFinite(Number(payload.professorCreditsRemaining))) {
-      setAdminAssistantStatus(`Resposta concluída. Saldo de IA: ${formatCreditNumber(payload.professorCreditsRemaining)} créditos.`, 'success');
+    if (Number.isFinite(Number(payload.platformCreditsRemaining))) {
+      setAdminAssistantStatus(`Resposta concluída. Saldo: ${formatCreditNumber(payload.platformCreditsRemaining)} créditos.`, 'success');
       await loadProfessorCreditsStatus();
     } else {
       setAdminAssistantStatus(payload.requiresConfirmation
@@ -2901,6 +3611,183 @@ const initAdminAssistant = () => {
   });
 };
 
+let faceReviewImageUrls = [];
+
+const syncFaceManualGrantOptions = () => {
+  const studentSelect = document.getElementById('faceManualStudentSelect');
+  const courseSelect = document.getElementById('faceManualCourseSelect');
+  if (studentSelect) {
+    const previous = studentSelect.value;
+    studentSelect.innerHTML = '<option value="">Selecione o aluno</option>' +
+      adminStudentsCache.map((student) =>
+        `<option value="${escapeHtml(student.id)}">${escapeHtml(student.full_name)} · ${escapeHtml(student.email)}</option>`
+      ).join('');
+    if (adminStudentsCache.some((student) => student.id === previous)) studentSelect.value = previous;
+  }
+  if (courseSelect) {
+    const previous = courseSelect.value;
+    courseSelect.innerHTML = '<option value="">Selecione o curso</option>' +
+      adminCoursesCache.map((course) =>
+        `<option value="${escapeHtml(course.id)}">${escapeHtml(course.title)}</option>`
+      ).join('');
+    if (adminCoursesCache.some((course) => course.id === previous)) courseSelect.value = previous;
+  }
+};
+
+const setupFaceManualGrant = () => {
+  const form = document.getElementById('faceManualGrantForm');
+  const courseSelect = document.getElementById('faceManualCourseSelect');
+  const moduleSelect = document.getElementById('faceManualModuleSelect');
+  if (!form || !courseSelect || !moduleSelect) return;
+  courseSelect.addEventListener('change', async () => {
+    moduleSelect.disabled = true;
+    moduleSelect.innerHTML = '<option value="">Carregando módulos...</option>';
+    if (!courseSelect.value) {
+      moduleSelect.innerHTML = '<option value="">Selecione o curso primeiro</option>';
+      return;
+    }
+    try {
+      const response = await authorizedFetch(`/api/admin/courses/${encodeURIComponent(courseSelect.value)}/modules`);
+      const modules = await response.json().catch(() => []);
+      if (!response.ok) throw new Error(modules?.message || 'Não foi possível carregar os módulos.');
+      const protectedModules = modules.filter((module) =>
+        module?.builder_data?.moduleSettings?.faceVerification?.enabled === true &&
+        module?.builder_data?.moduleSettings?.isPublic !== true
+      );
+      moduleSelect.innerHTML = '<option value="">Selecione o módulo</option>' +
+        protectedModules.map((module) =>
+          `<option value="${escapeHtml(module.id)}">${escapeHtml(module.title)}</option>`
+        ).join('');
+      moduleSelect.disabled = !protectedModules.length;
+      if (!protectedModules.length) {
+        moduleSelect.innerHTML = '<option value="">Nenhum módulo protegido neste curso</option>';
+      }
+    } catch (error) {
+      moduleSelect.innerHTML = '<option value="">Falha ao carregar módulos</option>';
+      alert(error.message || 'Não foi possível carregar os módulos.');
+    }
+  });
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const studentId = document.getElementById('faceManualStudentSelect')?.value || '';
+    const moduleId = moduleSelect.value;
+    const note = document.getElementById('faceManualGrantNote')?.value?.trim() || '';
+    const submitButton = form.querySelector('button[type="submit"]');
+    submitButton.disabled = true;
+    try {
+      const response = await authorizedFetch('/api/admin/face-manual-grants', {
+        method: 'POST',
+        body: JSON.stringify({ studentId, moduleId, note })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.message || 'Não foi possível liberar o acesso.');
+      alert('Acesso liberado por uma hora e registrado na auditoria.');
+      form.reset();
+      moduleSelect.disabled = true;
+      moduleSelect.innerHTML = '<option value="">Selecione o curso primeiro</option>';
+      syncFaceManualGrantOptions();
+    } catch (error) {
+      alert(error.message || 'Não foi possível liberar o acesso.');
+    } finally {
+      submitButton.disabled = false;
+    }
+  });
+};
+
+const loadFaceReviews = async () => {
+  const list = document.getElementById('adminFaceReviewList');
+  if (!list) return;
+  faceReviewImageUrls.forEach((url) => URL.revokeObjectURL(url));
+  faceReviewImageUrls = [];
+  try {
+    const response = await authorizedFetch('/api/admin/face-reviews');
+    const reviews = await response.json().catch(() => []);
+    if (!response.ok) throw new Error(reviews?.message || 'Não foi possível carregar as revisões faciais.');
+    if (!reviews.length) {
+      list.innerHTML = '<p class="muted" style="margin:0;">Nenhuma revisão facial foi solicitada.</p>';
+      return;
+    }
+    list.innerHTML = reviews.map((review) => `
+      <article class="face-review-card ${review.status === 'pending' ? 'is-pending' : ''}" data-face-review-id="${escapeHtml(review.id)}">
+        <div class="face-review-head">
+          <div>
+            <span>${review.status === 'pending' ? 'Pendente' : 'Concluída'}</span>
+            <h3>${escapeHtml(review.student_name || 'Aluno')}</h3>
+            <p>${escapeHtml(review.student_email || '')}</p>
+          </div>
+          <time>${new Date(review.created_at).toLocaleString('pt-BR')}</time>
+        </div>
+        <div class="face-review-context">
+          <strong>${escapeHtml(review.course_title || 'Curso')}</strong>
+          <span>${escapeHtml(review.module_title || 'Módulo')}</span>
+          <small>Finalidade: ${escapeHtml(review.purpose || 'acesso')} · ${Number(review.attempt_count || 0)} tentativas</small>
+        </div>
+        <div class="face-review-image" data-face-review-image>
+          ${review.auditImageAvailable
+            ? '<button class="secondary-btn small" type="button" data-face-review-show>Ver imagem temporária</button>'
+            : '<span>Imagem temporária indisponível ou expirada.</span>'}
+        </div>
+        ${review.status === 'pending' ? `
+          <div class="face-review-actions">
+            ${review.module_id ? '<button class="primary-btn small" type="button" data-face-review-decision="approve_once">Liberar uma vez</button>' : ''}
+            <button class="secondary-btn small" type="button" data-face-review-decision="reset_attempts">Novas tentativas</button>
+            <button class="secondary-btn small" type="button" data-face-review-decision="require_reenrollment">Novo cadastro</button>
+            <button class="secondary-btn danger small" type="button" data-face-review-decision="deny">Negar</button>
+          </div>` : ''}
+      </article>
+    `).join('');
+  } catch (error) {
+    list.innerHTML = `<p class="muted" style="margin:0;">${escapeHtml(error.message || 'Falha ao carregar revisões.')}</p>`;
+  }
+};
+
+const setupFaceReviewActions = () => {
+  const list = document.getElementById('adminFaceReviewList');
+  if (!list) return;
+  list.addEventListener('click', async (event) => {
+    const card = event.target.closest('[data-face-review-id]');
+    if (!card) return;
+    const reviewId = card.dataset.faceReviewId;
+    const showButton = event.target.closest('[data-face-review-show]');
+    if (showButton) {
+      showButton.disabled = true;
+      try {
+        const response = await authorizedFetch(`/api/admin/face-reviews/${encodeURIComponent(reviewId)}/image`);
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload?.message || 'Imagem temporária indisponível.');
+        }
+        const url = URL.createObjectURL(await response.blob());
+        faceReviewImageUrls.push(url);
+        const imageHost = card.querySelector('[data-face-review-image]');
+        imageHost.innerHTML = `<img src="${url}" alt="Captura temporária enviada para revisão" />`;
+      } catch (error) {
+        alert(error.message || 'Não foi possível abrir a imagem.');
+        showButton.disabled = false;
+      }
+      return;
+    }
+    const decisionButton = event.target.closest('[data-face-review-decision]');
+    if (!decisionButton) return;
+    const decision = decisionButton.dataset.faceReviewDecision;
+    const note = prompt('Observação opcional para o registro da decisão:', '');
+    if (note === null) return;
+    card.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+    try {
+      const response = await authorizedFetch(`/api/admin/face-reviews/${encodeURIComponent(reviewId)}/decision`, {
+        method: 'POST',
+        body: JSON.stringify({ decision, note })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.message || 'Não foi possível registrar a decisão.');
+      await loadFaceReviews();
+    } catch (error) {
+      alert(error.message || 'Não foi possível registrar a decisão.');
+      card.querySelectorAll('button').forEach((button) => { button.disabled = false; });
+    }
+  });
+};
+
 const initAdminPage = () => {
   if (adminChatPollTimer) {
     clearInterval(adminChatPollTimer);
@@ -2915,10 +3802,86 @@ const initAdminPage = () => {
     if (aiTextCostField) aiTextCostField.remove();
     const aiImageCostField = document.getElementById('aiImageCreditCostPerCall')?.closest('.field-group');
     if (aiImageCostField) aiImageCostField.remove();
+    document.getElementById('adminAiSettingsPanel')?.remove();
   }
+  initPlatformCredits();
+  if (isGlobalAdminUser()) {
+    loadCreditPackages({ admin: true }).catch(console.error);
+    document.getElementById('adminCreditPackageList')?.addEventListener('click', async (event) => {
+      const editButton = event.target.closest('[data-credit-package-edit]');
+      const toggleButton = event.target.closest('[data-credit-package-toggle]');
+      const source = editButton || toggleButton;
+      if (!source) return;
+      const packageData = {
+        name: source.dataset.packageName,
+        price: Number(source.dataset.packagePrice),
+        credits: Number(source.dataset.packageCredits),
+        active: source.dataset.packageActive === 'true'
+      };
+      if (editButton) {
+        editingCreditPackageId = editButton.dataset.creditPackageEdit;
+        document.getElementById('creditPackageName').value = packageData.name;
+        document.getElementById('creditPackagePrice').value = packageData.price;
+        document.getElementById('creditPackageCredits').value = packageData.credits;
+        document.getElementById('creditPackageActive').checked = packageData.active;
+        document.getElementById('saveCreditPackageBtn').textContent = 'Salvar alterações';
+        return;
+      }
+      toggleButton.disabled = true;
+      try {
+        const response = await authorizedFetch(`/api/admin/credit-packages/${encodeURIComponent(toggleButton.dataset.creditPackageToggle)}`, {
+          method: 'PUT',
+          body: JSON.stringify({ ...packageData, active: !packageData.active })
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.message || 'Não foi possível atualizar o pacote.');
+        await loadCreditPackages({ admin: true });
+      } catch (error) {
+        alert(error.message);
+        toggleButton.disabled = false;
+      }
+    });
+    document.getElementById('saveCreditPackageBtn')?.addEventListener('click', async () => {
+      const button = document.getElementById('saveCreditPackageBtn');
+      button.disabled = true;
+      try {
+        const packageId = editingCreditPackageId;
+        const response = await authorizedFetch(packageId
+          ? `/api/admin/credit-packages/${encodeURIComponent(packageId)}`
+          : '/api/admin/credit-packages', {
+          method: packageId ? 'PUT' : 'POST',
+          body: JSON.stringify({
+            name: document.getElementById('creditPackageName')?.value,
+            price: Number(document.getElementById('creditPackagePrice')?.value),
+            credits: Number(document.getElementById('creditPackageCredits')?.value),
+            active: document.getElementById('creditPackageActive')?.checked !== false
+          })
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.message || 'Não foi possível salvar o pacote.');
+        editingCreditPackageId = null;
+        document.getElementById('creditPackageName').value = '';
+        document.getElementById('creditPackagePrice').value = '30';
+        document.getElementById('creditPackageCredits').value = '100';
+        document.getElementById('creditPackageActive').checked = true;
+        button.textContent = 'Adicionar pacote';
+        await loadCreditPackages({ admin: true });
+      } catch (error) {
+        alert(error.message);
+      } finally {
+        button.disabled = false;
+      }
+    });
+  }
+  setupAccountSettingsForms();
+  loadAccountSettings().catch((error) => {
+    console.error('Não foi possível carregar as configurações da conta', error);
+  });
   renderStudentSignupLinkPanel();
   initAdminAssistant();
-  loadProfessorCreditsStatus();
+  if (isGlobalAdminUser()) {
+    loadProfessorCreditsStatus();
+  }
   loadAdminSmtpSettings();
   const notifTarget = document.getElementById('notificationTarget');
   const studentSelector = document.getElementById('studentSelector');
@@ -2983,7 +3946,7 @@ const initAdminPage = () => {
       email: document.getElementById('adminProfessorEmail').value,
       phone: document.getElementById('adminProfessorTelephone').value,
       password: document.getElementById('adminProfessorPassword').value,
-      aiCredits: Number(document.getElementById('adminProfessorCredits').value) || 0,
+      platformCredits: Number(document.getElementById('adminProfessorCredits').value) || 0,
       studentLimit: document.getElementById('adminProfessorStudentLimit').value,
       storageLimitGb: document.getElementById('adminProfessorStorageLimitGb').value
     };
@@ -3525,6 +4488,7 @@ const initAdminPage = () => {
       imageApiKey: document.getElementById('aiImageApiKey').value,
       aiTextCreditCostPerCall: Number(document.getElementById('aiTextCreditCostPerCall')?.value) || 0.5,
       aiImageCreditCostPerCall: Number(document.getElementById('aiImageCreditCostPerCall')?.value) || 1.0,
+      threeDImportCreditCost: Number(document.getElementById('threeDImportCreditCost')?.value) || 5,
       systemPrompt: document.getElementById('aiSystemPrompt').value,
       requireConfirmation: document.getElementById('aiRequireConfirmation').checked,
       isEnabled: document.getElementById('aiEnabled').checked,
@@ -3573,8 +4537,13 @@ const initAdminPage = () => {
     return null;
   });
   loadReports();
-  loadAdminAiSettings();
+  if (isGlobalAdminUser()) {
+    loadAdminAiSettings();
+  }
   loadAdminNotifications();
+  setupFaceReviewActions();
+  setupFaceManualGrant();
+  loadFaceReviews();
   adminChatPollTimer = window.setInterval(async () => {
     await loadAdminChatCourses(true);
     if (adminActiveChatCourseId) {
@@ -3621,6 +4590,7 @@ const renderChatMessages = (messages) => {
 
     return `
       <div class="chat-bubble ${bubbleClass}">
+        ${renderChatAvatar(msg)}
         ${buildReplyQuoteMarkup(msg)}
         ${!isMine ? `<strong style="font-size:0.78rem; display:block; margin-bottom:0.2rem;">${label}</strong>` : ''}
         ${safeMessage}
@@ -3730,6 +4700,8 @@ const init = () => {
 
   if (isPortal) {
     setupSideNavigation();
+    setupAccountSettingsForms();
+    setupFaceProfile();
     initChatModal();
     document.getElementById('courseStoreGrid')?.addEventListener('click', async (event) => {
       const button = event.target.closest('button[data-store-course-id]');

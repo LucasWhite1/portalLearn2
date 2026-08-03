@@ -1,20 +1,32 @@
 import { API_BASE, getToken, STORAGE_KEY, USER_ROLE_KEY } from './constants.js';
 
+let authRedirectPending = false;
+
+const redirectToLogin = () => {
+  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(USER_ROLE_KEY);
+  localStorage.removeItem('curso-platform-user');
+  if (authRedirectPending) return;
+  authRedirectPending = true;
+  if (!window.location.pathname.endsWith('/login.html')) {
+    window.location.replace('login.html');
+  }
+};
+
 export const authorizedFetch = async (path, options = {}) => {
   const token = getToken();
   if (!token) {
-    throw new Error('Sem token válido');
+    redirectToLogin();
+    throw new Error('Sessão expirada');
   }
-  const headers = {
-    'Content-Type': 'application/json',
-    ...(options.headers || {})
-  };
+  const headers = { ...(options.headers || {}) };
+  if (!(options.body instanceof FormData) && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json';
+  }
   if (/^[0-9a-f]{48}$/i.test(token)) headers.Authorization = `Bearer ${token}`;
   const response = await fetch(`${API_BASE}${path}`, { ...options, headers, credentials: 'include' });
   if (response.status === 401) {
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem(USER_ROLE_KEY);
-    window.location.href = 'login.html';
+    redirectToLogin();
     throw new Error('Sessão expirada');
   }
   return response;
@@ -26,8 +38,6 @@ export const handleLogout = async () => {
   } catch (error) {
     console.warn('Logout falhou', error);
   } finally {
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem(USER_ROLE_KEY);
-    window.location.href = 'login.html';
+    redirectToLogin();
   }
 };

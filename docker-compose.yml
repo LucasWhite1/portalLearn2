@@ -1,4 +1,21 @@
 services:
+  face-verification:
+    build:
+      context: ./face-service
+      dockerfile: Dockerfile
+    env_file:
+      - ./backend/.env
+    expose:
+      - "8081"
+    ports:
+      - "127.0.0.1:8081:8081"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.50"
+
   app:
     build:
       context: .
@@ -7,4 +24,9 @@ services:
       - "${PORT:-4000}:4000"
     env_file:
       - ./backend/.env
+    environment:
+      FACE_SERVICE_URL: http://face-verification:8081
+    depends_on:
+      face-verification:
+        condition: service_healthy
     restart: unless-stopped

@@ -44,6 +44,10 @@ const ensureChatStorage = async () => {
       PRIMARY KEY (course_id, user_id)
     )
   `);
+  await db.query(`
+    ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS profile_image TEXT
+  `);
   chatStorageEnsured = true;
 };
 
@@ -90,6 +94,9 @@ router.get('/admin/courses', async (req, res) => {
         c.title,
         c.slug,
         c.cover_image,
+        c.owner_user_id,
+        owner.full_name AS owner_name,
+        owner.email AS owner_email,
         COALESCE(message_count.total_messages, 0) AS total_messages,
         COALESCE(unread.unread_count, 0) AS unread_count,
         last_message.message AS last_message,
@@ -97,6 +104,7 @@ router.get('/admin/courses', async (req, res) => {
         last_user.full_name AS last_message_author,
         last_user.role AS last_message_role
      FROM courses c
+     LEFT JOIN users owner ON owner.id = c.owner_user_id
      LEFT JOIN (
        SELECT course_id, COUNT(*)::int AS total_messages
        FROM course_messages
@@ -158,10 +166,12 @@ router.get('/:courseId', async (req, res) => {
         cm.created_at,
         cm.reply_to_message_id,
         u.full_name,
+        u.profile_image,
         u.role,
         parent.message AS reply_to_message,
         parent.created_at AS reply_to_created_at,
         parent_user.full_name AS reply_to_full_name,
+        parent_user.profile_image AS reply_to_profile_image,
         parent_user.role AS reply_to_role
      FROM course_messages cm
      JOIN users u ON u.id = cm.user_id
@@ -234,7 +244,7 @@ router.post('/:courseId', chatRateLimiter, async (req, res) => {
   let replyRow = null;
   if (replyToMessageId) {
     const { rows: replyRows } = await db.query(
-      `SELECT cm.id, cm.message, cm.created_at, u.full_name, u.role
+      `SELECT cm.id, cm.message, cm.created_at, u.full_name, u.profile_image, u.role
        FROM course_messages cm
        JOIN users u ON u.id = cm.user_id
        WHERE cm.id = $1 AND cm.course_id = $2`,
@@ -254,14 +264,20 @@ router.post('/:courseId', chatRateLimiter, async (req, res) => {
   );
 
   await markCourseChatRead({ courseId, userId });
+  const { rows: currentUserRows } = await db.query(
+    'SELECT profile_image FROM users WHERE id = $1',
+    [userId]
+  );
 
   res.status(201).json({
     ...rows[0],
     full_name: req.user.fullName,
+    profile_image: currentUserRows[0]?.profile_image || null,
     role: req.user.role,
     reply_to_message: replyRow?.message || null,
     reply_to_created_at: replyRow?.created_at || null,
     reply_to_full_name: replyRow?.full_name || null,
+    reply_to_profile_image: replyRow?.profile_image || null,
     reply_to_role: replyRow?.role || null
   });
 });

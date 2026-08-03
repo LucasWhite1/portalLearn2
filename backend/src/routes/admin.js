@@ -3,6 +3,7 @@ const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const fs = require('fs/promises');
 const path = require('path');
+const { Readable } = require('stream');
 const db = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { encryptApiKey, encryptSecret } = require('../aiConfigCrypto');
@@ -30,7 +31,38 @@ const {
 } = require('../adminAssistant');
 const { readImageSource } = require('../pixian');
 const { extractAudioFromMediaSource, transcribeMediaSource } = require('../mediaProcessing');
-const { createShare, updateShare, deleteShare, clearDrawingStrokes, removeDrawingStroke, getShare, updateCursorPosition, listCursorPositions, removeCameraRequest } = require('../liveStageShareStore');
+const { createShare, updateShare, updateThreeDTransform, deleteShare, clearDrawingStrokes, removeDrawingStroke, getShare, updateCursorPosition, listCursorPositions, removeCameraRequest } = require('../liveStageShareStore');
+const {
+  createThreeDAssetFromRemote,
+  createThreeDAssetFromRequest,
+  deleteThreeDAsset,
+  ensureThreeDAssetsTable,
+  getThreeDAsset,
+  listThreeDAssets,
+  sendThreeDAssetFile,
+  serializeAsset
+} = require('../threeDAssets');
+const {
+  getExternalThreeDModel,
+  getProviderUserAgent,
+  isApprovedExternalModelUrl,
+  isApprovedExternalThumbnailUrl,
+  searchExternalThreeDModels
+} = require('../externalThreeDCatalog');
+const {
+  applyCreditChange,
+  consumePlatformCredits,
+  ensurePlatformCreditTables,
+  getCreditCosts,
+  getPlatformCreditStatus,
+  listCreditPackages,
+  saveCreditPackage,
+  updateCreditCosts
+} = require('../platformCredits');
+const {
+  createCreditTopupCheckout,
+  getCreditTopupOrder
+} = require('../creditTopups');
 const {
   sanitizeText,
   sanitizeEmail,
@@ -60,7 +92,6 @@ let progressEventsColumnEnsured = false;
 let enrollmentProgressColumnsEnsured = false;
 let adminSmtpSettingsEnsured = false;
 let ownershipColumnsEnsured = false;
-let professorCreditColumnsEnsured = false;
 let professorQuotaColumnsEnsured = false;
 let reportCorrectionColumnEnsured = false;
 let studentSignupLinksTableEnsured = false;
@@ -70,10 +101,20 @@ const mediaHeavyRateLimiter = createRateLimiter({
   max: 12,
   keyFn: (req) => `media-heavy:${req.user?.id || req.ip}`
 });
+const externalThreeDSearchRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 20,
+  keyFn: (req) => `external-3d-search:${req.user?.id || req.ip}`
+});
 const aiRequestRateLimiter = createRateLimiter({
   windowMs: 60 * 1000,
   max: 30,
   keyFn: (req) => `admin-ai:${req.user?.id || req.ip}`
+});
+const liveThreeDTransformRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 720,
+  keyFn: (req) => `live-3d:${req.user?.id || req.ip}`
 });
 
 const slugify = (value) => {
@@ -110,6 +151,14 @@ const sanitizeModulePayload = ({ title, description, builderData, slug }) => {
     cleanSlug,
     cleanBuilderData
   };
+};
+
+const getModuleFaceSettingsError = (builderData = {}) => {
+  const moduleSettings = builderData?.moduleSettings || {};
+  if (moduleSettings.isPublic && moduleSettings.faceVerification?.enabled) {
+    return 'Um modulo publico nao pode exigir verificacao facial.';
+  }
+  return '';
 };
 
 const sanitizeLiveStageSharePayload = (payload = {}) => ({
@@ -159,19 +208,7 @@ const isGlobalAdmin = (req) => req.user?.role === 'admin';
 const isProfessor = (req) => req.user?.role === 'professor';
 
 const ensureProfessorCreditColumns = async () => {
-  if (professorCreditColumnsEnsured) {
-    return;
-  }
-  await db.query(
-    'ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_credits NUMERIC(12,2) NOT NULL DEFAULT 0'
-  );
-  await db.query(
-    'ALTER TABLE users ALTER COLUMN ai_credits TYPE NUMERIC(12,2) USING COALESCE(ai_credits, 0)::numeric(12,2)'
-  );
-  await db.query(
-    'ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_credits_updated_at TIMESTAMPTZ DEFAULT NOW()'
-  );
-  professorCreditColumnsEnsured = true;
+  await ensurePlatformCreditTables();
 };
 
 const ensureProfessorQuotaColumns = async () => {
@@ -240,6 +277,42 @@ router.put('/live-stage-shares/:shareId', async (req, res) => {
     return res.status(404).json({ message: 'Compartilhamento ao vivo não encontrado.' });
   }
   res.json(buildLiveStageShareResponse(share));
+});
+
+router.post('/live-stage-shares/:shareId/3d-transform', liveThreeDTransformRateLimiter, async (req, res) => {
+  const shareId = sanitizeText(req.params?.shareId || '', 64);
+  if (!LIVE_STAGE_SHARE_ID_REGEX.test(shareId)) {
+    return res.status(400).json({ message: 'Compartilhamento ao vivo inválido.' });
+  }
+  const quaternion = Array.isArray(req.body?.quaternion)
+    ? req.body.quaternion.slice(0, 4).map(Number)
+    : [];
+  const position = Array.isArray(req.body?.position)
+    ? req.body.position.slice(0, 2).map(Number)
+    : [0, 0];
+  const zoom = Number(req.body?.zoom);
+  const slideId = sanitizeText(req.body?.slideId || '', 120);
+  if (
+    !slideId ||
+    quaternion.length !== 4 ||
+    quaternion.some((value) => !Number.isFinite(value)) ||
+    position.length !== 2 ||
+    position.some((value) => !Number.isFinite(value)) ||
+    !Number.isFinite(zoom)
+  ) {
+    return res.status(400).json({ message: 'Transformação 3D inválida.' });
+  }
+  const transform = updateThreeDTransform(shareId, req.user.id, {
+    slideId,
+    quaternion: quaternion.map((value) => Math.max(-1, Math.min(1, value))),
+    position: position.map((value) => Math.max(-0.5, Math.min(0.5, value))),
+    zoom: Math.max(0.5, Math.min(2.5, zoom)),
+    sequence: Math.max(0, Math.trunc(Number(req.body?.sequence) || 0))
+  });
+  if (!transform) {
+    return res.status(404).json({ message: 'Compartilhamento ao vivo não encontrado.' });
+  }
+  res.json({ received: true, transform });
 });
 
 router.delete('/live-stage-shares/:shareId', async (req, res) => {
@@ -350,11 +423,203 @@ router.post('/live-stage-shares/:shareId/cursor', async (req, res) => {
   res.json({ success: true });
 });
 
+router.get('/3d-assets', async (req, res) => {
+  try {
+    res.json({ assets: await listThreeDAssets(req.user.id) });
+  } catch (error) {
+    console.error('Erro ao listar ativos 3D:', error);
+    res.status(500).json({ message: 'Não foi possível carregar os modelos 3D.' });
+  }
+});
+
+router.post('/3d-assets', mediaHeavyRateLimiter, async (req, res) => {
+  let creditCharge = null;
+  try {
+    creditCharge = await consumePlatformCredits(req, 'a importação de modelo 3D', 'three_d_import');
+    const result = await createThreeDAssetFromRequest(req, {
+      assertQuota: (additionalBytes) => assertProfessorStorageLimit(req, additionalBytes)
+    });
+    if (result.duplicate && creditCharge?.charged) {
+      await creditCharge.refund('duplicate_3d_asset');
+      creditCharge = null;
+    }
+    const status = await getPlatformCreditStatus(req.user.id);
+    res.status(result.duplicate ? 200 : 201).json({
+      ...result,
+      platformCreditsRemaining: status?.platformCredits ?? null
+    });
+  } catch (error) {
+    if (creditCharge?.charged) await creditCharge.refund('3d_import_failed').catch(() => {});
+    if (!error.statusCode || error.statusCode >= 500) {
+      console.error('Erro ao importar modelo 3D:', error);
+    }
+    res.status(error.statusCode || 400).json({
+      message: error.message || 'Não foi possível importar o modelo 3D.',
+      code: error.code || null,
+      quotaStatus: error.quotaStatus || null,
+      platformCreditsRemaining: error.platformCredits ?? null,
+      requiredCredits: error.requiredCredits ?? null
+    });
+  }
+});
+
+router.get('/3d-assets/:assetId/file', async (req, res) => {
+  const asset = await getThreeDAsset(req.params.assetId);
+  if (!asset || (!isGlobalAdmin(req) && asset.owner_user_id !== req.user.id)) {
+    return res.status(404).json({ message: 'Modelo 3D não encontrado.' });
+  }
+  return sendThreeDAssetFile(req, res, asset, req.query.variant);
+});
+
+router.get('/3d-assets/:assetId', async (req, res) => {
+  const asset = await getThreeDAsset(req.params.assetId);
+  if (!asset || (!isGlobalAdmin(req) && asset.owner_user_id !== req.user.id)) {
+    return res.status(404).json({ message: 'Modelo 3D não encontrado.' });
+  }
+  res.json({ asset: serializeAsset(asset) });
+});
+
+router.delete('/3d-assets/:assetId', async (req, res) => {
+  try {
+  const result = await deleteThreeDAsset(req.params.assetId, req.user.id, {
+    allowAnyOwner: isGlobalAdmin(req)
+  });
+  if (result.reason === 'referenced') {
+    return res.status(409).json({ message: 'Este modelo está sendo usado por um módulo e não pode ser excluído.' });
+  }
+  if (!result.deleted) {
+    return res.status(404).json({ message: 'Modelo 3D não encontrado.' });
+  }
+  res.status(204).end();
+  } catch (error) {
+    console.error('Erro ao excluir modelo 3D:', error);
+    res.status(500).json({ message: 'NÃ£o foi possÃ­vel excluir o modelo 3D agora.' });
+  }
+});
+
+router.get('/3d-catalog/search', externalThreeDSearchRateLimiter, async (req, res) => {
+  try {
+    const items = await searchExternalThreeDModels(req.user.id, req.query.q || '');
+    res.json({ items });
+  } catch (error) {
+    res.status(error.statusCode || 502).json({
+      message: error.message || 'Não foi possível consultar o catálogo online.'
+    });
+  }
+});
+
+router.get('/3d-catalog/:externalId/thumbnail', async (req, res) => {
+  const item = getExternalThreeDModel(req.user.id, req.params.externalId);
+  if (!item?.thumbnailUri) return res.status(404).end();
+  try {
+    const thumbnailUrl = new URL(item.thumbnailUri);
+    if (!isApprovedExternalThumbnailUrl(thumbnailUrl, item.provider)) return res.status(404).end();
+    const response = await fetch(thumbnailUrl, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(15_000),
+      headers: { accept: 'image/*', 'user-agent': getProviderUserAgent() }
+    });
+    const declaredSize = Number(response.headers.get('content-length') || 0);
+    if (!response.ok || declaredSize > 3 * 1024 * 1024) return res.status(404).end();
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (!buffer.length || buffer.length > 3 * 1024 * 1024) return res.status(404).end();
+    res.setHeader('Content-Type', response.headers.get('content-type') || 'image/jpeg');
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    return res.send(buffer);
+  } catch {
+    return res.status(404).end();
+  }
+});
+
+router.get('/3d-catalog/:externalId/preview', async (req, res) => {
+  const item = getExternalThreeDModel(req.user.id, req.params.externalId);
+  if (!item?.uri || item.preview3d === false || Number(item.size || 0) > 40 * 1024 * 1024) {
+    return res.status(404).end();
+  }
+  try {
+    const modelUrl = new URL(item.uri);
+    if (!isApprovedExternalModelUrl(modelUrl, item.provider)) return res.status(404).end();
+    const response = await fetch(modelUrl, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(60_000),
+      headers: {
+        accept: 'model/gltf-binary,application/octet-stream',
+        'user-agent': getProviderUserAgent()
+      }
+    });
+    const declaredSize = Number(response.headers.get('content-length') || 0);
+    if (!response.ok || !response.body || declaredSize > 40 * 1024 * 1024) return res.status(404).end();
+    res.setHeader('Content-Type', 'model/gltf-binary');
+    res.setHeader('Content-Disposition', 'inline; filename="preview-criatyve.glb"');
+    res.setHeader('Cache-Control', 'private, max-age=600');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    return Readable.fromWeb(response.body).pipe(res);
+  } catch {
+    return res.status(404).end();
+  }
+});
+
+router.post('/3d-catalog/:externalId/import', mediaHeavyRateLimiter, async (req, res) => {
+  const item = getExternalThreeDModel(req.user.id, req.params.externalId);
+  if (!item) {
+    return res.status(410).json({ message: 'Esta busca expirou. Pesquise novamente para importar o modelo.' });
+  }
+  if (item.provider === 'SKETCHFAB' || !item.uri) {
+    return res.status(403).json({
+      message: 'O Sketchfab exige login individual do professor para baixar. Abra o modelo e faça o download pela sua conta.'
+    });
+  }
+  let creditCharge = null;
+  try {
+    creditCharge = await consumePlatformCredits(req, 'a importação de modelo do catálogo 3D', 'three_d_import', {
+      referenceType: 'external_3d_model',
+      referenceId: item.sourceAssetId || req.params.externalId
+    });
+    const result = await createThreeDAssetFromRemote(
+      req.user.id,
+      {
+        url: item.uri,
+        originalName: item.title,
+        provider: item.provider,
+        resources: item.resources
+      },
+      {
+        assertQuota: (bytes) => assertProfessorStorageLimit(req, bytes),
+        sourceProvider: item.provider,
+        sourceReference: item.sourceAssetId || item.uri,
+        sourceLicense: item.license || 'CC0'
+      }
+    );
+    if (result.duplicate && creditCharge?.charged) {
+      await creditCharge.refund('duplicate_3d_asset');
+      creditCharge = null;
+    }
+    const status = await getPlatformCreditStatus(req.user.id);
+    return res.status(result.duplicate ? 200 : 201).json({
+      ...result,
+      platformCreditsRemaining: status?.platformCredits ?? null
+    });
+  } catch (error) {
+    if (creditCharge?.charged) await creditCharge.refund('3d_catalog_import_failed').catch(() => {});
+    if (!error.statusCode || error.statusCode >= 500) {
+      console.error('Erro ao importar modelo do catálogo online:', error);
+    }
+    return res.status(error.statusCode || 400).json({
+      message: error.message || 'Não foi possível importar este modelo.',
+      code: error.code || null,
+      quotaStatus: error.quotaStatus || null,
+      platformCreditsRemaining: error.platformCredits ?? null,
+      requiredCredits: error.requiredCredits ?? null
+    });
+  }
+});
+
 const hashSignupLinkToken = (token) => crypto.createHash('sha256').update(String(token || '')).digest('hex');
 
 const getProfessorCreditsValue = (value) => {
   const numeric = Number(value);
-  return Number.isFinite(numeric) ? Math.max(0, Number(numeric.toFixed(2))) : 0;
+  return Number.isFinite(numeric) ? Number(numeric.toFixed(2)) : 0;
 };
 
 const parseCreditsInput = (value) => {
@@ -391,14 +656,6 @@ const parseStorageLimitGbInput = (value) => {
   return Math.round(numeric * 1024 * 1024 * 1024);
 };
 
-const parseAiCreditCostInput = (value) => {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric) || numeric <= 0) {
-    return null;
-  }
-  return Number(numeric.toFixed(2));
-};
-
 const ensureGlobalAdmin = (req, res) => {
   if (!isGlobalAdmin(req)) {
     res.status(403).json({ message: 'Somente o admin pode gerenciar professores.' });
@@ -407,9 +664,21 @@ const ensureGlobalAdmin = (req, res) => {
   return true;
 };
 
+const loadEffectiveAiSettings = async (req) => {
+  if (isGlobalAdmin(req)) {
+    return db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
+  }
+  return db.query(
+    `${ADMIN_AI_SETTINGS_SELECT}
+      WHERE admin_user_id = (
+        SELECT id FROM users WHERE role = 'admin' ORDER BY created_at, id LIMIT 1
+      )`
+  );
+};
+
 const buildProfessorCreditPayload = (row) => ({
-  aiCredits: getProfessorCreditsValue(row?.ai_credits),
-  aiCreditsUpdatedAt: row?.ai_credits_updated_at || null
+  platformCredits: getProfessorCreditsValue(row?.platform_credits),
+  platformCreditsUpdatedAt: row?.platform_credits_updated_at || null
 });
 
 const getProfessorLimitPayload = (row) => ({
@@ -453,6 +722,7 @@ const getProfessorStudentCount = async (professorId) => {
 
 const getProfessorStorageUsageBytes = async (professorId) => {
   await ensureOwnershipColumns();
+  await ensureThreeDAssetsTable();
   const { rows } = await db.query(
     `WITH owned_courses AS (
        SELECT
@@ -489,9 +759,20 @@ const getProfessorStorageUsageBytes = async (professorId) => {
        FROM notifications n
        LEFT JOIN LATERAL jsonb_array_elements(COALESCE(n.attachments, '[]'::jsonb)) AS attachment(value) ON TRUE
        WHERE n.owner_user_id = $1 OR n.created_by = $1
+     ),
+     owned_3d_assets AS (
+       SELECT COALESCE(SUM(desktop_size + mobile_size + poster_size), 0)::bigint AS total
+       FROM three_d_assets
+       WHERE owner_user_id = $1
+         AND status = 'READY'
      )
-     SELECT (owned_courses.total + owned_modules.total + owned_notifications.total)::bigint AS total
-     FROM owned_courses, owned_modules, owned_notifications`,
+     SELECT (
+       owned_courses.total +
+       owned_modules.total +
+       owned_notifications.total +
+       owned_3d_assets.total
+     )::bigint AS total
+     FROM owned_courses, owned_modules, owned_notifications, owned_3d_assets`,
     [professorId]
   );
   return Number(rows[0]?.total || 0);
@@ -501,7 +782,7 @@ const getProfessorQuotaStatus = async (professorId) => {
   await ensureProfessorCreditColumns();
   await ensureProfessorQuotaColumns();
   const { rows } = await db.query(
-    `SELECT id, role, is_active, ai_credits, ai_credits_updated_at, student_limit, storage_limit_bytes
+    `SELECT id, role, is_active, platform_credits, platform_credits_updated_at, student_limit, storage_limit_bytes
        FROM users
       WHERE id = $1`,
     [professorId]
@@ -527,93 +808,20 @@ const getProfessorCreditStatus = async (userId) => {
   const status = await getProfessorQuotaStatus(userId);
   return status
     ? {
-        aiCredits: status.aiCredits,
-        aiCreditsUpdatedAt: status.aiCreditsUpdatedAt,
+        platformCredits: status.platformCredits,
+        platformCreditsUpdatedAt: status.platformCreditsUpdatedAt,
         isActive: status.isActive
       }
     : null;
 };
 
-const getAiCreditCostPerCall = async (userId, creditType = 'text') => {
-  await ensureAdminAiImageColumns();
-  const { rows } = await db.query(
-    `SELECT ai_credit_cost_per_call, image_ai_credit_cost_per_call
-       FROM admin_ai_settings
-      WHERE admin_user_id = $1`,
-    [userId]
+const consumeProfessorAiCredit = (req, featureLabel, options = {}) =>
+  consumePlatformCredits(
+    req,
+    featureLabel,
+    options.creditType === 'image' ? 'image' : 'text',
+    { units: options.units }
   );
-  if (creditType === 'image') {
-    return parseAiCreditCostInput(rows[0]?.image_ai_credit_cost_per_call) ?? 1.0;
-  }
-  return parseAiCreditCostInput(rows[0]?.ai_credit_cost_per_call) ?? 0.5;
-};
-
-const consumeProfessorAiCredit = async (req, featureLabel, options = {}) => {
-  if (!isProfessor(req)) {
-    return {
-      charged: false,
-      remainingCredits: null,
-      costPerCall: 0,
-      totalCost: 0,
-      creditType: options.creditType || 'text',
-      units: 0,
-      refund: async () => {}
-    };
-  }
-  await ensureProfessorCreditColumns();
-  const creditType = options.creditType === 'image' ? 'image' : 'text';
-  const units = Math.max(1, Math.min(50, Math.trunc(Number(options.units) || 1)));
-  const costPerCall = await getAiCreditCostPerCall(req.user.id, creditType);
-  const totalCost = Number((costPerCall * units).toFixed(2));
-  const { rows } = await db.query(
-    `UPDATE users
-        SET ai_credits = ai_credits - $2,
-            ai_credits_updated_at = NOW()
-      WHERE id = $1
-        AND role = 'professor'
-        AND is_active = TRUE
-        AND ai_credits >= $2
-    RETURNING ai_credits, ai_credits_updated_at`,
-    [req.user.id, totalCost]
-  );
-  if (!rows.length) {
-    const currentStatus = await getProfessorQuotaStatus(req.user.id);
-    const costLabel = units > 1
-      ? `${units} chamada(s) de ${creditType === 'image' ? 'imagem' : 'texto'} (${totalCost} crÃ©ditos)`
-      : `${totalCost} crÃ©dito(s)`;
-    const exhaustedMessage = currentStatus?.isActive === false
-      ? 'Sua conta de professor est\u00e1 desativada.'
-      : `Seus cr\u00e9ditos de IA acabaram. Pe\u00e7a ao admin para adicionar novos cr\u00e9ditos antes de usar ${featureLabel}. Custo necessÃ¡rio: ${costLabel}.`;
-    const error = new Error(exhaustedMessage);
-    error.statusCode = 403;
-    error.code = 'PROFESSOR_AI_CREDITS_EXHAUSTED';
-    error.creditStatus = currentStatus || { aiCredits: 0, aiCreditsUpdatedAt: null, isActive: true };
-    throw error;
-  }
-  let refunded = false;
-  return {
-    charged: true,
-    remainingCredits: getProfessorCreditsValue(rows[0].ai_credits),
-    costPerCall,
-    totalCost,
-    creditType,
-    units,
-    refund: async () => {
-      if (refunded) {
-        return;
-      }
-      refunded = true;
-      await db.query(
-        `UPDATE users
-            SET ai_credits = ai_credits + $2,
-                ai_credits_updated_at = NOW()
-          WHERE id = $1
-            AND role = 'professor'`,
-        [req.user.id, totalCost]
-      );
-    }
-  };
-};
 
 const countGeneratedImageCharges = (value) => {
   const actions = Array.isArray(value?.actions) ? value.actions : Array.isArray(value) ? value : [];
@@ -687,6 +895,12 @@ const ensureOwnershipColumns = async () => {
     "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS attachments JSONB NOT NULL DEFAULT '[]'::jsonb"
   );
   ownershipColumnsEnsured = true;
+};
+
+const parsePlatformCreditCostInput = (value) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  return Number(numeric.toFixed(2));
 };
 
 const sanitizeNotificationAttachments = (value = [], message = '') => {
@@ -1021,7 +1235,7 @@ const readTemplateStoreCatalog = async () => {
 let adminAiImageColumnsEnsured = false;
 const DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-pro';
 
-const ADMIN_AI_SETTINGS_SELECT = `SELECT admin_user_id, provider_key, provider_label, base_url, model, encrypted_api_key, ai_credit_cost_per_call, image_ai_credit_cost_per_call,
+const ADMIN_AI_SETTINGS_SELECT = `SELECT admin_user_id, provider_key, provider_label, base_url, model, encrypted_api_key,
         system_prompt, require_confirmation, is_enabled, updated_at,
         image_provider_key, image_provider_label, image_base_url, image_model, image_encrypted_api_key, image_is_enabled
    FROM admin_ai_settings`;
@@ -1055,14 +1269,6 @@ const ensureAdminAiImageColumns = async () => {
        ADD COLUMN IF NOT EXISTS image_is_enabled BOOLEAN NOT NULL DEFAULT FALSE`
   );
   await db.query(
-    `ALTER TABLE admin_ai_settings
-       ADD COLUMN IF NOT EXISTS ai_credit_cost_per_call NUMERIC(12,2) NOT NULL DEFAULT 0.5`
-  );
-  await db.query(
-    `ALTER TABLE admin_ai_settings
-       ADD COLUMN IF NOT EXISTS image_ai_credit_cost_per_call NUMERIC(12,2) NOT NULL DEFAULT 1.0`
-  );
-  await db.query(
     `UPDATE admin_ai_settings
         SET model = $1,
             updated_at = NOW()
@@ -1077,14 +1283,16 @@ router.get('/students', async (req, res) => {
   await ensureClassesTable();
   await ensureOwnershipColumns();
   const params = [];
-  let studentQuery = `SELECT id, full_name, email, phone, role, class_name, is_active, created_at
-                      FROM users
-                      WHERE role = 'student'`;
+  let studentQuery = `SELECT s.id, s.full_name, s.email, s.phone, s.role, s.class_name, s.is_active, s.created_at,
+                             s.owner_user_id, owner.full_name AS owner_name, owner.email AS owner_email
+                      FROM users s
+                      LEFT JOIN users owner ON owner.id = s.owner_user_id
+                      WHERE s.role = 'student'`;
   if (isProfessor(req)) {
     params.push(req.user.id);
-    studentQuery += ` AND owner_user_id = $1`;
+    studentQuery += ` AND s.owner_user_id = $1`;
   }
-  studentQuery += ' ORDER BY full_name';
+  studentQuery += ' ORDER BY s.full_name';
   const result = await db.query(studentQuery, params);
 
   const students = await Promise.all(
@@ -1153,11 +1361,20 @@ router.delete('/classes/:classId', async (req, res) => {
   if (!classRow) {
     return res.status(404).json({ message: 'Turma nÃ£o encontrada.' });
   }
+  const usageParams = [classRow.name];
+  let usageOwnerSql = ' AND owner_user_id IS NULL';
+  if (isProfessor(req)) {
+    usageParams.push(req.user.id);
+    usageOwnerSql = ' AND owner_user_id = $2';
+  } else if (classRow.owner_user_id) {
+    usageParams.push(classRow.owner_user_id);
+    usageOwnerSql = ' AND owner_user_id = $2';
+  }
   const usage = await db.query(
     `SELECT COUNT(*)::int AS total
      FROM users
-     WHERE role = 'student' AND class_name = $1${isProfessor(req) ? ' AND owner_user_id = $2' : ''}`,
-    isProfessor(req) ? [classRow.name, req.user.id] : [classRow.name]
+     WHERE role = 'student' AND class_name = $1${usageOwnerSql}`,
+    usageParams
   );
   if (Number(usage.rows[0]?.total || 0) > 0) {
     return res.status(409).json({ message: 'Esta turma possui alunos vinculados.' });
@@ -1173,7 +1390,7 @@ router.get('/professors', async (req, res) => {
   await ensureProfessorCreditColumns();
   await ensureProfessorQuotaColumns();
   const { rows } = await db.query(
-    `SELECT id, full_name, email, phone, role, is_active, ai_credits, ai_credits_updated_at, student_limit, storage_limit_bytes, created_at
+    `SELECT id, full_name, email, phone, role, is_active, platform_credits, platform_credits_updated_at, student_limit, storage_limit_bytes, created_at
        FROM users
       WHERE role = 'professor'
       ORDER BY full_name`
@@ -1206,8 +1423,8 @@ router.post('/professors', async (req, res) => {
   const email = sanitizeEmail(req.body?.email || '');
   const phone = sanitizePhone(req.body?.phone || '');
   const password = sanitizeText(req.body?.password || '', 256, { trim: false });
-  const parsedCredits = parseCreditsInput(req.body?.aiCredits);
-  const aiCredits = parsedCredits === null ? 0 : Math.max(0, parsedCredits);
+  const parsedCredits = parseCreditsInput(req.body?.platformCredits);
+  const platformCredits = parsedCredits === null ? 0 : Math.max(0, parsedCredits);
   const studentLimit = parseOptionalLimitInput(req.body?.studentLimit, { allowZero: false });
   const storageLimitBytes = parseStorageLimitGbInput(req.body?.storageLimitGb);
   if (!fullName || !email || !password) {
@@ -1220,10 +1437,10 @@ router.post('/professors', async (req, res) => {
   try {
     await db.query(
       `INSERT INTO users (
-         id, full_name, email, phone, password_hash, role, class_name, is_active, ai_credits, ai_credits_updated_at, student_limit, storage_limit_bytes
+         id, full_name, email, phone, password_hash, role, class_name, is_active, platform_credits, platform_credits_updated_at, student_limit, storage_limit_bytes
        )
-       VALUES ($1, $2, $3, $4, $5, 'professor', $6, TRUE, $7, NOW(), $8, $9)`,
-      [id, fullName, email, phone || null, hashedPassword, 'Professor', aiCredits, studentLimit, storageLimitBytes]
+       VALUES ($1, $2, $3, $4, $5, 'professor', $6, TRUE, 0, NOW(), $7, $8)`,
+      [id, fullName, email, phone || null, hashedPassword, 'Professor', studentLimit, storageLimitBytes]
     );
   } catch (error) {
     if (error?.code === '23505') {
@@ -1231,7 +1448,18 @@ router.post('/professors', async (req, res) => {
     }
     throw error;
   }
-  res.status(201).json({ id, fullName, email, aiCredits, studentLimit, storageLimitBytes });
+  if (platformCredits > 0) {
+    await applyCreditChange({
+      userId: id,
+      amount: platformCredits,
+      operationType: 'admin_initial_grant',
+      referenceType: 'professor',
+      referenceId: id,
+      idempotencyKey: `professor-initial:${id}`,
+      metadata: { adminUserId: req.user.id }
+    });
+  }
+  res.status(201).json({ id, fullName, email, platformCredits, studentLimit, storageLimitBytes });
 });
 
 router.put('/professors/:id/status', async (req, res) => {
@@ -1315,22 +1543,29 @@ router.post('/professors/:id/credits', async (req, res) => {
   if (creditAmount === null || creditAmount <= 0) {
     return res.status(400).json({ message: 'Informe uma quantidade positiva de cr\u00e9ditos.' });
   }
-  const { rows } = await db.query(
-    `UPDATE users
-        SET ai_credits = ai_credits + $1,
-            ai_credits_updated_at = NOW()
-      WHERE id = $2
-        AND role = 'professor'
-    RETURNING id, ai_credits, ai_credits_updated_at`,
-    [creditAmount, id]
+  const professor = await db.query(
+    `SELECT id FROM users WHERE id = $1 AND role = 'professor'`,
+    [id]
   );
-  if (!rows.length) {
+  if (!professor.rows.length) {
     return res.status(404).json({ message: 'Professor n\u00e3o encontrado.' });
   }
+  const movement = await applyCreditChange({
+    userId: id,
+    amount: creditAmount,
+    operationType: 'admin_adjustment',
+    referenceType: 'admin',
+    referenceId: req.user.id,
+    idempotencyKey: `admin-adjustment:${req.user.id}:${crypto.randomUUID()}`,
+    metadata: {
+      reason: sanitizeText(req.body?.reason || 'Ajuste manual do administrador', 300)
+    }
+  });
   res.json({
     success: true,
     addedCredits: creditAmount,
-    ...buildProfessorCreditPayload(rows[0])
+    platformCredits: movement.balance,
+    platformCreditsUpdatedAt: new Date().toISOString()
   });
 });
 
@@ -1387,7 +1622,7 @@ router.put('/professors/:id/limits', async (req, res) => {
   });
 });
 
-router.get('/me/professor-credits', async (req, res) => {
+router.get('/me/platform-credits', async (req, res) => {
   if (!['admin', 'professor'].includes(req.user?.role || '')) {
     return res.status(403).json({ message: 'Permiss\u00e3o negada.' });
   }
@@ -1395,8 +1630,8 @@ router.get('/me/professor-credits', async (req, res) => {
   const payload = {
     role: req.user.role,
     ...(status || {
-      aiCredits: null,
-      aiCreditsUpdatedAt: null,
+      platformCredits: null,
+      platformCreditsUpdatedAt: null,
       isActive: req.user?.role === 'admin' ? true : null,
       studentLimit: null,
       storageLimitBytes: null,
@@ -1404,12 +1639,57 @@ router.get('/me/professor-credits', async (req, res) => {
       storageUsedBytes: null
     })
   };
-  if (isGlobalAdmin(req)) {
-    payload.aiCreditCostPerCall = await getAiCreditCostPerCall(req.user.id, 'text');
-    payload.aiTextCreditCostPerCall = payload.aiCreditCostPerCall;
-    payload.aiImageCreditCostPerCall = await getAiCreditCostPerCall(req.user.id, 'image');
-  }
+  payload.costs = await getCreditCosts();
   res.json(payload);
+});
+
+router.get('/credit-packages', async (req, res) => {
+  res.json(await listCreditPackages({ activeOnly: isProfessor(req) }));
+});
+
+router.post('/credit-packages', async (req, res) => {
+  if (!ensureGlobalAdmin(req, res)) return;
+  try {
+    const creditPackage = await saveCreditPackage(req.user.id, req.body || {});
+    res.status(201).json(creditPackage);
+  } catch (error) {
+    res.status(error.statusCode || 400).json({ message: error.message || 'Nao foi possivel criar o pacote.' });
+  }
+});
+
+router.put('/credit-packages/:packageId', async (req, res) => {
+  if (!ensureGlobalAdmin(req, res)) return;
+  if (!isUuid(req.params.packageId)) {
+    return res.status(400).json({ message: 'Pacote invalido.' });
+  }
+  try {
+    res.json(await saveCreditPackage(req.user.id, req.body || {}, req.params.packageId));
+  } catch (error) {
+    res.status(error.statusCode || 400).json({ message: error.message || 'Nao foi possivel atualizar o pacote.' });
+  }
+});
+
+router.post('/credit-topups/checkout', async (req, res) => {
+  if (!isProfessor(req)) {
+    return res.status(403).json({ message: 'Somente professores podem recarregar creditos.' });
+  }
+  if (!isUuid(req.body?.packageId)) {
+    return res.status(400).json({ message: 'Selecione um pacote de creditos valido.' });
+  }
+  try {
+    res.status(201).json(await createCreditTopupCheckout(req, req.body.packageId));
+  } catch (error) {
+    res.status(error.statusCode || 400).json({ message: error.message || 'Nao foi possivel criar a recarga.' });
+  }
+});
+
+router.get('/credit-topups/:orderId', async (req, res) => {
+  if (!isProfessor(req) || !isUuid(req.params.orderId)) {
+    return res.status(403).json({ message: 'Pedido de recarga invalido.' });
+  }
+  const order = await getCreditTopupOrder(req.user.id, req.params.orderId);
+  if (!order) return res.status(404).json({ message: 'Pedido de recarga nao encontrado.' });
+  res.json(order);
 });
 
 router.post('/student-signup-link', async (req, res) => {
@@ -1667,14 +1947,17 @@ router.get('/reports', async (req, res) => {
       OR COALESCE(e.video_progress, '{}'::jsonb) <> '{}'::jsonb
       OR COALESCE(e.input_responses, '{}'::jsonb) <> '{}'::jsonb
     )`;
-  let query = `SELECT u.id user_id, u.full_name, u.email, u.phone, u.class_name, c.id course_id, c.title course_title,
+  let query = `SELECT u.id user_id, u.full_name, u.email, u.phone, u.class_name,
+                      u.owner_user_id, owner.full_name AS owner_name, owner.email AS owner_email,
+                      c.id course_id, c.title course_title,
                       e.video_position, e.interactive_step, e.current_module, e.grade, e.updated_at,
                       e.report_corrected_at,
                       e.quiz_attempts, e.interactive_progress, e.video_progress,
                       COALESCE(jsonb_array_length(e.progress_events), 0) AS progress_event_count
                FROM enrollments e
                JOIN users u ON u.id = e.user_id
-               JOIN courses c ON c.id = e.course_id`;
+               JOIN courses c ON c.id = e.course_id
+               LEFT JOIN users owner ON owner.id = u.owner_user_id`;
   if (isProfessor(req)) {
     params.push(req.user.id);
     query += ` WHERE u.owner_user_id = $1 AND c.owner_user_id = $1 AND ${reportVisibilityCondition}`;
@@ -1859,9 +2142,11 @@ router.get('/courses', async (req, res) => {
   await ensureOwnershipColumns();
   const params = [];
   let query = `SELECT c.id, c.title, c.description, c.slug, c.cover_image, c.show_in_store,
+                      c.owner_user_id, owner.full_name AS owner_name, owner.email AS owner_email,
                       COALESCE(COUNT(DISTINCT m.id), 0) AS module_count,
                       COALESCE(COUNT(DISTINCT car.id) FILTER (WHERE car.status = 'pending'), 0) AS pending_request_count
                FROM courses c
+               LEFT JOIN users owner ON owner.id = c.owner_user_id
                LEFT JOIN modules m ON m.course_id = c.id
                LEFT JOIN course_access_requests car ON car.course_id = c.id`;
   if (isProfessor(req)) {
@@ -1869,7 +2154,8 @@ router.get('/courses', async (req, res) => {
     query += ' WHERE c.owner_user_id = $1';
   }
   query += `
-               GROUP BY c.id, c.title, c.description, c.slug, c.cover_image, c.show_in_store
+               GROUP BY c.id, c.title, c.description, c.slug, c.cover_image, c.show_in_store,
+                        c.owner_user_id, owner.full_name, owner.email
                ORDER BY c.title`;
   const { rows } = await db.query(query, params);
   res.json(rows);
@@ -2154,7 +2440,7 @@ router.post('/images/remove-background', mediaHeavyRateLimiter, async (req, res)
   let creditCharge = null;
   try {
     creditCharge = await consumeProfessorAiCredit(req, 'a remocao de fundo com IA', { creditType: 'image' });
-    const { rows } = await db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
+    const { rows } = await loadEffectiveAiSettings(req);
     const settingsRow = rows[0];
     if (!settingsRow?.image_encrypted_api_key || settingsRow.image_is_enabled === false) {
       return res.status(400).json({ message: 'Configure e ative a Nano Banana no painel admin antes de remover o fundo.' });
@@ -2170,7 +2456,7 @@ router.post('/images/remove-background', mediaHeavyRateLimiter, async (req, res)
     });
     res.json({
       ...result,
-      professorCreditsRemaining: creditCharge?.remainingCredits ?? null
+      platformCreditsRemaining: creditCharge?.remainingCredits ?? null
     });
   } catch (error) {
     if (creditCharge?.charged) {
@@ -2186,7 +2472,7 @@ router.post('/images/remove-background', mediaHeavyRateLimiter, async (req, res)
     res.status(statusCode).json({
       message,
       code: error?.code || null,
-      professorCreditsRemaining: error?.creditStatus?.aiCredits ?? null
+      platformCreditsRemaining: error?.platformCredits ?? error?.creditStatus?.platformCredits ?? null
     });
   }
 });
@@ -2203,7 +2489,7 @@ router.post('/input/compare-image', mediaHeavyRateLimiter, async (req, res) => {
     if (!referenceAttachment || !submittedAttachment) {
       return res.status(400).json({ message: 'Envie duas imagens validas em formato suportado.' });
     }
-    const { rows } = await db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
+    const { rows } = await loadEffectiveAiSettings(req);
     const settingsRow = rows[0];
     if (!settingsRow?.image_encrypted_api_key || settingsRow.image_is_enabled === false) {
       return res.status(400).json({ message: 'Configure e ative a Nano Banana no painel admin antes de comparar imagens.' });
@@ -2217,7 +2503,7 @@ router.post('/input/compare-image', mediaHeavyRateLimiter, async (req, res) => {
       matched: Boolean(result.matched),
       confidence: result.confidence,
       reason: result.reason || '',
-      professorCreditsRemaining: creditCharge?.remainingCredits ?? null
+      platformCreditsRemaining: creditCharge?.remainingCredits ?? null
     });
   } catch (error) {
     if (creditCharge?.charged) {
@@ -2227,7 +2513,7 @@ router.post('/input/compare-image', mediaHeavyRateLimiter, async (req, res) => {
     res.status(error?.statusCode || 500).json({
       message,
       code: error?.code || null,
-      professorCreditsRemaining: error?.creditStatus?.aiCredits ?? null
+      platformCreditsRemaining: error?.platformCredits ?? error?.creditStatus?.platformCredits ?? null
     });
   }
 });
@@ -2263,7 +2549,7 @@ router.post('/media/transcribe', mediaHeavyRateLimiter, async (req, res) => {
     const result = await transcribeMediaSource(src, { sourceType, language: 'pt' });
     res.json({
       ...result,
-      professorCreditsRemaining: creditCharge?.remainingCredits ?? null
+      platformCreditsRemaining: creditCharge?.remainingCredits ?? null
     });
   } catch (error) {
     if (creditCharge?.charged) {
@@ -2279,7 +2565,7 @@ router.post('/media/transcribe', mediaHeavyRateLimiter, async (req, res) => {
     res.status(statusCode).json({
       message,
       code: error?.code || null,
-      professorCreditsRemaining: error?.creditStatus?.aiCredits ?? null
+      platformCreditsRemaining: error?.platformCredits ?? error?.creditStatus?.platformCredits ?? null
     });
   }
 });
@@ -2292,6 +2578,10 @@ router.post('/courses/:courseId/modules', async (req, res) => {
     return res.status(400).json({ message: 'Curso invÃ¡lido' });
   }
   const { cleanTitle, cleanDescription, cleanSlug, cleanBuilderData } = sanitizeModulePayload(req.body || {});
+  const faceSettingsError = getModuleFaceSettingsError(cleanBuilderData);
+  if (faceSettingsError) {
+    return res.status(400).json({ message: faceSettingsError, code: 'PUBLIC_FACE_VERIFICATION_CONFLICT' });
+  }
   if (!cleanTitle || !cleanBuilderData || !Array.isArray(cleanBuilderData.slides)) {
     return res.status(400).json({ message: 'TÃ­tulo e conteÃºdo do mÃ³dulo sÃ£o obrigatÃ³rios' });
   }
@@ -2334,6 +2624,10 @@ router.put('/courses/:courseId/modules/:moduleId', async (req, res) => {
     return res.status(404).json({ message: 'Curso nÃ£o encontrado' });
   }
   const { cleanTitle, cleanDescription, cleanSlug, cleanBuilderData } = sanitizeModulePayload(req.body || {});
+  const faceSettingsError = getModuleFaceSettingsError(cleanBuilderData);
+  if (faceSettingsError) {
+    return res.status(400).json({ message: faceSettingsError, code: 'PUBLIC_FACE_VERIFICATION_CONFLICT' });
+  }
   if (!cleanTitle || !cleanBuilderData || !Array.isArray(cleanBuilderData.slides)) {
     return res.status(400).json({ message: 'TÃ­tulo e conteÃºdo do mÃ³dulo sÃ£o obrigatÃ³rios' });
   }
@@ -2403,13 +2697,15 @@ router.delete('/courses/:courseId/modules/:moduleId', async (req, res) => {
 router.get('/notifications', async (req, res) => {
   await ensureOwnershipColumns();
   const params = [];
-  let query = `SELECT id, message, target_type, target_value, attachments, created_by, created_at
-               FROM notifications`;
+  let query = `SELECT n.id, n.message, n.target_type, n.target_value, n.attachments, n.created_by, n.created_at,
+                      n.owner_user_id, owner.full_name AS owner_name, owner.email AS owner_email
+               FROM notifications n
+               LEFT JOIN users owner ON owner.id = n.owner_user_id`;
   if (isProfessor(req)) {
     params.push(req.user.id);
-    query += ' WHERE owner_user_id = $1';
+    query += ' WHERE n.owner_user_id = $1';
   }
-  query += ' ORDER BY created_at DESC LIMIT 50';
+  query += ' ORDER BY n.created_at DESC LIMIT 50';
   const { rows } = await db.query(query, params);
   res.json(rows);
 });
@@ -2485,11 +2781,15 @@ router.delete('/notifications/:notificationId', async (req, res) => {
 
 router.get('/ai-settings', async (req, res) => {
   await ensureAdminAiImageColumns();
-  const { rows } = await db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
-  res.json(buildPublicAiSettings(rows[0], { includeCreditCost: isGlobalAdmin(req) }));
+  const { rows } = await loadEffectiveAiSettings(req);
+  res.json({
+    ...buildPublicAiSettings(rows[0], { includeCreditCost: false }),
+    platformCreditCosts: await getCreditCosts()
+  });
 });
 
 router.put('/ai-settings', async (req, res) => {
+  if (!ensureGlobalAdmin(req, res)) return;
   await ensureAdminAiImageColumns();
   const {
     providerKey,
@@ -2508,7 +2808,8 @@ router.put('/ai-settings', async (req, res) => {
     imageEnabled,
     aiCreditCostPerCall,
     aiTextCreditCostPerCall,
-    aiImageCreditCostPerCall
+    aiImageCreditCostPerCall,
+    threeDImportCreditCost
   } = req.body || {};
   if (!baseUrl || !model) {
     return res.status(400).json({ message: 'baseUrl e model sÃ£o obrigatÃ³rios.' });
@@ -2528,8 +2829,10 @@ router.put('/ai-settings', async (req, res) => {
   const cleanImageModel = String(imageModel || 'gemini-2.5-flash-image').trim() || 'gemini-2.5-flash-image';
   const cleanImageProviderKey = String(imageProviderKey || 'google-gemini-image').trim() || 'google-gemini-image';
   const cleanImageProviderLabel = String(imageProviderLabel || 'Nano Banana').trim() || 'Nano Banana';
-  const cleanAiCreditCostPerCall = parseAiCreditCostInput(aiTextCreditCostPerCall ?? aiCreditCostPerCall) ?? 0.5;
-  const cleanImageAiCreditCostPerCall = parseAiCreditCostInput(aiImageCreditCostPerCall) ?? 1.0;
+  const currentCosts = await getCreditCosts();
+  const cleanAiCreditCostPerCall = parsePlatformCreditCostInput(aiTextCreditCostPerCall ?? aiCreditCostPerCall) ?? currentCosts.text;
+  const cleanImageAiCreditCostPerCall = parsePlatformCreditCostInput(aiImageCreditCostPerCall) ?? currentCosts.image;
+  const cleanThreeDImportCreditCost = parsePlatformCreditCostInput(threeDImportCreditCost) ?? currentCosts.threeDImport;
 
   const { rows: existingRows } = await db.query(
     'SELECT encrypted_api_key, image_encrypted_api_key FROM admin_ai_settings WHERE admin_user_id = $1',
@@ -2552,10 +2855,10 @@ router.put('/ai-settings', async (req, res) => {
   await db.query(
     `INSERT INTO admin_ai_settings (
        admin_user_id, provider_key, provider_label, base_url, model, encrypted_api_key,
-       ai_credit_cost_per_call, image_ai_credit_cost_per_call, system_prompt, require_confirmation, is_enabled, updated_at,
+       system_prompt, require_confirmation, is_enabled, updated_at,
        image_provider_key, image_provider_label, image_base_url, image_model, image_encrypted_api_key, image_is_enabled
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), $12, $13, $14, $15, $16, $17)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), $10, $11, $12, $13, $14, $15)
       ON CONFLICT (admin_user_id)
       DO UPDATE SET
        provider_key = EXCLUDED.provider_key,
@@ -2563,8 +2866,6 @@ router.put('/ai-settings', async (req, res) => {
        base_url = EXCLUDED.base_url,
        model = EXCLUDED.model,
        encrypted_api_key = EXCLUDED.encrypted_api_key,
-       ai_credit_cost_per_call = EXCLUDED.ai_credit_cost_per_call,
-       image_ai_credit_cost_per_call = EXCLUDED.image_ai_credit_cost_per_call,
        system_prompt = EXCLUDED.system_prompt,
        require_confirmation = EXCLUDED.require_confirmation,
        is_enabled = EXCLUDED.is_enabled,
@@ -2582,8 +2883,6 @@ router.put('/ai-settings', async (req, res) => {
       cleanBaseUrl,
       cleanModel,
       encryptedApiKey,
-      cleanAiCreditCostPerCall,
-      cleanImageAiCreditCostPerCall,
       systemPrompt ? sanitizeText(systemPrompt, 8000, { trim: false }) : null,
       requireConfirmation !== false,
       isEnabled !== false,
@@ -2596,11 +2895,20 @@ router.put('/ai-settings', async (req, res) => {
     ]
   );
 
+  await updateCreditCosts(req.user.id, {
+    text: cleanAiCreditCostPerCall,
+    image: cleanImageAiCreditCostPerCall,
+    threeDImport: cleanThreeDImportCreditCost
+  });
   const { rows } = await db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
-  res.json(buildPublicAiSettings(rows[0], { includeCreditCost: isGlobalAdmin(req) }));
+  res.json({
+    ...buildPublicAiSettings(rows[0], { includeCreditCost: false }),
+    platformCreditCosts: await getCreditCosts()
+  });
 });
 
 router.post('/ai-settings/test', aiRequestRateLimiter, async (req, res) => {
+  if (!ensureGlobalAdmin(req, res)) return;
   await ensureAdminAiImageColumns();
   const { rows } = await db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
   const settingsRow = rows[0];
@@ -2610,12 +2918,12 @@ router.post('/ai-settings/test', aiRequestRateLimiter, async (req, res) => {
   try {
     creditCharge = await consumeProfessorAiCredit(req, 'o teste da integracao de IA');
     const reply = await testAiConnection(settingsRow);
-    res.json({ ok: true, reply, professorCreditsRemaining: creditCharge?.remainingCredits ?? null });
+    res.json({ ok: true, reply, platformCreditsRemaining: creditCharge?.remainingCredits ?? null });
   } catch (error) {
     if (creditCharge?.charged) {
       await creditCharge.refund();
     }
-    res.status(error?.statusCode || 400).json({ message: error.message || 'Nao foi possivel validar a integracao.', code: error?.code || null, professorCreditsRemaining: error?.creditStatus?.aiCredits ?? null });
+    res.status(error?.statusCode || 400).json({ message: error.message || 'Nao foi possivel validar a integracao.', code: error?.code || null, platformCreditsRemaining: error?.platformCredits ?? error?.creditStatus?.platformCredits ?? null });
   }
 });
 
@@ -2634,7 +2942,7 @@ router.post('/assistant/chat', aiRequestRateLimiter, async (req, res) => {
       requiresConfirmation: false
     });
   }
-  const { rows } = await db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
+  const { rows } = await loadEffectiveAiSettings(req);
   const settingsRow = rows[0];
   if (!settingsRow?.is_enabled) {
     return res.status(400).json({ message: 'Ative a integração de IA para usar a assistente do painel.' });
@@ -2662,7 +2970,7 @@ router.post('/assistant/chat', aiRequestRateLimiter, async (req, res) => {
       proposalId: proposal?.id || null,
       proposalExpiresAt: proposal?.expiresAt || null,
       requiresConfirmation: response.actions.length > 0,
-      professorCreditsRemaining: creditCharge?.remainingCredits ?? null
+      platformCreditsRemaining: creditCharge?.remainingCredits ?? null
     });
   } catch (error) {
     if (creditCharge?.charged) {
@@ -2671,7 +2979,7 @@ router.post('/assistant/chat', aiRequestRateLimiter, async (req, res) => {
     return res.status(error?.statusCode || 400).json({
       message: error.message || 'A assistente não conseguiu processar o pedido.',
       code: error?.code || null,
-      professorCreditsRemaining: error?.creditStatus?.aiCredits ?? null
+      platformCreditsRemaining: error?.platformCredits ?? error?.creditStatus?.platformCredits ?? null
     });
   }
 });
@@ -2723,7 +3031,7 @@ router.post('/ai/slide-actions', aiRequestRateLimiter, async (req, res) => {
   }
   let creditCharge = null;
   let imageCreditCharge = null;
-  const { rows } = await db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
+  const { rows } = await loadEffectiveAiSettings(req);
   const settingsRow = rows[0];
   if (!settingsRow?.is_enabled) {
     return res.status(400).json({ message: 'A integraÃ§Ã£o de IA deste admin nÃ£o estÃ¡ configurada ou ativa.' });
@@ -2759,7 +3067,7 @@ router.post('/ai/slide-actions', aiRequestRateLimiter, async (req, res) => {
       actions,
       requireConfirmation: settingsRow.require_confirmation !== false,
       providerLabel: settingsRow.provider_label,
-      professorCreditsRemaining: imageCreditCharge?.remainingCredits ?? creditCharge?.remainingCredits ?? null
+      platformCreditsRemaining: imageCreditCharge?.remainingCredits ?? creditCharge?.remainingCredits ?? null
     });
   } catch (error) {
     if (imageCreditCharge?.charged) {
@@ -2771,7 +3079,7 @@ router.post('/ai/slide-actions', aiRequestRateLimiter, async (req, res) => {
     res.status(error?.statusCode || 400).json({
       message: error.message || 'A IA nÃ£o conseguiu propor aÃ§Ãµes vÃ¡lidas.',
       code: error?.code || null,
-      professorCreditsRemaining: error?.creditStatus?.aiCredits ?? null
+      platformCreditsRemaining: error?.platformCredits ?? error?.creditStatus?.platformCredits ?? null
     });
   }
 });
@@ -2787,7 +3095,7 @@ router.post('/ai/slide-actions/plan', aiRequestRateLimiter, async (req, res) => 
     return res.status(400).json({ message: 'Descreva o que a IA deve fazer.' });
   }
   let creditCharge = null;
-  const { rows } = await db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
+  const { rows } = await loadEffectiveAiSettings(req);
   const settingsRow = rows[0];
   if (!settingsRow?.is_enabled) {
     return res.status(400).json({ message: 'A integraÃ§Ã£o de IA deste admin nÃ£o estÃ¡ configurada ou ativa.' });
@@ -2807,7 +3115,7 @@ router.post('/ai/slide-actions/plan', aiRequestRateLimiter, async (req, res) => 
       plan,
       requireConfirmation: settingsRow.require_confirmation !== false,
       providerLabel: settingsRow.provider_label,
-      professorCreditsRemaining: creditCharge?.remainingCredits ?? null
+      platformCreditsRemaining: creditCharge?.remainingCredits ?? null
     });
   } catch (error) {
     if (creditCharge?.charged) {
@@ -2816,7 +3124,7 @@ router.post('/ai/slide-actions/plan', aiRequestRateLimiter, async (req, res) => 
     res.status(error?.statusCode || 400).json({
       message: error.message || 'A IA nÃ£o conseguiu planejar a execuÃ§Ã£o.',
       code: error?.code || null,
-      professorCreditsRemaining: error?.creditStatus?.aiCredits ?? null
+      platformCreditsRemaining: error?.platformCredits ?? error?.creditStatus?.platformCredits ?? null
     });
   }
 });
@@ -2838,7 +3146,7 @@ router.post('/ai/slide-actions/step', aiRequestRateLimiter, async (req, res) => 
   }
   let creditCharge = null;
   let imageCreditCharge = null;
-  const { rows } = await db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
+  const { rows } = await loadEffectiveAiSettings(req);
   const settingsRow = rows[0];
   if (!settingsRow?.is_enabled) {
     return res.status(400).json({ message: 'A integraÃ§Ã£o de IA deste admin nÃ£o estÃ¡ configurada ou ativa.' });
@@ -2870,7 +3178,7 @@ router.post('/ai/slide-actions/step', aiRequestRateLimiter, async (req, res) => 
       ...result,
       requireConfirmation: settingsRow.require_confirmation !== false,
       providerLabel: settingsRow.provider_label,
-      professorCreditsRemaining: imageCreditCharge?.remainingCredits ?? creditCharge?.remainingCredits ?? null
+      platformCreditsRemaining: imageCreditCharge?.remainingCredits ?? creditCharge?.remainingCredits ?? null
     });
   } catch (error) {
     if (imageCreditCharge?.charged) {
@@ -2882,7 +3190,7 @@ router.post('/ai/slide-actions/step', aiRequestRateLimiter, async (req, res) => 
     res.status(error?.statusCode || 400).json({
       message: error.message || 'A IA nÃ£o conseguiu gerar a prÃ³xima aÃ§Ã£o.',
       code: error?.code || null,
-      professorCreditsRemaining: error?.creditStatus?.aiCredits ?? null
+      platformCreditsRemaining: error?.platformCredits ?? error?.creditStatus?.platformCredits ?? null
     });
   }
 });
@@ -2900,7 +3208,7 @@ router.post('/ai/magic-pen', aiRequestRateLimiter, async (req, res) => {
   }
   let creditCharge = null;
   let imageCreditCharge = null;
-  const { rows } = await db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
+  const { rows } = await loadEffectiveAiSettings(req);
   const settingsRow = rows[0];
   if (!settingsRow?.is_enabled) {
     return res.status(400).json({ message: 'A integracao de IA deste admin nao esta configurada ou ativa.' });
@@ -2928,7 +3236,7 @@ router.post('/ai/magic-pen', aiRequestRateLimiter, async (req, res) => {
       ...result,
       requireConfirmation: settingsRow.require_confirmation !== false,
       providerLabel: settingsRow.provider_label,
-      professorCreditsRemaining: imageCreditCharge?.remainingCredits ?? creditCharge?.remainingCredits ?? null
+      platformCreditsRemaining: imageCreditCharge?.remainingCredits ?? creditCharge?.remainingCredits ?? null
     });
   } catch (error) {
     if (imageCreditCharge?.charged) {
@@ -2940,7 +3248,7 @@ router.post('/ai/magic-pen', aiRequestRateLimiter, async (req, res) => {
     res.status(error?.statusCode || 400).json({
       message: error.message || 'A IA nao conseguiu executar o pincel magico.',
       code: error?.code || null,
-      professorCreditsRemaining: error?.creditStatus?.aiCredits ?? null
+      platformCreditsRemaining: error?.platformCredits ?? error?.creditStatus?.platformCredits ?? null
     });
   }
 });
@@ -2958,7 +3266,7 @@ router.post('/ai/edit-image-element', aiRequestRateLimiter, async (req, res) => 
     return res.status(400).json({ message: 'Informe a imagem base para editar.' });
   }
   let imageCreditCharge = null;
-  const { rows } = await db.query(`${ADMIN_AI_SETTINGS_SELECT} WHERE admin_user_id = $1`, [req.user.id]);
+  const { rows } = await loadEffectiveAiSettings(req);
   const settingsRow = rows[0];
   if (!settingsRow?.is_enabled) {
     return res.status(400).json({ message: 'A integracao de IA deste admin nao esta configurada ou ativa.' });
@@ -2982,7 +3290,7 @@ router.post('/ai/edit-image-element', aiRequestRateLimiter, async (req, res) => 
     res.json({
       src,
       providerLabel: settingsRow.provider_label,
-      professorCreditsRemaining: imageCreditCharge?.remainingCredits ?? null
+      platformCreditsRemaining: imageCreditCharge?.remainingCredits ?? null
     });
   } catch (error) {
     if (imageCreditCharge?.charged) {
@@ -2991,7 +3299,7 @@ router.post('/ai/edit-image-element', aiRequestRateLimiter, async (req, res) => 
     res.status(error?.statusCode || 400).json({
       message: error.message || 'A IA nao conseguiu editar a imagem base.',
       code: error?.code || null,
-      professorCreditsRemaining: error?.creditStatus?.aiCredits ?? null
+      platformCreditsRemaining: error?.platformCredits ?? error?.creditStatus?.platformCredits ?? null
     });
   }
 });

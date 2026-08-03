@@ -608,7 +608,7 @@ function createAiCapabilityCatalog() {
       text: ['layoutRole', 'content', 'x', 'y', 'width', 'height', 'fontSize', 'fontFamily', 'fontWeight', 'textColor', 'textAlign', 'backgroundColor', 'hasTextBackground', 'hasTextBorder', 'hasTextBlock', 'studentCanDrag', 'initiallyHidden', 'opacity', 'animationType', 'animationDuration', 'animationDelay', 'animationLoop', 'motionFrames'],
       block: ['layoutRole', 'content', 'x', 'y', 'width', 'height', 'shape', 'backgroundColor', 'solidColor', 'useGradient', 'gradientStart', 'gradientEnd', 'textColor', 'fontSize', 'fontFamily', 'fontWeight', 'textAlign', 'textureImage', 'textureFit', 'studentCanDrag', 'initiallyHidden', 'opacity', 'animationType', 'motionFrames'],
       image: ['layoutRole', 'src', 'generationPrompt', 'x', 'y', 'width', 'height', 'objectFit', 'studentCanDrag', 'initiallyHidden', 'opacity', 'animationType', 'motionFrames'],
-      audio: ['src', 'x', 'y', 'width', 'height', 'audioVisible', 'audioLoop', 'collectStudentAudio', 'opacity'],
+      audio: ['src', 'x', 'y', 'width', 'height', 'audioLoop', 'collectStudentAudio', 'opacity'],
       video: ['src', 'provider', 'embedSrc', 'x', 'y', 'width', 'height', 'opacity', 'videoTriggers'],
       camera: ['x', 'y', 'width', 'height', 'opacity'],
       quiz: ['layoutRole', 'question', 'options', 'correctOption', 'successMessage', 'errorMessage', 'actionLabel', 'quizBackgroundColor', 'quizQuestionColor', 'quizOptionBackgroundColor', 'quizOptionTextColor', 'quizButtonBackgroundColor', 'points', 'lockOnWrong', 'x', 'y', 'width', 'height'],
@@ -621,13 +621,12 @@ function createAiCapabilityCatalog() {
     triggerSchemas: {
       interactionTrigger: ['id', 'name', 'enabled', 'time', 'keys', 'visibleKey', 'actionConfig'],
       videoTrigger: ['id', 'name', 'enabled', 'time', 'actionConfig'],
-      actionConfig: ['type', 'targetSlideId', 'targetElementId', 'text', 'url', 'generationPrompt', 'insertX', 'insertY', 'insertWidth', 'insertHeight', 'moveByX', 'moveByY', 'moveDuration', 'videoTime', 'replaceMode', 'replaceText', 'replaceCounterStart', 'replaceCounterStep', 'quizQuestion', 'quizOptions', 'quizCorrectOption', 'successMessage', 'errorMessage', 'actionLabel', 'quizBackgroundColor', 'quizQuestionColor', 'quizOptionBackgroundColor', 'quizOptionTextColor', 'quizButtonBackgroundColor', 'points', 'lockOnWrong', 'audioVisible', 'audioLoop', 'collectStudentAudio', 'playSourceVideoOnValidate', 'detectorAcceptedDrag', 'detectorMinMatchCount', 'detectorTriggerOnce', 'requireAllButtonsInGroup', 'ruleGroup', 'textColor', 'backgroundColor', 'textAlign', 'fontFamily', 'fontWeight', 'fontSize', 'hasTextBackground', 'hasTextBorder', 'hasTextBlock']
+      actionConfig: ['type', 'targetSlideId', 'targetElementId', 'text', 'url', 'generationPrompt', 'insertX', 'insertY', 'insertWidth', 'insertHeight', 'moveByX', 'moveByY', 'moveDuration', 'videoTime', 'replaceMode', 'replaceText', 'replaceCounterStart', 'replaceCounterStep', 'quizQuestion', 'quizOptions', 'quizCorrectOption', 'successMessage', 'errorMessage', 'actionLabel', 'quizBackgroundColor', 'quizQuestionColor', 'quizOptionBackgroundColor', 'quizOptionTextColor', 'quizButtonBackgroundColor', 'points', 'lockOnWrong', 'audioLoop', 'collectStudentAudio', 'playSourceVideoOnValidate', 'detectorAcceptedDrag', 'detectorMinMatchCount', 'detectorTriggerOnce', 'requireAllButtonsInGroup', 'ruleGroup', 'textColor', 'backgroundColor', 'textAlign', 'fontFamily', 'fontWeight', 'fontSize', 'hasTextBackground', 'hasTextBorder', 'hasTextBlock']
     }
   };
 }
 
-function buildPublicAiSettings(row, options = {}) {
-  const includeCreditCost = options.includeCreditCost !== false;
+function buildPublicAiSettings(row) {
   if (!row) {
     const payload = {
       connected: false,
@@ -678,17 +677,6 @@ function buildPublicAiSettings(row, options = {}) {
       hasApiKey: Boolean(row.image_encrypted_api_key)
     }
   };
-  if (includeCreditCost) {
-    const textCost = Number.isFinite(Number(row.ai_credit_cost_per_call))
-      ? Math.max(0.01, Number(row.ai_credit_cost_per_call))
-      : 0.5;
-    const imageCost = Number.isFinite(Number(row.image_ai_credit_cost_per_call))
-      ? Math.max(0.01, Number(row.image_ai_credit_cost_per_call))
-      : 1.0;
-    payload.aiCreditCostPerCall = textCost;
-    payload.aiTextCreditCostPerCall = textCost;
-    payload.aiImageCreditCostPerCall = imageCost;
-  }
   return payload;
 }
 
@@ -779,7 +767,7 @@ function collectTopLevelElementPatch(entry = {}) {
     'quizOptionBackgroundColor', 'quizOptionTextColor', 'quizButtonBackgroundColor', 'lockOnWrong',
     'animationLoop', 'initiallyHidden', 'motionFrames', 'x', 'y', 'width', 'height', 'rotation', 'zIndex', 'fontSize',
     'correctOption', 'animationDuration', 'animationDelay', 'points', 'options', 'actionConfig',
-    'textAlign', 'opacity', 'objectFit', 'textureImage', 'textureFit', 'audioVisible', 'audioLoop', 'collectStudentAudio',
+    'textAlign', 'opacity', 'objectFit', 'textureImage', 'textureFit', 'audioLoop', 'collectStudentAudio',
     'interactionTriggers', 'videoTriggers', 'placeholder', 'submitLabel', 'compareText', 'compareCaseSensitive',
     'compareImageEnabled', 'compareImageReference', 'allowImage', 'allowAudio', 'labelColor', 'inputTextColor',
     'submitButtonColor', 'submitButtonTextColor'
@@ -916,7 +904,6 @@ function normalizeElementPatch(element) {
   if (typeof element.objectFit === 'string') normalized.objectFit = element.objectFit.trim();
   if (typeof element.textureImage === 'string') normalized.textureImage = element.textureImage.trim();
   if (typeof element.textureFit === 'string') normalized.textureFit = element.textureFit.trim();
-  if (typeof element.audioVisible === 'boolean') normalized.audioVisible = element.audioVisible;
   if (typeof element.audioLoop === 'boolean') normalized.audioLoop = element.audioLoop;
   if (typeof element.collectStudentAudio === 'boolean') normalized.collectStudentAudio = element.collectStudentAudio;
   if (typeof element.hasTextBackground === 'boolean') normalized.hasTextBackground = element.hasTextBackground;
@@ -1055,9 +1042,6 @@ function normalizeActionConfig(config) {
   }
   if (typeof config.detectorTriggerOnce === 'boolean') {
     normalized.detectorTriggerOnce = config.detectorTriggerOnce;
-  }
-  if (typeof config.audioVisible === 'boolean') {
-    normalized.audioVisible = config.audioVisible;
   }
   if (typeof config.audioLoop === 'boolean') {
     normalized.audioLoop = config.audioLoop;

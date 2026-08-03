@@ -4,9 +4,22 @@ const db = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const { compareImagesWithNanoBanana } = require('../aiProvider');
 const { readImageSource } = require('../pixian');
-const { getShare, listShares, addCameraRequest, addDrawingStroke, updateCursorPosition, listCursorPositions, clearDrawingStrokesByUser, getCameraRequestState } = require('../liveStageShareStore');
+const { getShare, listShares, addCameraRequest, addDrawingStroke, updateCursorPosition, listCursorPositions, clearDrawingStrokesByUser, getCameraRequestState, subscribeThreeDTransforms } = require('../liveStageShareStore');
+const {
+  builderDataReferencesAsset,
+  createPublicThreeDAssetToken,
+  getThreeDAsset,
+  sendThreeDAssetFile,
+  verifyPublicThreeDAssetToken
+} = require('../threeDAssets');
 
 const { sanitizeText, sanitizeMediaUrl, sanitizeColor, isUuid, createRateLimiter } = require('../security');
+const {
+  getModuleFaceContext,
+  hasActiveGrant,
+  isFaceProtectedBuilderData,
+  normalizeFaceSettings
+} = require('../faceVerification');
 
 const router = express.Router();
 const NOTIFICATION_FILE_DATA_URL_REGEX = /^data:(application\/pdf|application\/msword|application\/vnd\.ms-(powerpoint|excel)|application\/vnd\.openxmlformats-officedocument\.(wordprocessingml\.document|presentationml\.presentation|spreadsheetml\.sheet)|text\/plain|application\/zip|image\/[a-z0-9.+-]+);base64,[a-z0-9+/=\s]+$/i;
@@ -20,9 +33,32 @@ let courseCoverColumnEnsured = false;
 let courseStoreColumnEnsured = false;
 let courseAccessRequestsTableEnsured = false;
 let ownershipColumnsEnsured = false;
+let userCustomizationColumnsEnsured = false;
 let courseColumnsEnsurePromise = null;
 let enrollmentProgressColumnsEnsurePromise = null;
 const LIVE_STAGE_SHARE_ID_REGEX = /^[0-9a-f]{32}$/i;
+const DEFAULT_PORTAL_THEME = {
+  portalBackgroundColor: '#f4f6ff',
+  portalBackgroundImage: '',
+  portalLogoImage: '',
+  portalTextColor: '#101426',
+  portalCardTextColor: '#101426',
+  portalCardBackgroundColor: '#ffffff',
+  portalSidebarBackgroundColor: '#070a1f',
+  portalSidebarTextColor: '#ffffff',
+  portalAccentColor: '#6d63ff',
+  portalButtonColor: '#6d63ff'
+};
+const MAX_PORTAL_COLOR_PALETTES = 20;
+const PORTAL_PALETTE_COLOR_KEYS = [
+  'portalBackgroundColor',
+  'portalTextColor',
+  'portalCardTextColor',
+  'portalCardBackgroundColor',
+  'portalSidebarBackgroundColor',
+  'portalSidebarTextColor',
+  'portalButtonColor'
+];
 const liveCameraRateLimiter = createRateLimiter({
   windowMs: 60 * 1000,
   max: 10,
@@ -110,6 +146,70 @@ const ensureOwnershipColumns = async () => {
   ownershipColumnsEnsured = true;
 };
 
+const ensureUserCustomizationColumns = async () => {
+  if (userCustomizationColumnsEnsured) return;
+  await db.query(`
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS profile_image TEXT,
+      ADD COLUMN IF NOT EXISTS portal_background_color TEXT,
+      ADD COLUMN IF NOT EXISTS portal_background_image TEXT,
+      ADD COLUMN IF NOT EXISTS portal_logo_image TEXT,
+      ADD COLUMN IF NOT EXISTS portal_text_color TEXT,
+      ADD COLUMN IF NOT EXISTS portal_card_text_color TEXT,
+      ADD COLUMN IF NOT EXISTS portal_card_background_color TEXT,
+      ADD COLUMN IF NOT EXISTS portal_sidebar_background_color TEXT,
+      ADD COLUMN IF NOT EXISTS portal_sidebar_text_color TEXT,
+      ADD COLUMN IF NOT EXISTS portal_accent_color TEXT,
+      ADD COLUMN IF NOT EXISTS portal_color_palettes JSONB NOT NULL DEFAULT '[]'::jsonb
+  `);
+  userCustomizationColumnsEnsured = true;
+};
+
+const buildPortalThemeFromRow = (row = {}) => ({
+  portalBackgroundColor: row.portal_background_color || DEFAULT_PORTAL_THEME.portalBackgroundColor,
+  portalBackgroundImage: row.portal_background_image || '',
+  portalLogoImage: row.portal_logo_image || '',
+  portalTextColor: row.portal_text_color || DEFAULT_PORTAL_THEME.portalTextColor,
+  portalCardTextColor: row.portal_card_text_color || DEFAULT_PORTAL_THEME.portalCardTextColor,
+  portalCardBackgroundColor: row.portal_card_background_color || DEFAULT_PORTAL_THEME.portalCardBackgroundColor,
+  portalSidebarBackgroundColor: row.portal_sidebar_background_color || DEFAULT_PORTAL_THEME.portalSidebarBackgroundColor,
+  portalSidebarTextColor: row.portal_sidebar_text_color || DEFAULT_PORTAL_THEME.portalSidebarTextColor,
+  portalAccentColor: row.portal_accent_color || DEFAULT_PORTAL_THEME.portalAccentColor,
+  portalButtonColor: row.portal_accent_color || DEFAULT_PORTAL_THEME.portalButtonColor
+});
+
+const normalizePortalColorPalette = (palette = {}) => {
+  const colors = {};
+  PORTAL_PALETTE_COLOR_KEYS.forEach((key) => {
+    colors[key] = sanitizeColor(
+      palette?.colors?.[key] || '',
+      DEFAULT_PORTAL_THEME[key]
+    );
+  });
+  return {
+    id: sanitizeText(palette?.id || '', 80),
+    name: sanitizeText(palette?.name || '', 60),
+    colors,
+    createdAt: sanitizeText(palette?.createdAt || '', 40)
+  };
+};
+
+const normalizePortalColorPalettes = (value) => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .slice(0, MAX_PORTAL_COLOR_PALETTES)
+    .map(normalizePortalColorPalette)
+    .filter((palette) => palette.id && palette.name);
+};
+
+const sanitizeProfileImage = (value = '') => {
+  const sanitized = sanitizeMediaUrl(value, { allowData: true });
+  if (/^data:image\/svg\+xml/i.test(sanitized)) return '';
+  return sanitized;
+};
+
+const sanitizeThemeImage = sanitizeProfileImage;
+
 const getNotificationDataAttachment = (attachments = [], attachmentIndex = 0) => {
   const index = Number.parseInt(String(attachmentIndex), 10);
   if (!Array.isArray(attachments) || !Number.isInteger(index) || index < 0 || index >= attachments.length) {
@@ -168,6 +268,18 @@ const ensureStudentLiveShareAccess = async (req, res, share) => {
       res.status(403).json({ message: 'Voce nao esta matriculado neste curso ao vivo.' });
       return false;
     }
+    const faceSettings = normalizeFaceSettings(payload.builderData?.moduleSettings);
+    if (faceSettings.verifyOnEntry && isUuid(payload.moduleId)) {
+      const faceGrant = await hasActiveGrant(req.user.id, payload.moduleId, ['entry', 'manual']);
+      if (!faceGrant) {
+        res.status(403).json({
+          message: 'Confirme seu rosto para entrar nesta aula ao vivo.',
+          code: 'FACE_VERIFICATION_REQUIRED',
+          moduleId: payload.moduleId
+        });
+        return false;
+      }
+    }
     return true;
   }
   const hasOwnerAccess = Boolean(share.ownerUserId && req.user.ownerUserId === share.ownerUserId);
@@ -207,7 +319,18 @@ router.get('/public/modules/:moduleId', async (req, res) => {
     [moduleId]
   );
   const module = rows[0];
-  if (!module || !module.builder_data?.moduleSettings?.isPublic) {
+  const threeDAssetTokens = {};
+  (module?.builder_data?.slides || []).forEach((slide) => {
+    const assetId = slide?.threeDScene?.enabled ? slide.threeDScene.assetId : null;
+    if (isUuid(assetId) && !threeDAssetTokens[assetId]) {
+      threeDAssetTokens[assetId] = createPublicThreeDAssetToken(assetId, module.id);
+    }
+  });
+  if (
+    !module ||
+    !module.builder_data?.moduleSettings?.isPublic ||
+    module.builder_data?.moduleSettings?.faceVerification?.enabled
+  ) {
     return res.status(404).json({ message: 'Módulo não encontrado' });
   }
   res.json({
@@ -220,8 +343,89 @@ router.get('/public/modules/:moduleId', async (req, res) => {
     builder_data: module.builder_data,
     position: module.position,
     created_at: module.created_at,
-    courseProgress: {}
+    courseProgress: {},
+    threeDAssetTokens
   });
+});
+
+router.get('/public/3d-assets/:assetId/file', async (req, res) => {
+  const assetId = req.params.assetId;
+  const moduleId = sanitizeText(req.query.moduleId || '', 80);
+  if (!isUuid(assetId) || !isUuid(moduleId)) {
+    return res.status(400).json({ message: 'Referência de modelo 3D inválida.' });
+  }
+  if (!verifyPublicThreeDAssetToken(req.query.token, assetId, moduleId)) {
+    return res.status(403).json({ message: 'O acesso temporário ao modelo 3D expirou.' });
+  }
+  const { rows } = await db.query(
+    `SELECT builder_data
+       FROM modules
+      WHERE id = $1
+        AND COALESCE((builder_data->'moduleSettings'->>'isPublic')::boolean, false) = true
+        AND COALESCE((builder_data->'moduleSettings'->'faceVerification'->>'enabled')::boolean, false) = false
+      LIMIT 1`,
+    [moduleId]
+  );
+  if (!rows[0] || !builderDataReferencesAsset(rows[0].builder_data, assetId)) {
+    return res.status(404).json({ message: 'Modelo 3D não encontrado neste módulo público.' });
+  }
+  const asset = await getThreeDAsset(assetId);
+  if (!asset || asset.status !== 'READY') {
+    return res.status(404).json({ message: 'Modelo 3D não encontrado.' });
+  }
+  return sendThreeDAssetFile(req, res, asset, req.query.variant);
+});
+
+router.get('/3d-assets/:assetId/file', requireAuth, async (req, res) => {
+  const assetId = req.params.assetId;
+  if (!isUuid(assetId)) {
+    return res.status(400).json({ message: 'Modelo 3D inválido.' });
+  }
+  const asset = await getThreeDAsset(assetId);
+  if (!asset || asset.status !== 'READY') {
+    return res.status(404).json({ message: 'Modelo 3D não encontrado.' });
+  }
+  if (req.user?.role === 'admin' || (req.user?.role === 'professor' && asset.owner_user_id === req.user.id)) {
+    return sendThreeDAssetFile(req, res, asset, req.query.variant);
+  }
+
+  const liveShareId = sanitizeText(req.query.liveShareId || '', 64);
+  if (liveShareId) {
+    const share = getShare(liveShareId);
+    if (!share || !builderDataReferencesAsset(share.payload?.builderData, assetId)) {
+      return res.status(404).json({ message: 'Modelo 3D não encontrado na aula ao vivo.' });
+    }
+    if (!(await ensureStudentLiveShareAccess(req, res, share))) return;
+    return sendThreeDAssetFile(req, res, asset, req.query.variant);
+  }
+
+  const moduleId = sanitizeText(req.query.moduleId || '', 80);
+  if (!isUuid(moduleId)) {
+    return res.status(400).json({ message: 'Informe o módulo que utiliza este modelo 3D.' });
+  }
+  const { rows } = await db.query(
+    `SELECT m.builder_data
+       FROM modules m
+       JOIN enrollments e ON e.course_id = m.course_id
+      WHERE m.id = $1
+        AND e.user_id = $2
+      LIMIT 1`,
+    [moduleId, req.user.id]
+  );
+  if (!rows[0] || !builderDataReferencesAsset(rows[0].builder_data, assetId)) {
+    return res.status(403).json({ message: 'Você não tem acesso a este modelo 3D.' });
+  }
+  const faceSettings = normalizeFaceSettings(rows[0].builder_data?.moduleSettings);
+  if (faceSettings.verifyOnEntry) {
+    const grant = await hasActiveGrant(req.user.id, moduleId, ['entry', 'manual']);
+    if (!grant) {
+      return res.status(403).json({
+        message: 'Confirme seu rosto antes de baixar os recursos deste modulo.',
+        code: 'FACE_VERIFICATION_REQUIRED'
+      });
+    }
+  }
+  return sendThreeDAssetFile(req, res, asset, req.query.variant);
 });
 
 router.get('/live-stage/:shareId', requireAuth, async (req, res) => {
@@ -276,6 +480,31 @@ router.get('/live-stage/:shareId', requireAuth, async (req, res) => {
       drawingStrokes: share.drawingStrokes || [],
       cameraRequestState: getCameraRequestState(share.shareId, { userId: req.user.id })
     }
+  });
+});
+
+router.get('/live-stage/:shareId/3d-stream', requireAuth, async (req, res) => {
+  const shareId = sanitizeText(req.params?.shareId || '', 64);
+  if (!LIVE_STAGE_SHARE_ID_REGEX.test(shareId)) {
+    return res.status(400).json({ message: 'Compartilhamento ao vivo inválido.' });
+  }
+  const share = getShare(shareId);
+  if (!share) {
+    return res.status(404).json({ message: 'Compartilhamento ao vivo não encontrado.' });
+  }
+  if (!(await ensureStudentLiveShareAccess(req, res, share))) return;
+  res.status(200);
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+  res.write('event: ready\ndata: {}\n\n');
+  const unsubscribe = subscribeThreeDTransforms(shareId, (message) => res.write(message));
+  const heartbeat = setInterval(() => res.write(': keep-alive\n\n'), 20_000);
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    unsubscribe();
   });
 });
 
@@ -627,12 +856,219 @@ const sanitizeProgressEventPayload = (event = {}, context = {}) => {
 };
 
 router.get('/profile', async (req, res) => {
+  await ensureOwnershipColumns();
+  await ensureUserCustomizationColumns();
   const { id } = req.user;
   const { rows } = await db.query(
-    'SELECT id, full_name, email, phone, role, class_name, is_active FROM users WHERE id = $1',
+    `SELECT u.id, u.full_name, u.email, u.phone, u.role, u.class_name, u.is_active,
+            u.profile_image,
+            u.portal_background_color, u.portal_background_image, u.portal_logo_image, u.portal_text_color,
+            u.portal_card_text_color, u.portal_card_background_color,
+            u.portal_sidebar_background_color, u.portal_sidebar_text_color, u.portal_accent_color,
+            u.portal_color_palettes,
+            owner.portal_background_color AS owner_portal_background_color,
+            owner.portal_background_image AS owner_portal_background_image,
+            owner.portal_logo_image AS owner_portal_logo_image,
+            owner.portal_text_color AS owner_portal_text_color,
+            owner.portal_card_text_color AS owner_portal_card_text_color,
+            owner.portal_card_background_color AS owner_portal_card_background_color,
+            owner.portal_sidebar_background_color AS owner_portal_sidebar_background_color,
+            owner.portal_sidebar_text_color AS owner_portal_sidebar_text_color,
+            owner.portal_accent_color AS owner_portal_accent_color
+       FROM users u
+       LEFT JOIN users owner ON owner.id = u.owner_user_id
+      WHERE u.id = $1`,
     [id]
   );
-  res.json(rows[0]);
+  const user = rows[0];
+  if (!user) {
+    return res.status(404).json({ message: 'Perfil nao encontrado.' });
+  }
+  const themeSource = user.role === 'student'
+    ? {
+      portal_background_color: user.owner_portal_background_color,
+      portal_background_image: user.owner_portal_background_image,
+      portal_logo_image: user.owner_portal_logo_image,
+      portal_text_color: user.owner_portal_text_color,
+      portal_card_text_color: user.owner_portal_card_text_color,
+      portal_card_background_color: user.owner_portal_card_background_color,
+      portal_sidebar_background_color: user.owner_portal_sidebar_background_color,
+      portal_sidebar_text_color: user.owner_portal_sidebar_text_color,
+      portal_accent_color: user.owner_portal_accent_color
+    }
+    : user;
+  res.json({
+    id: user.id,
+    full_name: user.full_name,
+    email: user.email,
+    phone: user.phone,
+    role: user.role,
+    class_name: user.class_name,
+    is_active: user.is_active,
+    profile_image: user.profile_image || '',
+    theme: buildPortalThemeFromRow(themeSource),
+    colorPalettes: user.role === 'student'
+      ? []
+      : normalizePortalColorPalettes(user.portal_color_palettes)
+  });
+});
+
+router.put('/profile', async (req, res) => {
+  await ensureOwnershipColumns();
+  await ensureUserCustomizationColumns();
+  const profileImage = sanitizeProfileImage(req.body?.profileImage || '');
+  const removeProfileImage = req.body?.profileImage === '';
+  const updates = [];
+  const values = [];
+  if (profileImage || removeProfileImage) {
+    values.push(profileImage || null);
+    updates.push(`profile_image = $${values.length}`);
+  }
+  const hasThemePayload = ['portalBackgroundColor', 'portalBackgroundImage', 'portalLogoImage', 'portalTextColor', 'portalCardTextColor', 'portalCardBackgroundColor', 'portalSidebarBackgroundColor', 'portalSidebarTextColor', 'portalAccentColor', 'portalButtonColor']
+    .some((key) => Object.prototype.hasOwnProperty.call(req.body || {}, key));
+  if (req.user.role !== 'student' && hasThemePayload) {
+    const backgroundColor = sanitizeColor(req.body?.portalBackgroundColor || '', DEFAULT_PORTAL_THEME.portalBackgroundColor);
+    const backgroundImage = sanitizeThemeImage(req.body?.portalBackgroundImage || '');
+    const logoImage = sanitizeThemeImage(req.body?.portalLogoImage || '');
+    const textColor = sanitizeColor(req.body?.portalTextColor || '', DEFAULT_PORTAL_THEME.portalTextColor);
+    const cardTextColor = sanitizeColor(req.body?.portalCardTextColor || '', DEFAULT_PORTAL_THEME.portalCardTextColor);
+    const cardBackgroundColor = sanitizeColor(req.body?.portalCardBackgroundColor || '', DEFAULT_PORTAL_THEME.portalCardBackgroundColor);
+    const sidebarBackgroundColor = sanitizeColor(req.body?.portalSidebarBackgroundColor || '', DEFAULT_PORTAL_THEME.portalSidebarBackgroundColor);
+    const sidebarTextColor = sanitizeColor(req.body?.portalSidebarTextColor || '', DEFAULT_PORTAL_THEME.portalSidebarTextColor);
+    const accentColor = sanitizeColor(req.body?.portalButtonColor || req.body?.portalAccentColor || '', DEFAULT_PORTAL_THEME.portalButtonColor);
+    values.push(backgroundColor);
+    updates.push(`portal_background_color = $${values.length}`);
+    values.push(backgroundImage || null);
+    updates.push(`portal_background_image = $${values.length}`);
+    values.push(logoImage || null);
+    updates.push(`portal_logo_image = $${values.length}`);
+    values.push(textColor);
+    updates.push(`portal_text_color = $${values.length}`);
+    values.push(cardTextColor);
+    updates.push(`portal_card_text_color = $${values.length}`);
+    values.push(cardBackgroundColor);
+    updates.push(`portal_card_background_color = $${values.length}`);
+    values.push(sidebarBackgroundColor);
+    updates.push(`portal_sidebar_background_color = $${values.length}`);
+    values.push(sidebarTextColor);
+    updates.push(`portal_sidebar_text_color = $${values.length}`);
+    values.push(accentColor);
+    updates.push(`portal_accent_color = $${values.length}`);
+  }
+  if (!updates.length) {
+    return res.status(400).json({ message: 'Nenhuma alteracao enviada.' });
+  }
+  values.push(req.user.id);
+  const { rows } = await db.query(
+    `UPDATE users
+        SET ${updates.join(', ')}
+      WHERE id = $${values.length}
+      RETURNING id`,
+    values
+  );
+  if (!rows.length) {
+    return res.status(404).json({ message: 'Perfil nao encontrado.' });
+  }
+  const { rows: profileRows } = await db.query(
+    `SELECT u.id, u.full_name, u.email, u.phone, u.role, u.class_name, u.is_active,
+            u.profile_image, u.portal_background_color, u.portal_background_image, u.portal_logo_image, u.portal_text_color,
+            u.portal_card_text_color, u.portal_card_background_color,
+            u.portal_sidebar_background_color, u.portal_sidebar_text_color, u.portal_accent_color
+       FROM users u
+      WHERE u.id = $1`,
+    [req.user.id]
+  );
+  res.json({
+    ...profileRows[0],
+    theme: buildPortalThemeFromRow(profileRows[0])
+  });
+});
+
+router.post('/profile/color-palettes', async (req, res) => {
+  await ensureUserCustomizationColumns();
+  if (req.user.role === 'student') {
+    return res.status(403).json({ message: 'Alunos nao podem gerenciar paletas.' });
+  }
+  const name = sanitizeText(req.body?.name || '', 60);
+  if (!name) {
+    return res.status(400).json({ message: 'Informe um nome para a paleta.' });
+  }
+  const colors = {};
+  PORTAL_PALETTE_COLOR_KEYS.forEach((key) => {
+    colors[key] = sanitizeColor(req.body?.colors?.[key] || '', DEFAULT_PORTAL_THEME[key]);
+  });
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      'SELECT portal_color_palettes FROM users WHERE id = $1 FOR UPDATE',
+      [req.user.id]
+    );
+    if (!rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Perfil nao encontrado.' });
+    }
+    const palettes = normalizePortalColorPalettes(rows[0].portal_color_palettes);
+    if (palettes.length >= MAX_PORTAL_COLOR_PALETTES) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: `Limite de ${MAX_PORTAL_COLOR_PALETTES} paletas atingido.` });
+    }
+    const palette = {
+      id: crypto.randomUUID(),
+      name,
+      colors,
+      createdAt: new Date().toISOString()
+    };
+    palettes.push(palette);
+    await client.query(
+      'UPDATE users SET portal_color_palettes = $1::jsonb WHERE id = $2',
+      [JSON.stringify(palettes), req.user.id]
+    );
+    await client.query('COMMIT');
+    return res.status(201).json({ palette, colorPalettes: palettes });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+});
+
+router.delete('/profile/color-palettes/:paletteId', async (req, res) => {
+  await ensureUserCustomizationColumns();
+  if (req.user.role === 'student') {
+    return res.status(403).json({ message: 'Alunos nao podem gerenciar paletas.' });
+  }
+  const paletteId = sanitizeText(req.params?.paletteId || '', 80);
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      'SELECT portal_color_palettes FROM users WHERE id = $1 FOR UPDATE',
+      [req.user.id]
+    );
+    if (!rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Perfil nao encontrado.' });
+    }
+    const palettes = normalizePortalColorPalettes(rows[0].portal_color_palettes);
+    const nextPalettes = palettes.filter((palette) => palette.id !== paletteId);
+    if (nextPalettes.length === palettes.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Paleta nao encontrada.' });
+    }
+    await client.query(
+      'UPDATE users SET portal_color_palettes = $1::jsonb WHERE id = $2',
+      [JSON.stringify(nextPalettes), req.user.id]
+    );
+    await client.query('COMMIT');
+    return res.json({ colorPalettes: nextPalettes });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 });
 
 router.get('/courses', async (req, res) => {
@@ -692,8 +1128,9 @@ router.get('/courses', async (req, res) => {
     if (!acc[module.course_id]) {
       acc[module.course_id] = [];
     }
+    const protectedContent = !isLite && isFaceProtectedBuilderData(module.builder_data);
     acc[module.course_id].push(
-      isLite
+      isLite || protectedContent
         ? {
           id: module.id,
           course_id: module.course_id,
@@ -704,11 +1141,18 @@ router.get('/courses', async (req, res) => {
           created_at: module.created_at,
           builder_data: {
             moduleSettings:
-              module.module_settings && typeof module.module_settings === 'object' && !Array.isArray(module.module_settings)
-                ? module.module_settings
+              (isLite ? module.module_settings : module.builder_data?.moduleSettings) &&
+              typeof (isLite ? module.module_settings : module.builder_data?.moduleSettings) === 'object' &&
+              !Array.isArray(isLite ? module.module_settings : module.builder_data?.moduleSettings)
+                ? (isLite ? module.module_settings : module.builder_data.moduleSettings)
                 : {},
-            slides: Array.isArray(module.slide_refs) ? module.slide_refs : []
-          }
+            slides: isLite
+              ? (Array.isArray(module.slide_refs) ? module.slide_refs : [])
+              : (Array.isArray(module.builder_data?.slides)
+                ? module.builder_data.slides.map((slide) => ({ id: slide?.id })).filter((slide) => slide.id)
+                : [])
+          },
+          faceContentProtected: protectedContent
         }
         : module
     );
@@ -927,6 +1371,37 @@ router.post('/progress', async (req, res) => {
   const inputResponse = req.body?.inputResponse;
   if (!isUuid(courseId) || !['video', 'interactive'].includes(type)) {
     return res.status(400).json({ message: 'courseId e type são obrigatórios' });
+  }
+  const faceModuleId = sanitizeText(
+    interactiveProgress?.moduleId || videoProgress?.moduleId || progressEvent?.moduleId || '',
+    120
+  );
+  if (isUuid(faceModuleId)) {
+    const faceContext = await getModuleFaceContext(req.user.id, faceModuleId);
+    if (!faceContext || String(faceContext.module.course_id) !== String(courseId)) {
+      return res.status(403).json({ message: 'Modulo nao autorizado para este aluno.' });
+    }
+    const faceSettings = faceContext.settings;
+    if (faceSettings.verifyDuringModule) {
+      const periodicGrant = await hasActiveGrant(req.user.id, faceModuleId, ['periodic', 'entry', 'manual']);
+      if (!periodicGrant) {
+        return res.status(403).json({
+          message: 'Confirme seu rosto para continuar registrando o progresso.',
+          code: 'FACE_PERIODIC_VERIFICATION_REQUIRED',
+          faceVerification: faceSettings
+        });
+      }
+    }
+    if (faceSettings.verifyOnCompletion && interactiveProgress?.isCompleted === true) {
+      const completionGrant = await hasActiveGrant(req.user.id, faceModuleId, ['completion', 'manual']);
+      if (!completionGrant) {
+        return res.status(403).json({
+          message: 'Confirme seu rosto antes de concluir este modulo.',
+          code: 'FACE_COMPLETION_VERIFICATION_REQUIRED',
+          faceVerification: faceSettings
+        });
+      }
+    }
   }
   const videoPosition = type === 'video' ? value : undefined;
   const interactiveStep = type === 'interactive' ? value : undefined;

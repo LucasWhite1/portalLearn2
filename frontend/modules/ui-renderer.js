@@ -329,9 +329,6 @@ export const setStageBackground = (stageNode, slide, previewActive) => {
 export const wrapMediaNodeWithCaptions = (mediaNode, element) => {
   const shell = document.createElement('div');
   shell.className = 'builder-media-shell';
-  if (element?.type === 'audio' && !element.audioVisible && !element.captionsEnabled) {
-    shell.style.display = 'none';
-  }
   shell.appendChild(mediaNode);
   return shell;
 };
@@ -346,12 +343,12 @@ export const applyPreviewAudioPresentation = (node, element, { authoring = false
   if (authoring) {
     node.controls = true;
     node.style.display = '';
-    node.style.opacity = element.audioVisible ? '1' : '0.62';
-    node.style.outline = element.audioVisible ? '' : '1px dashed rgba(255, 123, 83, 0.7)';
+    node.style.opacity = '1';
+    node.style.outline = '';
     return;
   }
-  node.controls = Boolean(element.audioVisible);
-  node.style.display = element.audioVisible ? '' : 'none';
+  node.controls = true;
+  node.style.display = '';
   node.style.opacity = '';
   node.style.outline = '';
 };

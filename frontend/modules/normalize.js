@@ -44,7 +44,7 @@ export const normalizeAudioElement = (element, normalizeMediaCaptionConfigFn) =>
     return;
   }
   normalizeMediaCaptionConfigFn(element, 'audio');
-  element.audioVisible = typeof element.audioVisible === 'boolean' ? element.audioVisible : true;
+  element.audioVisible = true;
   element.audioLoop = Boolean(element.audioLoop);
   element.collectStudentAudio = Boolean(element.collectStudentAudio);
   element.width = Math.max(180, Number(element.width) || 260);
@@ -123,14 +123,25 @@ export const normalizeTemplateStageSize = (stageSize, DEFAULT_STAGE_SIZE) => {
   return { ...DEFAULT_STAGE_SIZE };
 };
 
-export const normalizeTemplateModuleSettings = (moduleSettings) => ({
-  lockNextModuleUntilCompleted: Boolean(moduleSettings?.lockNextModuleUntilCompleted),
-  requireQuizCompletion: Boolean(moduleSettings?.requireQuizCompletion),
-  isPublic: Boolean(moduleSettings?.isPublic),
-  coverImage: typeof moduleSettings?.coverImage === 'string' ? moduleSettings.coverImage : '',
-  allowStudentPen: moduleSettings?.allowStudentPen === true || moduleSettings?.allowStudentPen === 'true',
-  allowLiveCursors: moduleSettings?.allowLiveCursors !== false && moduleSettings?.allowLiveCursors !== 'false'
-});
+export const normalizeTemplateModuleSettings = (moduleSettings) => {
+  const isPublic = Boolean(moduleSettings?.isPublic);
+  const faceEnabled = Boolean(moduleSettings?.faceVerification?.enabled) && !isPublic;
+  return {
+    lockNextModuleUntilCompleted: Boolean(moduleSettings?.lockNextModuleUntilCompleted),
+    requireQuizCompletion: Boolean(moduleSettings?.requireQuizCompletion),
+    isPublic,
+    coverImage: typeof moduleSettings?.coverImage === 'string' ? moduleSettings.coverImage : '',
+    allowStudentPen: moduleSettings?.allowStudentPen === true || moduleSettings?.allowStudentPen === 'true',
+    allowLiveCursors: moduleSettings?.allowLiveCursors !== false && moduleSettings?.allowLiveCursors !== 'false',
+    faceVerification: {
+      enabled: faceEnabled,
+      verifyOnEntry: moduleSettings?.faceVerification?.verifyOnEntry !== false,
+      verifyDuringModule: Boolean(moduleSettings?.faceVerification?.verifyDuringModule),
+      verifyOnCompletion: Boolean(moduleSettings?.faceVerification?.verifyOnCompletion),
+      schemaVersion: 1
+    }
+  };
+};
 export const normalizeQuizElement = (element) => {
   if (!element || element.type !== 'quiz') {
     return;
@@ -149,6 +160,7 @@ export const normalizeQuizElement = (element) => {
   element.quizPoints = Math.max(0, Number(element.quizPoints) || 10);
   element.lockOnWrong = Boolean(element.lockOnWrong);
   element.playSourceVideoOnValidate = Boolean(element.playSourceVideoOnValidate);
+  element.hideOnCorrect = Boolean(element.hideOnCorrect);
   element.sourceVideoElementId = typeof element.sourceVideoElementId === 'string' ? element.sourceVideoElementId : '';
 };
 

@@ -4,6 +4,8 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const db = require('../db');
 const { decryptStoredSecret } = require('../aiConfigCrypto');
+const { processCreditTopupWebhook } = require('../creditTopups');
+const { applyCreditChange, ensurePlatformCreditTables } = require('../platformCredits');
 const {
   sanitizeText,
   sanitizeEmail,
@@ -26,8 +28,8 @@ const TRIAL_DAYS = Number.parseInt(process.env.ASAAS_TRIAL_DAYS || '30', 10) || 
 const PRO_MONTHLY_PRICE = Number.parseFloat(process.env.ASAAS_PRO_MONTHLY_PRICE || '97.90');
 const INCLUDED_STUDENT_LIMIT = Number.parseInt(process.env.ASAAS_INCLUDED_STUDENT_LIMIT || '15', 10) || 15;
 const EXTRA_STUDENT_MONTHLY_PRICE = Number.parseFloat(process.env.ASAAS_EXTRA_STUDENT_MONTHLY_PRICE || '9.70');
-const PRO_AI_CREDITS = Number.parseFloat(process.env.ASAAS_PRO_AI_CREDITS || '100');
-const TRIAL_AI_CREDITS = Number.parseFloat(process.env.ASAAS_TRIAL_AI_CREDITS || '10');
+const PRO_PLATFORM_CREDITS = Number.parseFloat(process.env.ASAAS_PRO_PLATFORM_CREDITS || process.env.ASAAS_PRO_AI_CREDITS || '100');
+const TRIAL_PLATFORM_CREDITS = Number.parseFloat(process.env.ASAAS_TRIAL_PLATFORM_CREDITS || process.env.ASAAS_TRIAL_AI_CREDITS || '10');
 const APP_NAME = sanitizeText(process.env.ASAAS_APP_NAME || 'Criatyve/1.0', 120) || 'Criatyve/1.0';
 const LEGAL_TERMS_VERSION = '2026-07-28';
 const ASAAS_API_KEY = sanitizeText(process.env.ASAAS_API_KEY || '', 255);
@@ -149,7 +151,7 @@ const PLANS = {
     billingTypes: PRO_BILLING_TYPES,
     studentLimit: INCLUDED_STUDENT_LIMIT,
     storageLimitBytes: 1024 * 1024 * 1024,
-    aiCredits: Number.isFinite(PRO_AI_CREDITS) ? PRO_AI_CREDITS : 100
+    platformCredits: Number.isFinite(PRO_PLATFORM_CREDITS) ? PRO_PLATFORM_CREDITS : 100
   },
   'trial-30-dias': {
     id: 'trial-30-dias',
@@ -161,7 +163,7 @@ const PLANS = {
     billingTypes: TRIAL_BILLING_TYPES,
     studentLimit: INCLUDED_STUDENT_LIMIT,
     storageLimitBytes: 1024 * 1024 * 1024,
-    aiCredits: Number.isFinite(TRIAL_AI_CREDITS) ? TRIAL_AI_CREDITS : 10
+    platformCredits: Number.isFinite(TRIAL_PLATFORM_CREDITS) ? TRIAL_PLATFORM_CREDITS : 10
   }
 };
 
@@ -364,9 +366,7 @@ const ensureRoleAndOwnershipSetup = async () => {
 
 const ensureProfessorCreditColumns = async () => {
   if (professorCreditColumnsEnsured) return;
-  await db.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_credits NUMERIC(12,2) NOT NULL DEFAULT 0');
-  await db.query('ALTER TABLE users ALTER COLUMN ai_credits TYPE NUMERIC(12,2) USING COALESCE(ai_credits, 0)::numeric(12,2)');
-  await db.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_credits_updated_at TIMESTAMPTZ DEFAULT NOW()');
+  await ensurePlatformCreditTables();
   professorCreditColumnsEnsured = true;
 };
 
@@ -736,7 +736,7 @@ const activateProfessorFromSubscription = async (client, subscription) => {
     `
       INSERT INTO users (
         id, full_name, email, phone, password_hash, role, class_name, is_active, owner_user_id,
-        ai_credits, ai_credits_updated_at, student_limit, storage_limit_bytes,
+        platform_credits, platform_credits_updated_at, student_limit, storage_limit_bytes,
         terms_accepted_at, terms_version, marketing_consent_at
       )
       VALUES ($1, $2, $3, NULL, $4, 'professor', 'Professor', TRUE, NULL, $5, NOW(), $6, $7, $8, $9, $10)
@@ -748,7 +748,7 @@ const activateProfessorFromSubscription = async (client, subscription) => {
       fullName,
       email,
       passwordHash,
-      plan.aiCredits,
+      0,
       contractedStudentLimit,
       plan.storageLimitBytes,
       subscription?.terms_accepted_at || null,
@@ -776,18 +776,15 @@ const activateProfessorFromSubscription = async (client, subscription) => {
         UPDATE users
            SET full_name = COALESCE(NULLIF($1, ''), full_name),
                is_active = TRUE,
-               ai_credits = GREATEST(COALESCE(ai_credits, 0), $2),
-               ai_credits_updated_at = NOW(),
-               student_limit = GREATEST(COALESCE(student_limit, 0), $3),
-               storage_limit_bytes = GREATEST(COALESCE(storage_limit_bytes, 0), $4),
-               terms_accepted_at = COALESCE(terms_accepted_at, $5),
-               terms_version = COALESCE(terms_version, $6),
-               marketing_consent_at = COALESCE(marketing_consent_at, $7)
-         WHERE id = $8
+               student_limit = GREATEST(COALESCE(student_limit, 0), $2),
+               storage_limit_bytes = GREATEST(COALESCE(storage_limit_bytes, 0), $3),
+               terms_accepted_at = COALESCE(terms_accepted_at, $4),
+               terms_version = COALESCE(terms_version, $5),
+               marketing_consent_at = COALESCE(marketing_consent_at, $6)
+         WHERE id = $7
       `,
       [
         fullName,
-        plan.aiCredits,
         contractedStudentLimit,
         plan.storageLimitBytes,
         subscription?.terms_accepted_at || null,
@@ -798,6 +795,20 @@ const activateProfessorFromSubscription = async (client, subscription) => {
     );
     const { rows: refreshedUsers } = await client.query('SELECT * FROM users WHERE id = $1', [professor.id]);
     professor = refreshedUsers[0];
+  }
+
+  const includedCreditGrant = Math.max(0, Number(plan.platformCredits || 0) - Number(professor.platform_credits || 0));
+  if (professor.role === 'professor' && includedCreditGrant > 0) {
+    const grant = await applyCreditChange({
+      userId: professor.id,
+      amount: includedCreditGrant,
+      operationType: 'plan_included_credits',
+      idempotencyKey: `plan-credits:${subscription.id}`,
+      referenceType: 'billing_subscription',
+      referenceId: subscription.id,
+      metadata: { planCode: subscription.plan_code }
+    }, client);
+    professor.platform_credits = grant.balance;
   }
 
   await client.query(
@@ -821,7 +832,13 @@ const activateProfessorFromSubscription = async (client, subscription) => {
 
 const deactivateProfessorFromSubscription = async (client, subscription, nextStatus) => {
   if (subscription?.user_id) {
-    await client.query('UPDATE users SET is_active = FALSE WHERE id = $1', [subscription.user_id]);
+    await client.query(
+      `UPDATE users
+          SET is_active = FALSE
+        WHERE id = $1
+          AND role = 'professor'`,
+      [subscription.user_id]
+    );
   }
   await client.query(
     `
@@ -848,6 +865,15 @@ const processAsaasWebhookEvent = async (eventPayload, requestMeta = {}) => {
 
   if (!eventId || !eventType || !payment?.id) {
     return { ignored: true, reason: 'invalid-payload' };
+  }
+  const topupResult = await processCreditTopupWebhook(eventPayload, fetchAsaasPayment);
+  if (topupResult?.handled) {
+    return {
+      processed: Boolean(topupResult.processed),
+      duplicate: Boolean(topupResult.duplicate),
+      ignored: Boolean(topupResult.ignored),
+      creditTopup: true
+    };
   }
   let eventPlanCode = normalizePlanCodeFromExternalReference(payment.externalReference || '');
   if (!eventPlanCode) {

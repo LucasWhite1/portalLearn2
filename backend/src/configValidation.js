@@ -26,6 +26,18 @@ function validateSecurityConfiguration() {
     requireStrongSecret('SESSION_SECRET');
     requireStrongSecret('AI_CONFIG_SECRET');
     requireStrongSecret('ASAAS_WEBHOOK_AUTH_TOKEN');
+    requireStrongSecret('FACE_SERVICE_INTERNAL_TOKEN');
+    const biometricKey = String(process.env.BIOMETRIC_DATA_KEY || '');
+    const validBiometricKey = /^[0-9a-f]{64}$/i.test(biometricKey) || (() => {
+      try {
+        return Buffer.from(biometricKey, 'base64').length === 32;
+      } catch (error) {
+        return false;
+      }
+    })();
+    if (!validBiometricKey) {
+      errors.push('BIOMETRIC_DATA_KEY precisa conter 32 bytes em hexadecimal ou base64.');
+    }
     if (!validateProductionUrl(process.env.PUBLIC_APP_URL)) {
       errors.push('PUBLIC_APP_URL precisa ser uma URL HTTPS publica em producao.');
     }

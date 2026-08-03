@@ -4,6 +4,8 @@ const path = require('path');
 const authRoutes = require('./routes/auth');
 const adminRoutes = require('./routes/admin');
 const studentRoutes = require('./routes/student');
+const faceRoutes = require('./routes/face');
+const adminFaceRoutes = require('./routes/adminFace');
 const billingRoutes = require('./routes/billing');
 const chatRoutes = require('./routes/chat');
 const { requireAuth, requireRole } = require('./middleware/auth');
@@ -13,6 +15,7 @@ const ADMIN_JSON_BODY_LIMIT = process.env.ADMIN_JSON_BODY_LIMIT || process.env.J
 const STUDENT_JSON_BODY_LIMIT = process.env.STUDENT_JSON_BODY_LIMIT || process.env.JSON_BODY_LIMIT || '50mb';
 const studentJsonParser = express.json({ limit: STUDENT_JSON_BODY_LIMIT });
 const frontendDir = path.resolve(__dirname, '../../frontend');
+const threeVendorDir = path.resolve(__dirname, '../node_modules/three');
 const isProductionEnvironment = ['production', 'prod'].includes(
   String(process.env.NODE_ENV || process.env.APP_ENV || '').toLowerCase()
 );
@@ -46,7 +49,7 @@ app.use((req, res, next) => {
   res.setHeader(
     'Content-Security-Policy',
     "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; " +
-      "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; " +
+      "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://unpkg.com https://cdn.jsdelivr.net; " +
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; " +
       "font-src 'self' data: https://fonts.gstatic.com https://cdn.jsdelivr.net; " +
       "img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; frame-src https:; " +
@@ -69,6 +72,12 @@ app.use(cors({
   },
   credentials: true
 }));
+app.use('/vendor/three', express.static(threeVendorDir, {
+  dotfiles: 'deny',
+  fallthrough: false,
+  immutable: true,
+  maxAge: '30d'
+}));
 app.use(express.static(frontendDir, { dotfiles: 'deny', index: false }));
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
@@ -79,7 +88,10 @@ app.get('/checkout', (req, res) => {
 });
 
 const publicStudentModuleRequest = (req) =>
-  req.method === 'GET' && /^\/public\/modules\/[0-9a-f-]+$/i.test(req.path);
+  req.method === 'GET' && (
+    /^\/public\/modules\/[0-9a-f-]+$/i.test(req.path) ||
+    /^\/public\/3d-assets\/[0-9a-f-]+\/file$/i.test(req.path)
+  );
 const requireStudentApiAuth = (req, res, next) => {
   if (publicStudentModuleRequest(req)) return next();
   return requireAuth(req, res, next);
@@ -91,12 +103,14 @@ app.use(
   requireAuth,
   requireRole(['admin', 'professor']),
   express.json({ limit: ADMIN_JSON_BODY_LIMIT }),
+  adminFaceRoutes,
   adminRoutes
 );
 app.use(
   '/api/student',
   studentJsonParser,
   requireStudentApiAuth,
+  faceRoutes,
   studentRoutes
 );
 app.use('/api/billing', express.json({ limit: '256kb' }), billingRoutes);
@@ -111,6 +125,13 @@ app.use((err, req, res, next) => {
   }
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
     return res.status(400).json({ message: 'JSON invalido.' });
+  }
+  if (err?.statusCode === 503 && String(err?.code || '').startsWith('FACE_SERVICE_')) {
+    console.warn(`[face] ${err.code}: servico interno indisponivel.`);
+    return res.status(503).json({
+      message: err.message,
+      code: err.code
+    });
   }
   console.error(err);
   return res.status(err?.statusCode || 500).json({
