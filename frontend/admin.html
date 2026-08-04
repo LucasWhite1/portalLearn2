@@ -21,6 +21,8 @@
       <ul class="nav-menu">
         <li><button type="button" class="nav-link" data-target="adminAssistantSection">Assistente IA</button></li>
         <li><button type="button" class="nav-link" data-target="adminStudentsSection">Alunos</button></li>
+        <li><button type="button" class="nav-link" data-target="studentFinanceSection">Financeiro dos alunos</button></li>
+        <li id="globalStudentFinanceNavItem"><button type="button" class="nav-link" data-target="globalStudentFinanceSection">Financeiro geral</button></li>
         <li><button type="button" class="nav-link" data-target="adminProfessorsSection">Professores</button></li>
         <li><button type="button" class="nav-link" data-target="adminReportsSection">Relatórios</button></li>
         <li><button type="button" class="nav-link" data-target="adminCoursesSection">Cursos</button></li>
@@ -50,6 +52,19 @@
           <button class="secondary-btn logout-btn" type="button">Sair</button>
         </div>
       </div>
+      <section class="subscription-access-notice hidden" id="subscriptionAccessNotice" aria-live="polite">
+        <div class="subscription-access-copy">
+          <span id="subscriptionAccessLabel">Assinatura</span>
+          <h2 id="subscriptionAccessTitle">Renove seu acesso</h2>
+          <p id="subscriptionAccessMessage"></p>
+          <strong id="subscriptionAccessDate"></strong>
+        </div>
+        <div class="subscription-access-actions">
+          <button class="primary-btn" id="subscriptionPayPix" type="button">Pagar próximo mês com Pix</button>
+          <button class="secondary-btn" id="subscriptionPayCard" type="button">Pagar com cartão</button>
+          <small id="subscriptionPaymentFeedback"></small>
+        </div>
+      </section>
       <section class="admin-panel">
         <div class="panel admin-assistant-panel" id="adminAssistantSection" data-section="adminAssistantSection">
           <div class="admin-assistant-head">
@@ -68,6 +83,7 @@
             <button type="button" data-assistant-suggestion="Resuma o desempenho das turmas e destaque pontos fortes e fracos.">Gerar resumo de desempenho</button>
             <button type="button" data-assistant-suggestion="Mostre as solicitações de acesso pendentes e recomende o que devo revisar.">Revisar solicitações</button>
             <button type="button" data-assistant-suggestion="Mostre as mensagens recentes de alunos que parecem precisar de resposta.">Priorizar respostas</button>
+            <button type="button" data-assistant-suggestion="Mostre os alunos com mensalidades vencidas, pagamentos recusados ou acesso financeiro bloqueado, agrupados por professor.">Revisar financeiro</button>
           </div>
           <div class="admin-assistant-conversation" id="adminAssistantConversation" aria-live="polite">
             <div class="admin-assistant-message assistant">
@@ -119,14 +135,40 @@
             <button type="submit" class="primary-btn">Criar aluno</button>
           </form>
           <div class="admin-subpanel" id="studentSignupLinkPanel">
-            <h3>Link de auto cadastro</h3>
-            <p style="margin-top:0; color:#8b92b1; font-size:0.9rem;">Compartilhe este link para o próprio aluno se cadastrar com segurança e já entrar vinculado a você. Ao gerar outro link, o anterior deixa de funcionar.</p>
+            <h3>Link de cadastro dos alunos</h3>
+            <p style="margin-top:0; color:#8b92b1; font-size:0.9rem;">O mesmo link pode ser usado por todos os seus alunos. Cada cadastro aguarda sua autorização e só ocupa uma vaga depois de aprovado.</p>
+            <div class="student-signup-settings" style="margin-bottom:0.8rem;">
+              <div class="field-group">
+                <label for="studentSignupMonthlyAmount">Mensalidade</label>
+                <input id="studentSignupMonthlyAmount" type="number" min="0.01" step="0.01" value="97.90" required />
+              </div>
+              <div class="field-group">
+                <label for="studentSignupDueDay">Dia do vencimento</label>
+                <input id="studentSignupDueDay" type="number" min="1" max="28" value="10" required />
+              </div>
+              <div class="field-group">
+                <label for="studentSignupBillingType">Forma via Asaas</label>
+                <select id="studentSignupBillingType">
+                  <option value="PIX">Pix mensal</option>
+                  <option value="CREDIT_CARD">Cartão recorrente</option>
+                  <option value="BOLETO">Boleto</option>
+                </select>
+              </div>
+              <div class="field-group">
+                <label for="studentSignupGraceDays">Tolerância após vencimento</label>
+                <input id="studentSignupGraceDays" type="number" min="0" max="60" value="5" required />
+              </div>
+            </div>
+            <label class="student-finance-consent" for="studentSignupAutoApprove" style="margin-bottom:0.8rem;">
+              <input id="studentSignupAutoApprove" type="checkbox" />
+              <span>Aprovar automaticamente quando houver vaga disponível</span>
+            </label>
             <div class="admin-inline-form">
               <input id="studentSignupLinkInput" readonly placeholder="Clique em gerar para criar um link seguro" />
-              <button id="generateStudentSignupLinkBtn" class="secondary-btn" type="button">Gerar link</button>
+              <button id="generateStudentSignupLinkBtn" class="secondary-btn" type="button">Gerar ou atualizar</button>
               <button id="copyStudentSignupLinkBtn" class="secondary-btn" type="button" disabled>Copiar</button>
             </div>
-            <p id="studentSignupLinkStatus" style="margin:0.65rem 0 0; color:#8b92b1; font-size:0.88rem;">Por segurança, o link completo aparece no momento da geração. Se precisar de outro, gere novamente e o anterior será invalidado.</p>
+            <p id="studentSignupLinkStatus" style="margin:0.65rem 0 0; color:#8b92b1; font-size:0.88rem;">Configure a cobrança e gere o link reutilizável. Sem uma subconta Asaas aprovada, a mensalidade será controlada manualmente pelo professor.</p>
           </div>
           <div class="admin-subpanel">
             <h3>Gerenciar turmas</h3>
@@ -137,6 +179,148 @@
             <div class="list-panel compact-list" id="classList">
               <p style="margin:0; color:#8b92b1;">Carregando turmas...</p>
             </div>
+          </div>
+        </div>
+
+        <div class="panel student-finance-panel" id="studentFinanceSection" data-section="studentFinanceSection">
+          <div class="student-finance-heading">
+            <div>
+              <div class="badge">FINANCEIRO DOS ALUNOS</div>
+              <h2>Mensalidades e recebimentos</h2>
+              <p>Defina vencimentos, acompanhe pagamentos e escolha quando o acesso será restrito por atraso.</p>
+            </div>
+            <button class="secondary-btn" id="refreshStudentFinanceBtn" type="button">Atualizar</button>
+          </div>
+
+          <div class="student-finance-metrics" id="studentFinanceMetrics">
+            <div><span>Recebido no mês</span><strong>R$ 0,00</strong></div>
+            <div><span>A receber</span><strong>R$ 0,00</strong></div>
+            <div><span>Em atraso</span><strong>0</strong></div>
+            <div><span>Acessos restritos</span><strong>0</strong></div>
+          </div>
+
+          <section class="student-finance-provider" aria-labelledby="studentFinanceProviderTitle">
+            <div>
+              <h3 id="studentFinanceProviderTitle">Forma de recebimento</h3>
+              <p id="studentFinanceProviderStatus">No modo manual, você confirma os pagamentos recebidos fora do portal.</p>
+            </div>
+            <div class="student-finance-provider-controls">
+              <label class="field-group">
+                <span>Operação</span>
+                <select id="studentFinanceProviderMode">
+                  <option value="MANUAL">Controle manual</option>
+                  <option value="ASAAS">Subconta Asaas no portal</option>
+                </select>
+              </label>
+              <button class="primary-btn" id="saveStudentFinanceProviderBtn" type="button">Salvar modo</button>
+            </div>
+            <small>Na subconta, os pagamentos dos alunos ficam separados e entram diretamente no saldo financeiro do professor.</small>
+
+            <form class="student-finance-onboarding" id="studentFinanceSubaccountForm" hidden>
+              <div class="student-finance-onboarding-head">
+                <div>
+                  <h3>Criar subconta Asaas</h3>
+                  <p>Use os dados do titular que receberá os pagamentos.</p>
+                </div>
+                <span id="studentFinanceOnboardingStep">Cadastro</span>
+              </div>
+              <div class="student-finance-onboarding-grid">
+                <label><span>Nome do titular</span><input id="studentFinanceAccountName" required maxlength="160" autocomplete="name" /></label>
+                <label><span>Email financeiro</span><input id="studentFinanceAccountEmail" required type="email" maxlength="180" autocomplete="email" /></label>
+                <label><span>CPF ou CNPJ</span><input id="studentFinanceCpfCnpj" required inputmode="numeric" maxlength="18" placeholder="Somente números" /></label>
+                <label id="studentFinanceBirthDateField"><span>Data de nascimento</span><input id="studentFinanceBirthDate" type="date" /></label>
+                <label id="studentFinanceCompanyTypeField" hidden><span>Tipo da empresa</span><select id="studentFinanceCompanyType"><option value="MEI">MEI</option><option value="LIMITED">Sociedade limitada</option><option value="INDIVIDUAL">Empresa individual</option><option value="ASSOCIATION">Associação</option></select></label>
+                <label><span>Celular</span><input id="studentFinanceMobilePhone" required inputmode="tel" maxlength="16" autocomplete="tel" /></label>
+                <label><span>Renda ou faturamento mensal</span><input id="studentFinanceIncomeValue" required type="number" min="1" step="0.01" /></label>
+                <label><span>CEP</span><input id="studentFinancePostalCode" required inputmode="numeric" maxlength="9" autocomplete="postal-code" /></label>
+                <label class="student-finance-address"><span>Endereço</span><input id="studentFinanceAddress" required maxlength="180" autocomplete="street-address" /></label>
+                <label><span>Número</span><input id="studentFinanceAddressNumber" required maxlength="30" /></label>
+                <label><span>Complemento</span><input id="studentFinanceComplement" maxlength="100" /></label>
+                <label><span>Bairro</span><input id="studentFinanceProvince" required maxlength="100" /></label>
+              </div>
+              <label class="student-finance-consent"><input id="studentFinanceConsent" type="checkbox" required /><span>Autorizo a criação da subconta e o envio destes dados cadastrais ao Asaas para análise e operação dos pagamentos.</span></label>
+              <div class="student-finance-onboarding-actions">
+                <button class="primary-btn" id="createStudentFinanceSubaccountBtn" type="submit">Criar minha subconta</button>
+                <small id="studentFinanceSubaccountFeedback"></small>
+              </div>
+            </form>
+
+            <div class="student-finance-onboarding-status" id="studentFinanceOnboardingStatus" hidden>
+              <div class="student-finance-onboarding-head">
+                <div><h3>Análise cadastral</h3><p id="studentFinanceOnboardingMessage">Consultando situação da conta...</p></div>
+                <button class="secondary-btn small" id="refreshStudentFinanceOnboardingBtn" type="button">Atualizar análise</button>
+              </div>
+              <div class="student-finance-status-grid" id="studentFinanceAccountStatuses"></div>
+              <div class="student-finance-document-list" id="studentFinanceDocumentList"></div>
+            </div>
+          </section>
+
+          <div class="student-finance-toolbar">
+            <label class="field-group">
+              <span>Buscar aluno</span>
+              <input id="studentFinanceSearch" type="search" placeholder="Nome, email ou turma" />
+            </label>
+            <label class="field-group">
+              <span>Situação</span>
+              <select id="studentFinanceFilter">
+                <option value="all">Todos</option>
+                <option value="unconfigured">Sem mensalidade</option>
+                <option value="paid">Pago</option>
+                <option value="due_soon">Próximo do vencimento</option>
+                <option value="overdue">Em atraso</option>
+                <option value="blocked">Acesso restrito</option>
+                <option value="failed">Falha no pagamento</option>
+              </select>
+            </label>
+          </div>
+          <div class="student-payment-list" id="studentPaymentList">
+            <p class="muted" style="margin:0;">Carregando mensalidades...</p>
+          </div>
+        </div>
+
+        <div class="panel global-student-finance" id="globalStudentFinanceSection" data-section="globalStudentFinanceSection">
+          <div class="financial-section-head">
+            <div>
+              <span class="badge">ALUNOS DE TODOS OS PROFESSORES</span>
+              <h2>Financeiro geral dos alunos</h2>
+              <p>Consolide mensalidades, vencimentos, atrasos e recebimentos, com detalhamento por professor.</p>
+            </div>
+            <small id="globalStudentFinanceUpdatedAt">Atualizando dados...</small>
+          </div>
+          <div class="financial-metrics" id="globalStudentFinanceMetrics">
+            <div><span>Mensal previsto</span><strong id="globalStudentMonthlyExpected">R$ 0,00</strong></div>
+            <div><span>Recebido no período</span><strong id="globalStudentReceived">R$ 0,00</strong></div>
+            <div><span>A receber</span><strong id="globalStudentPending">R$ 0,00</strong></div>
+            <div><span>Alunos com cobrança</span><strong id="globalStudentConfigured">0</strong></div>
+            <div><span>Em atraso</span><strong id="globalStudentOverdue">0</strong></div>
+            <div><span>Acessos restritos</span><strong id="globalStudentBlocked">0</strong></div>
+          </div>
+          <div class="financial-toolbar global-student-finance-toolbar">
+            <label>
+              <span>Buscar</span>
+              <input id="globalStudentFinanceSearch" type="search" placeholder="Professor, aluno, email ou turma" />
+            </label>
+            <label>
+              <span>Professor</span>
+              <select id="globalStudentFinanceProfessor"><option value="all">Todos os professores</option></select>
+            </label>
+            <label>
+              <span>Situação do aluno</span>
+              <select id="globalStudentFinanceStatus">
+                <option value="all">Todas</option>
+                <option value="unconfigured">Sem mensalidade</option>
+                <option value="paid">Pago</option>
+                <option value="pending">Pendente</option>
+                <option value="due_soon">Vence em breve</option>
+                <option value="overdue">Em atraso</option>
+                <option value="blocked">Acesso restrito</option>
+                <option value="failed">Pagamento recusado</option>
+              </select>
+            </label>
+            <strong id="globalStudentFinanceResultCount">0 alunos</strong>
+          </div>
+          <div class="global-professor-finance-list" id="globalProfessorStudentFinanceList">
+            <p class="financial-empty-state">Carregando financeiro dos alunos...</p>
           </div>
         </div>
 
@@ -202,9 +386,56 @@
         </div>
 
         <div class="panel" id="adminProfessorsSection" data-section="adminProfessorsSection">
-          <h2>Gestao de professores</h2>
-          <p style="margin-top:0; color:#8b92b1; font-size:0.9rem;">Crie professores, acompanhe o saldo de créditos de IA e libere novos créditos quando necessário.</p>
-          <form id="professorForm">
+          <div class="financial-section-head">
+            <div>
+              <span class="badge">CONTROLE FINANCEIRO</span>
+              <h2>Professores e assinaturas</h2>
+              <p>Acompanhe vencimentos, pagamentos, receita e capacidade contratada.</p>
+            </div>
+            <small id="professorFinanceUpdatedAt">Atualizando dados...</small>
+          </div>
+          <div class="financial-metrics" id="professorFinancialMetrics">
+            <div><span>Receita mensal estimada</span><strong id="financeEstimatedMrr">R$ 0,00</strong></div>
+            <div><span>Recebido neste mês</span><strong id="financeReceivedMonth">R$ 0,00</strong></div>
+            <div><span>Assinaturas ativas</span><strong id="financeActiveSubscriptions">0</strong></div>
+            <div><span>Vencem em 7 dias</span><strong id="financeDueSoon">0</strong></div>
+            <div><span>Contas em risco</span><strong id="financeAtRisk">0</strong></div>
+            <div><span>Alunos atendidos</span><strong id="financeTotalStudents">0</strong></div>
+          </div>
+          <div class="financial-breakdown" id="professorFinancialBreakdown">
+            <span>Carregando distribuição dos planos...</span>
+          </div>
+          <div class="financial-toolbar">
+            <label>
+              <span>Buscar professor</span>
+              <input id="professorFinanceSearch" type="search" placeholder="Nome ou email" />
+            </label>
+            <label>
+              <span>Situação</span>
+              <select id="professorFinanceStatus">
+                <option value="all">Todas</option>
+                <option value="active">Ativas</option>
+                <option value="due_soon">Vencem em breve</option>
+                <option value="payment_failed">Falha no pagamento</option>
+                <option value="expired">Vencidas</option>
+                <option value="manual">Sem assinatura</option>
+                <option value="blocked">Bloqueadas manualmente</option>
+              </select>
+            </label>
+            <label>
+              <span>Pagamento</span>
+              <select id="professorFinanceBillingType">
+                <option value="all">Todos</option>
+                <option value="PIX">Pix</option>
+                <option value="CREDIT_CARD">Cartão</option>
+                <option value="manual">Cadastro manual</option>
+              </select>
+            </label>
+            <strong id="professorFinanceResultCount">0 professores</strong>
+          </div>
+          <details class="professor-create-details">
+            <summary>Cadastrar professor manualmente</summary>
+            <form id="professorForm">
             <div class="field-group">
               <label for="adminProfessorName">Nome completo</label>
               <input id="adminProfessorName" required />
@@ -233,9 +464,10 @@
               <label for="adminProfessorStorageLimitGb">Limite de espaço dos cursos (GB)</label>
               <input id="adminProfessorStorageLimitGb" type="number" min="0" step="0.1" placeholder="Ex: 2.5" />
             </div>
-            <button type="submit" class="primary-btn">Criar professor</button>
-          </form>
-          <div class="list-panel" id="adminProfessorList" style="margin-top:1rem;">
+              <button type="submit" class="primary-btn">Criar professor</button>
+            </form>
+          </details>
+          <div class="professor-financial-list" id="adminProfessorList">
             <p style="margin:0; color:#8b92b1;">Carregando professores...</p>
           </div>
         </div>
@@ -688,6 +920,34 @@
         </div>
       </section>
     </main>
+  </div>
+  <div id="studentSeatUpgradeModal" class="admin-report-modal hidden" aria-hidden="true">
+    <div class="admin-report-modal-backdrop" data-seat-upgrade-close="true"></div>
+    <div class="admin-report-modal-card student-seat-upgrade-card" role="dialog" aria-modal="true" aria-labelledby="studentSeatUpgradeTitle">
+      <div class="admin-report-modal-head">
+        <div>
+          <p class="badge">LIMITE DE ALUNOS</p>
+          <h3 id="studentSeatUpgradeTitle">Adicionar vagas ao plano</h3>
+          <p id="studentSeatUpgradeSummary">Seu limite atual está preenchido.</p>
+        </div>
+        <button class="secondary-btn small" type="button" data-seat-upgrade-close="true" aria-label="Fechar">Fechar</button>
+      </div>
+      <div class="student-seat-upgrade-content">
+        <label for="studentSeatUpgradeQuantity">Quantidade de novas vagas</label>
+        <div class="student-seat-upgrade-stepper">
+          <button type="button" data-seat-step="-1" aria-label="Diminuir quantidade">−</button>
+          <input id="studentSeatUpgradeQuantity" type="number" min="1" max="500" step="1" value="1" inputmode="numeric" />
+          <button type="button" data-seat-step="1" aria-label="Aumentar quantidade">+</button>
+        </div>
+        <div class="student-seat-upgrade-price">
+          <span id="studentSeatUpgradePriceDetail">1 vaga × R$ 9,70 por mês</span>
+          <strong id="studentSeatUpgradeTotal">R$ 9,70</strong>
+        </div>
+        <p class="muted">Após a confirmação do Asaas, o novo limite será liberado e passará a compor o valor mensal do plano.</p>
+        <button id="studentSeatUpgradeCheckoutBtn" class="primary-btn" type="button">Ir para o pagamento</button>
+        <p id="studentSeatUpgradeStatus" class="credit-topup-status" aria-live="polite"></p>
+      </div>
+    </div>
   </div>
   <div id="progressTimelineModal" class="admin-report-modal hidden" aria-hidden="true">
     <div class="admin-report-modal-backdrop" data-progress-modal-close="true"></div>

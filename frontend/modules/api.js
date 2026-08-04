@@ -29,6 +29,10 @@ export const authorizedFetch = async (path, options = {}) => {
     redirectToLogin();
     throw new Error('Sessão expirada');
   }
+  if (response.status === 402 && !window.location.pathname.endsWith('/admin.html')) {
+    window.location.replace('admin.html?billing=required');
+    throw new Error('Assinatura vencida');
+  }
   return response;
 };
 

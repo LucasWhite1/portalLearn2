@@ -15,8 +15,52 @@ CREATE TABLE IF NOT EXISTS users (
   platform_credits_updated_at TIMESTAMPTZ DEFAULT NOW(),
   student_limit INT,
   storage_limit_bytes BIGINT,
+  billing_access_managed BOOLEAN NOT NULL DEFAULT FALSE,
+  subscription_access_expires_at TIMESTAMPTZ,
+  subscription_plan_code TEXT,
+  subscription_billing_type TEXT,
+  subscription_payment_status TEXT,
+  subscription_last_event_type TEXT,
+  subscription_payment_url TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS student_signup_links (
+  professor_user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  auto_approve BOOLEAN NOT NULL DEFAULT FALSE,
+  monthly_amount NUMERIC(12,2),
+  due_day INT NOT NULL DEFAULT 10,
+  billing_type TEXT NOT NULL DEFAULT 'PIX',
+  grace_days INT NOT NULL DEFAULT 5,
+  auto_block BOOLEAN NOT NULL DEFAULT TRUE,
+  payment_description TEXT,
+  payment_instructions TEXT,
+  revoked_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS student_signup_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  student_user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+  professor_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','APPROVED','REJECTED')),
+  auto_approval_requested BOOLEAN NOT NULL DEFAULT FALSE,
+  monthly_amount NUMERIC(12,2),
+  due_day INT NOT NULL DEFAULT 10,
+  billing_type TEXT NOT NULL DEFAULT 'PIX',
+  grace_days INT NOT NULL DEFAULT 5,
+  auto_block BOOLEAN NOT NULL DEFAULT TRUE,
+  payment_description TEXT,
+  payment_instructions TEXT,
+  reviewed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_student_signup_requests_professor
+ON student_signup_requests(professor_user_id, status, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS courses (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -183,6 +227,98 @@ CREATE TABLE IF NOT EXISTS credit_topup_orders (
 
 CREATE INDEX IF NOT EXISTS idx_credit_topup_orders_user
 ON credit_topup_orders(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS student_seat_upgrade_orders (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  quantity INT NOT NULL CHECK (quantity > 0),
+  unit_price NUMERIC(12,2) NOT NULL,
+  amount_brl NUMERIC(12,2) NOT NULL,
+  previous_student_limit INT NOT NULL,
+  target_student_limit INT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'PENDING'
+    CHECK (status IN ('PENDING','PAID','EXPIRED','CANCELED','REFUNDED','CHARGEBACK')),
+  external_reference TEXT NOT NULL UNIQUE,
+  provider_checkout_id TEXT,
+  provider_payment_id TEXT,
+  checkout_url TEXT,
+  expires_at TIMESTAMPTZ,
+  paid_at TIMESTAMPTZ,
+  reversed_at TIMESTAMPTZ,
+  raw_payload JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_student_seat_upgrade_orders_user
+ON student_seat_upgrade_orders(user_id, status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS professor_payment_settings (
+  professor_user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  provider_mode TEXT NOT NULL DEFAULT 'MANUAL' CHECK (provider_mode IN ('MANUAL', 'ASAAS')),
+  provider_api_key_encrypted TEXT,
+  provider_account_id TEXT,
+  provider_wallet_id TEXT,
+  provider_account_name TEXT,
+  provider_status TEXT NOT NULL DEFAULT 'DISCONNECTED',
+  webhook_token_hash TEXT,
+  onboarding_data JSONB,
+  onboarding_checked_at TIMESTAMPTZ,
+  subaccount_consent_version TEXT,
+  subaccount_consented_at TIMESTAMPTZ,
+  connected_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE professor_payment_settings
+  ADD COLUMN IF NOT EXISTS provider_account_id TEXT,
+  ADD COLUMN IF NOT EXISTS onboarding_data JSONB,
+  ADD COLUMN IF NOT EXISTS onboarding_checked_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS subaccount_consent_version TEXT,
+  ADD COLUMN IF NOT EXISTS subaccount_consented_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS student_payment_plans (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  professor_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  student_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  amount NUMERIC(12,2) NOT NULL CHECK (amount > 0),
+  due_day INT NOT NULL CHECK (due_day BETWEEN 1 AND 28),
+  billing_type TEXT NOT NULL DEFAULT 'MANUAL' CHECK (billing_type IN ('MANUAL','PIX','BOLETO','CREDIT_CARD')),
+  grace_days INT NOT NULL DEFAULT 5 CHECK (grace_days BETWEEN 0 AND 60),
+  auto_block BOOLEAN NOT NULL DEFAULT TRUE,
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','PAUSED')),
+  description TEXT,
+  payment_instructions TEXT,
+  provider_customer_id TEXT,
+  provider_subscription_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (professor_user_id, student_user_id)
+);
+
+CREATE TABLE IF NOT EXISTS student_payment_periods (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  plan_id UUID NOT NULL REFERENCES student_payment_plans(id) ON DELETE CASCADE,
+  due_date DATE NOT NULL,
+  amount NUMERIC(12,2) NOT NULL CHECK (amount > 0),
+  status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','PAID','OVERDUE','FAILED','CANCELED','REFUNDED','CHARGEBACK')),
+  billing_type TEXT NOT NULL CHECK (billing_type IN ('MANUAL','PIX','BOLETO','CREDIT_CARD')),
+  provider_payment_id TEXT UNIQUE,
+  payment_url TEXT,
+  failure_reason TEXT,
+  paid_at TIMESTAMPTZ,
+  raw_payload JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (plan_id, due_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_student_payment_plans_professor
+ON student_payment_plans(professor_user_id, status, due_day);
+
+CREATE INDEX IF NOT EXISTS idx_student_payment_periods_plan
+ON student_payment_periods(plan_id, due_date DESC);
 
 CREATE TABLE IF NOT EXISTS student_face_profiles (
   user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,

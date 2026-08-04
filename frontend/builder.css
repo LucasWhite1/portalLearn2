@@ -675,6 +675,10 @@ body {
 .builder-panel .template-store-panel,
 .builder-panel .template-store-card,
 .builder-panel .module-list-item,
+.builder-panel .ai-action-item,
+.builder-panel .ai-feedback-log,
+.builder-panel .ai-attachment-card,
+.builder-panel .ai-reference-card,
 .builder-panel .ai-proposal-history,
 .builder-panel .ai-proposal-history-item,
 .builder-panel .three-d-catalog-panel,
@@ -689,6 +693,10 @@ body {
 .builder-panel .template-store-card h3,
 .builder-panel .template-store-card h4,
 .builder-panel .module-list-item h4,
+.builder-panel .ai-action-item strong,
+.builder-panel .ai-feedback-entry strong,
+.builder-panel .ai-attachment-card strong,
+.builder-panel .ai-reference-card strong,
 .builder-panel .ai-proposal-history-item strong,
 .builder-panel .three-d-catalog-heading strong,
 .builder-panel .three-d-catalog-card h3,
@@ -704,6 +712,15 @@ body {
 .builder-panel .template-store-card small,
 .builder-panel .module-list-item .muted,
 .builder-panel .module-list-item small,
+.builder-panel .ai-action-item small,
+.builder-panel .ai-action-item .muted,
+.builder-panel .ai-feedback-log .muted,
+.builder-panel .ai-feedback-entry p,
+.builder-panel .ai-feedback-entry small,
+.builder-panel .ai-attachment-card .muted,
+.builder-panel .ai-attachment-card small,
+.builder-panel .ai-reference-card .muted,
+.builder-panel .ai-reference-card small,
 .builder-panel .ai-proposal-history .muted,
 .builder-panel .ai-proposal-history small,
 .builder-panel .three-d-catalog-panel .muted,
@@ -1072,11 +1089,11 @@ body {
 }
 
 .ai-feedback-entry.error strong {
-  color: #d13c55;
+  color: #b4233c !important;
 }
 
 .ai-feedback-entry.success strong {
-  color: #0d8a49;
+  color: #087443 !important;
 }
 
 .ai-reference-card {
@@ -1491,6 +1508,13 @@ body {
 
 .stage-toolbar-menu .secondary-btn {
   min-height: 42px;
+}
+
+.stage-toolbar-menu .secondary-btn:hover,
+.stage-toolbar-menu .secondary-btn:focus-visible {
+  border-color: color-mix(in srgb, var(--portal-button, #6d63ff) 55%, transparent) !important;
+  background: color-mix(in srgb, var(--portal-card-bg, #ffffff) 88%, var(--portal-button, #6d63ff)) !important;
+  color: var(--portal-card-text, #101426) !important;
 }
 
 .element-menu-trigger {
@@ -3841,8 +3865,9 @@ body {
   border: 1px solid rgba(148, 163, 184, 0.32);
   border-radius: 999px;
   background: #ffffff;
-  color: #334155;
+  color: #334155 !important;
   font-weight: 700;
+  cursor: pointer;
   box-shadow: 0 6px 14px rgba(15, 23, 42, 0.08);
 }
 
@@ -3861,9 +3886,11 @@ body {
   min-width: 2.9rem;
   min-height: 2.9rem;
   padding: 0;
+  border: 0;
   border-radius: 999px;
   background: linear-gradient(135deg, #22c55e, #16a34a);
   box-shadow: 0 10px 24px rgba(34, 197, 94, 0.24);
+  cursor: pointer;
 }
 
 .builder-input-submit-icon {
@@ -3894,6 +3921,13 @@ body {
 
 .builder-input-preview-audio {
   width: 100%;
+}
+
+.builder-input-upload:hover,
+.builder-input-upload:focus-visible {
+  border-color: rgba(109, 99, 255, 0.5) !important;
+  background: #eef2ff !important;
+  color: #1e293b !important;
 }
 
 .builder-audio-capture-element {
@@ -4065,6 +4099,15 @@ body {
 
 .builder-quiz-action {
   align-self: flex-start;
+  min-height: 42px;
+  padding: 0.7rem 1.1rem;
+  border: 1px solid rgba(109, 99, 255, 0.28);
+  border-radius: 999px;
+  background: #6d63ff;
+  color: #ffffff;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
 }
 
 .builder-field-span {
@@ -4161,6 +4204,18 @@ video {
   cursor: grab;
   will-change: transform, opacity;
   touch-action: none;
+}
+
+.floating-button-element:hover,
+.floating-button-element:focus-visible,
+.builder-quiz-action:hover,
+.builder-quiz-action:focus-visible,
+.key-trigger-btn:hover:not(:disabled),
+.key-trigger-btn:focus-visible:not(:disabled) {
+  filter: brightness(0.9);
+  opacity: 1;
+  outline: 2px solid rgba(15, 23, 42, 0.24);
+  outline-offset: 2px;
 }
 
 .key-trigger-element {

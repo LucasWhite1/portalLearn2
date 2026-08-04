@@ -4,6 +4,494 @@
   box-sizing: border-box;
 }
 
+/* Student payment operations */
+.student-finance-panel {
+  color: #101426;
+}
+
+.student-finance-heading,
+.student-payment-item-head,
+.student-payment-item-footer,
+.student-payment-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.student-finance-heading p,
+.student-payment-item-head p,
+.student-payment-head p {
+  margin: 0.35rem 0 0;
+  color: #5b647a;
+}
+
+.student-finance-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  margin: 1.25rem 0;
+  overflow: hidden;
+  border: 1px solid #dce1ec;
+  border-radius: 8px;
+  background: #dce1ec;
+}
+
+.student-finance-metrics > div {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+  padding: 1rem;
+  background: #ffffff;
+}
+
+.student-finance-metrics span,
+.student-payment-current span,
+.student-payment-form label > span {
+  color: #667085;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.student-finance-metrics strong {
+  color: #101426;
+  font-size: 1.25rem;
+}
+
+.student-finance-provider {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem 0;
+  border-block: 1px solid #e4e7ee;
+}
+
+.student-finance-provider h3,
+.student-payment-history h3 {
+  margin: 0;
+  color: #101426;
+}
+
+.student-finance-provider p,
+.student-finance-provider small {
+  margin: 0.3rem 0 0;
+  color: #5b647a;
+}
+
+.student-finance-provider-controls,
+.student-finance-toolbar,
+.student-payment-actions {
+  display: flex;
+  align-items: end;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.student-finance-provider-controls .field-group,
+.student-finance-toolbar .field-group {
+  min-width: min(100%, 240px);
+  margin: 0;
+}
+
+.student-finance-toolbar {
+  margin: 1.25rem 0 1rem;
+}
+
+.student-payment-list {
+  display: grid;
+  border-top: 1px solid #e4e7ee;
+}
+
+.student-payment-item {
+  padding: 1.15rem 0;
+  border-bottom: 1px solid #e4e7ee;
+}
+
+.student-payment-item h3 {
+  margin: 0;
+  color: #101426;
+  font-size: 1rem;
+}
+
+.financial-status,
+.student-payment-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+  background: #eef1f6;
+  color: #475467;
+  font-size: 0.78rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.financial-status.success,
+.student-payment-status.success {
+  background: #e8f7ef;
+  color: #087443;
+}
+
+.financial-status.warning,
+.student-payment-status.warning {
+  background: #fff5d8;
+  color: #8b5a00;
+}
+
+.financial-status.danger,
+.student-payment-status.danger {
+  background: #ffe9ec;
+  color: #b4233c;
+}
+
+.student-payment-form {
+  display: grid;
+  grid-template-columns: 1.1fr repeat(4, minmax(110px, 0.8fr));
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.student-payment-form label {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.student-payment-form input,
+.student-payment-form select {
+  width: 100%;
+  min-width: 0;
+}
+
+.student-payment-form .student-payment-switch {
+  display: flex;
+  align-items: center;
+  grid-column: span 2;
+  gap: 0.55rem;
+}
+
+.student-payment-switch input {
+  width: auto;
+}
+
+.student-payment-form .student-payment-wide {
+  grid-column: span 3;
+}
+
+.student-payment-item-footer {
+  align-items: center;
+  color: #5b647a;
+  font-size: 0.85rem;
+}
+
+.student-payment-item-footer > div {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.student-payment-section {
+  display: grid;
+  gap: 1rem;
+  padding: 1.35rem;
+  border: 1px solid color-mix(in srgb, var(--portal-card-text, #101426) 14%, transparent);
+  border-radius: 8px;
+  background: var(--portal-card-bg, #ffffff);
+  color: var(--portal-card-text, #101426);
+}
+
+.student-payment-current {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid #e1e5ee;
+  border-radius: 8px;
+  background: #e1e5ee;
+}
+
+.student-payment-current > div {
+  display: grid;
+  gap: 0.3rem;
+  padding: 0.9rem;
+  background: #ffffff;
+  color: #101426;
+}
+
+.student-payment-instructions {
+  margin: 0;
+  padding: 0.85rem;
+  border-left: 3px solid #d49b16;
+  background: #fff9e8;
+  color: #5f4500;
+}
+
+.student-payment-history {
+  display: grid;
+  gap: 0;
+  margin-top: 0.5rem;
+}
+
+.student-payment-history > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid #e4e7ee;
+  color: #5b647a;
+}
+
+.student-payment-history strong {
+  color: #101426;
+  text-align: right;
+}
+
+body.student-payment-blocked .nav-link[data-target="courseList"],
+body.student-payment-blocked .nav-link[data-target="courseStoreSection"],
+body.student-payment-blocked .nav-link[data-target="portalProgressSection"] {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .student-finance-metrics,
+  .student-payment-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .student-payment-form .student-payment-switch,
+  .student-payment-form .student-payment-wide {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 620px) {
+  .student-finance-heading,
+  .student-payment-item-head,
+  .student-payment-item-footer,
+  .student-payment-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .student-finance-metrics,
+  .student-payment-form,
+  .student-payment-current {
+    grid-template-columns: 1fr;
+  }
+
+  .student-payment-form .student-payment-switch,
+  .student-payment-form .student-payment-wide {
+    grid-column: auto;
+  }
+
+  .student-payment-item-footer > div,
+  .student-payment-actions {
+    justify-content: stretch;
+  }
+
+  .student-payment-item-footer button,
+  .student-payment-actions > * {
+    width: 100%;
+  }
+}
+
+.student-finance-onboarding,
+.student-finance-onboarding-status {
+  display: grid;
+  gap: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid #e4e7ee;
+}
+
+.student-finance-onboarding-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.student-finance-onboarding-head h3,
+.student-finance-onboarding-head p {
+  margin: 0;
+}
+
+.student-finance-onboarding-head p {
+  margin-top: 0.25rem;
+  color: #667085;
+}
+
+.student-finance-onboarding-head > span {
+  padding: 0.3rem 0.55rem;
+  border-radius: 6px;
+  background: #eef1f6;
+  color: #475467;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.student-finance-onboarding-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.student-finance-onboarding-grid label {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.student-finance-onboarding-grid label > span,
+.student-finance-consent span {
+  color: #667085;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.student-finance-onboarding-grid input,
+.student-finance-onboarding-grid select {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  padding: 0.65rem 0.7rem;
+  border: 1px solid #cfd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #101426;
+  font: inherit;
+}
+
+.student-finance-onboarding-grid .student-finance-address {
+  grid-column: span 2;
+}
+
+.student-finance-consent {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+}
+
+.student-finance-consent input {
+  margin-top: 0.15rem;
+}
+
+.student-finance-onboarding-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.student-finance-onboarding-actions .primary-btn {
+  width: auto;
+}
+
+.student-finance-onboarding-actions small {
+  color: #5b647a;
+}
+
+.student-finance-status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid #dce1ec;
+  border-radius: 8px;
+}
+
+.student-finance-status-grid > div {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.85rem;
+  border-right: 1px solid #dce1ec;
+}
+
+.student-finance-status-grid > div:last-child {
+  border-right: 0;
+}
+
+.student-finance-status-grid span {
+  color: #667085;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.student-finance-status-grid .financial-status {
+  justify-self: start;
+}
+
+.student-finance-document-list {
+  display: grid;
+  border-top: 1px solid #e4e7ee;
+}
+
+.student-finance-document {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 0;
+  border-bottom: 1px solid #e4e7ee;
+}
+
+.student-finance-document > div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.student-finance-document span {
+  color: #667085;
+  font-size: 0.82rem;
+}
+
+@media (max-width: 900px) {
+  .student-finance-onboarding-grid,
+  .student-finance-status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .student-finance-status-grid > div:nth-child(2) {
+    border-right: 0;
+  }
+
+  .student-finance-status-grid > div:nth-child(-n + 2) {
+    border-bottom: 1px solid #dce1ec;
+  }
+}
+
+@media (max-width: 620px) {
+  .student-finance-onboarding-head,
+  .student-finance-document,
+  .student-finance-onboarding-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .student-finance-onboarding-grid,
+  .student-finance-status-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .student-finance-onboarding-grid .student-finance-address {
+    grid-column: auto;
+  }
+
+  .student-finance-status-grid > div,
+  .student-finance-status-grid > div:nth-child(2) {
+    border-right: 0;
+    border-bottom: 1px solid #dce1ec;
+  }
+
+  .student-finance-status-grid > div:last-child {
+    border-bottom: 0;
+  }
+
+  .student-finance-onboarding-actions .primary-btn,
+  .student-finance-document .secondary-btn {
+    width: 100%;
+  }
+}
+
 .biometric-profile-card {
   display: grid;
   gap: 1rem;
@@ -718,6 +1206,76 @@ body.mobile-sidenav-open {
   overflow: auto;
   display: grid;
   gap: 0.85rem;
+}
+
+.student-seat-upgrade-card {
+  width: min(520px, calc(100vw - 32px));
+}
+
+.student-seat-upgrade-content {
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+  color: #17191f;
+}
+
+.student-seat-upgrade-content > label {
+  color: #17191f;
+  font-weight: 700;
+}
+
+.student-seat-upgrade-stepper {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 44px;
+  width: min(260px, 100%);
+  min-height: 44px;
+}
+
+.student-seat-upgrade-stepper button,
+.student-seat-upgrade-stepper input {
+  min-width: 0;
+  border: 1px solid #c9ced8;
+  background: #fff;
+  color: #17191f;
+  font: inherit;
+  text-align: center;
+}
+
+.student-seat-upgrade-stepper button {
+  cursor: pointer;
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.student-seat-upgrade-stepper button:hover,
+.student-seat-upgrade-stepper button:focus-visible {
+  background: #eef1f6;
+  color: #111318;
+}
+
+.student-seat-upgrade-stepper input {
+  border-left: 0;
+  border-right: 0;
+}
+
+.student-seat-upgrade-price {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 0;
+  border-top: 1px solid #e1e4ea;
+  border-bottom: 1px solid #e1e4ea;
+}
+
+.student-seat-upgrade-price span {
+  color: #4f5665;
+}
+
+.student-seat-upgrade-price strong {
+  color: #17191f;
+  font-size: 1.4rem;
+  white-space: nowrap;
 }
 
 .admin-report-timeline.hidden,
@@ -2663,6 +3221,21 @@ body.mobile-sidenav-open {
   font-size: 1rem;
 }
 
+.student-signup-settings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.student-signup-settings .field-group {
+  min-width: 0;
+}
+
+.student-signup-settings input,
+.student-signup-settings select {
+  width: 100%;
+}
+
 .admin-course-enrollment-panel {
   margin-bottom: 0.35rem;
 }
@@ -3821,6 +4394,9 @@ body.mobile-sidenav-open {
     flex-direction: column;
     align-items: stretch;
   }
+  .student-signup-settings {
+    grid-template-columns: 1fr;
+  }
   .course-grid.is-scrollable .course-card {
     flex-basis: min(280px, calc(100vw - 4rem));
   }
@@ -4605,6 +5181,410 @@ body.admin-page {
   text-decoration: none;
 }
 
+.subscription-access-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid #e6b94f;
+  border-left: 5px solid #c98908;
+  border-radius: 8px;
+  background: #fff8df;
+  color: #422f05;
+}
+
+.subscription-access-notice.hidden {
+  display: none;
+}
+
+.subscription-access-notice[data-state="payment_failed"],
+.subscription-access-notice[data-state="expired"] {
+  border-color: #dc7c74;
+  border-left-color: #b42318;
+  background: #fff1ef;
+  color: #561612;
+}
+
+.subscription-access-notice[data-state="payment_pending"] {
+  border-color: #7ca8ce;
+  border-left-color: #21669c;
+  background: #eef7ff;
+  color: #123b5c;
+}
+
+.subscription-access-copy {
+  min-width: 0;
+}
+
+.subscription-access-copy > span {
+  display: block;
+  margin-bottom: 0.25rem;
+  font-size: 0.74rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.subscription-access-copy h2 {
+  margin: 0;
+  font-size: 1.15rem;
+  letter-spacing: 0;
+}
+
+.subscription-access-copy p {
+  margin: 0.35rem 0 0;
+  line-height: 1.45;
+}
+
+.subscription-access-copy strong {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: 0.88rem;
+}
+
+.subscription-access-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.55rem;
+  max-width: 440px;
+}
+
+.subscription-access-actions small {
+  flex-basis: 100%;
+  min-height: 1.2em;
+  text-align: right;
+}
+
+.subscription-blocked .admin-panel,
+.subscription-blocked .sidenav .nav-menu {
+  display: none;
+}
+
+.financial-section-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.financial-section-head h2 {
+  margin: 0.45rem 0 0;
+}
+
+.financial-section-head p {
+  margin: 0.35rem 0 0;
+  color: #69718d;
+}
+
+.financial-section-head > small {
+  color: #69718d;
+  white-space: nowrap;
+}
+
+.financial-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 1.15rem;
+  border-block: 1px solid #dfe3ee;
+}
+
+.financial-metrics > div {
+  min-width: 0;
+  padding: 0.9rem 1rem;
+  border-right: 1px solid #dfe3ee;
+}
+
+.financial-metrics > div:nth-child(3n) {
+  border-right: 0;
+}
+
+.financial-metrics > div:nth-child(-n + 3) {
+  border-bottom: 1px solid #dfe3ee;
+}
+
+.financial-metrics span,
+.professor-financial-data span {
+  display: block;
+  color: #69718d;
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.financial-metrics strong {
+  display: block;
+  margin-top: 0.3rem;
+  color: #18213f;
+  font-size: 1.3rem;
+}
+
+.financial-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem 1rem;
+  padding: 0.75rem 0;
+  color: #59627f;
+  font-size: 0.84rem;
+}
+
+.financial-breakdown span {
+  white-space: nowrap;
+}
+
+.financial-toolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(150px, 190px) minmax(150px, 190px) auto;
+  align-items: end;
+  gap: 0.7rem;
+  padding: 0.85rem;
+  border: 1px solid #dfe3ee;
+  border-radius: 8px;
+  background: #f7f8fc;
+}
+
+.financial-toolbar label {
+  min-width: 0;
+}
+
+.financial-toolbar label > span {
+  display: block;
+  margin-bottom: 0.3rem;
+  color: #59627f;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.financial-toolbar input,
+.financial-toolbar select {
+  width: 100%;
+}
+
+.financial-toolbar > strong {
+  padding-bottom: 0.85rem;
+  color: #343d5c;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.professor-create-details {
+  margin-top: 0.85rem;
+  border-bottom: 1px solid #dfe3ee;
+}
+
+.professor-create-details summary {
+  padding: 0.8rem 0;
+  color: #37405e;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.professor-create-details form {
+  padding-bottom: 1rem;
+}
+
+.professor-financial-list {
+  display: grid;
+  gap: 0.8rem;
+  margin-top: 1rem;
+}
+
+.global-professor-finance-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.global-professor-finance-group {
+  overflow: hidden;
+  border: 1px solid #dfe3ee;
+  border-radius: 8px;
+  background: #fff;
+  color: #18213f;
+}
+
+.global-professor-finance-group > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  cursor: pointer;
+  background: #f7f8fc;
+  color: #18213f;
+}
+
+.global-professor-finance-group > summary > span:first-child,
+.global-professor-finance-totals {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.global-professor-finance-group summary small {
+  color: #69718d;
+  overflow-wrap: anywhere;
+}
+
+.global-professor-finance-totals {
+  align-items: flex-end;
+  text-align: right;
+}
+
+.global-professor-finance-totals em {
+  color: #a33b2e;
+  font-size: 0.78rem;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.global-student-finance-table-wrap {
+  overflow-x: auto;
+}
+
+.global-student-finance-table {
+  min-width: 900px;
+  margin: 0;
+}
+
+.global-student-finance-table td strong,
+.global-student-finance-table td small {
+  display: block;
+  color: #222b48;
+}
+
+.global-student-finance-table td small {
+  margin-top: 3px;
+  color: #69718d;
+  font-size: 0.78rem;
+}
+
+@media (max-width: 720px) {
+  .global-professor-finance-group > summary {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .global-professor-finance-totals {
+    align-items: flex-start;
+    text-align: left;
+  }
+}
+
+.professor-financial-item {
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid #dfe3ee;
+  border-left: 4px solid #72809d;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.professor-financial-item[data-financial-state="active"] {
+  border-left-color: #16845f;
+}
+
+.professor-financial-item[data-financial-state="due_soon"] {
+  border-left-color: #c78308;
+}
+
+.professor-financial-item[data-financial-state="expired"],
+.professor-financial-item[data-financial-state="payment_failed"],
+.professor-financial-item[data-financial-state="blocked"] {
+  border-left-color: #b42318;
+}
+
+.professor-financial-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.professor-financial-head h3,
+.professor-financial-head p {
+  margin: 0;
+}
+
+.professor-financial-head h3 {
+  color: #18213f;
+  font-size: 1rem;
+}
+
+.professor-financial-head p {
+  margin-top: 0.25rem;
+  color: #69718d;
+  font-size: 0.84rem;
+  overflow-wrap: anywhere;
+}
+
+.financial-status {
+  flex: 0 0 auto;
+  padding: 0.3rem 0.55rem;
+  border-radius: 999px;
+  background: #eef0f5;
+  color: #505975;
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.financial-status.is-success { background: #e2f6ed; color: #126044; }
+.financial-status.is-warning { background: #fff1c8; color: #714a00; }
+.financial-status.is-danger { background: #ffe6e3; color: #8b2018; }
+.financial-status.is-info { background: #e5f2ff; color: #175b8f; }
+
+.professor-financial-data {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.85rem 1rem;
+  margin-top: 1rem;
+  padding-block: 0.9rem;
+  border-block: 1px solid #e6e9f1;
+}
+
+.professor-financial-data strong {
+  display: block;
+  margin-top: 0.25rem;
+  color: #222b48;
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+
+.professor-capacity-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem 1rem;
+  padding: 0.75rem 0;
+  color: #69718d;
+  font-size: 0.82rem;
+}
+
+.professor-capacity-strip strong {
+  color: #2f3855;
+}
+
+.professor-management-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.professor-management-controls input {
+  min-width: 108px;
+}
+
+.financial-empty-state {
+  margin: 0;
+  padding: 1.4rem;
+  border: 1px dashed #cfd4e1;
+  border-radius: 8px;
+  color: #69718d;
+  text-align: center;
+}
+
 .platform-credits-card {
   min-width: 132px;
   padding: 0.65rem 0.9rem;
@@ -5167,6 +6147,21 @@ body.admin-page {
   -webkit-overflow-scrolling: touch;
 }
 
+@media (max-width: 1180px) and (min-width: 769px) {
+  .financial-toolbar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .financial-toolbar > strong {
+    align-self: center;
+    padding: 0;
+  }
+
+  .professor-financial-data {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 768px) {
   body.admin-page {
     background:
@@ -5222,6 +6217,78 @@ body.admin-page {
     min-width: 0;
     padding: 0.75rem 0.9rem;
     font-size: 0.85rem;
+  }
+
+  .subscription-access-notice {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .subscription-access-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    max-width: none;
+  }
+
+  .subscription-access-actions .primary-btn,
+  .subscription-access-actions .secondary-btn {
+    width: 100%;
+  }
+
+  .subscription-access-actions small {
+    text-align: left;
+  }
+
+  .financial-section-head,
+  .professor-financial-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .financial-section-head > small {
+    white-space: normal;
+  }
+
+  .financial-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .financial-metrics > div,
+  .financial-metrics > div:nth-child(3n) {
+    border-right: 1px solid #dfe3ee;
+    border-bottom: 1px solid #dfe3ee;
+  }
+
+  .financial-metrics > div:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .financial-metrics > div:nth-last-child(-n + 2) {
+    border-bottom: 0;
+  }
+
+  .financial-toolbar,
+  .professor-financial-data {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .financial-toolbar > strong {
+    padding: 0;
+  }
+
+  .financial-status {
+    align-self: flex-start;
+  }
+
+  .professor-management-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .professor-management-controls input,
+  .professor-management-controls button {
+    width: 100% !important;
+    max-width: none !important;
   }
 
   .admin-panel {
@@ -6007,4 +7074,42 @@ body {
   padding: 0.18rem;
   border-radius: 0.7rem;
   cursor: pointer;
+}
+
+.student-finance-panel .student-payment-form input,
+.student-finance-panel .student-payment-form select {
+  min-height: 42px;
+  padding: 0.65rem 0.7rem;
+  border: 1px solid #cfd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #101426;
+  font: inherit;
+}
+
+.student-finance-onboarding[hidden],
+.student-finance-onboarding-status[hidden],
+#studentFinanceBirthDateField[hidden],
+#studentFinanceCompanyTypeField[hidden],
+.student-payment-current[hidden],
+.student-payment-instructions[hidden] {
+  display: none !important;
+}
+
+.student-finance-panel .student-payment-item-footer .primary-btn,
+.student-finance-panel .student-payment-item-footer .secondary-btn,
+.student-finance-panel .student-finance-heading .secondary-btn,
+.student-finance-panel .student-finance-provider-controls .primary-btn,
+.student-payment-section .student-payment-actions .primary-btn,
+.student-payment-section .student-payment-actions .secondary-btn {
+  width: auto;
+}
+
+@media (max-width: 620px) {
+  .student-finance-panel .student-payment-item-footer .primary-btn,
+  .student-finance-panel .student-payment-item-footer .secondary-btn,
+  .student-payment-section .student-payment-actions .primary-btn,
+  .student-payment-section .student-payment-actions .secondary-btn {
+    width: 100%;
+  }
 }

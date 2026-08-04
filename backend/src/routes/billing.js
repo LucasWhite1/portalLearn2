@@ -5,7 +5,16 @@ const nodemailer = require('nodemailer');
 const db = require('../db');
 const { decryptStoredSecret } = require('../aiConfigCrypto');
 const { processCreditTopupWebhook } = require('../creditTopups');
+const { processStudentSeatUpgradeWebhook } = require('../studentSeatUpgrades');
 const { applyCreditChange, ensurePlatformCreditTables } = require('../platformCredits');
+const { requireAuth } = require('../middleware/auth');
+const {
+  PAYMENT_FAILURE_EVENTS,
+  PAYMENT_PENDING_EVENTS,
+  calculateNextAccessExpiration,
+  ensureBillingAccessSchema,
+  getBillingAccessState
+} = require('../billingAccess');
 const {
   sanitizeText,
   sanitizeEmail,
@@ -79,9 +88,7 @@ const TRIAL_BILLING_TYPES = normalizeCheckoutBillingTypes(
 const sanitizeCpfCnpj = (value) => sanitizeText(value || '', 32).replace(/\D/g, '').slice(0, 14);
 
 const ACTIVE_PAYMENT_EVENTS = new Set(['PAYMENT_CONFIRMED', 'PAYMENT_RECEIVED']);
-const DEACTIVATION_EVENTS = new Set([
-  'PAYMENT_OVERDUE',
-  'PAYMENT_DELETED',
+const ACCESS_REVOCATION_EVENTS = new Set([
   'PAYMENT_REFUNDED',
   'PAYMENT_CHARGEBACK_REQUESTED'
 ]);
@@ -452,6 +459,44 @@ const ensureBillingTables = async () => {
   await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ');
   await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS terms_version TEXT');
   await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS marketing_consent_at TIMESTAMPTZ');
+  await ensureBillingAccessSchema();
+  await db.query(`
+    WITH latest_subscription AS (
+      SELECT DISTINCT ON (user_id)
+             user_id, id, provider_payment_id, plan_code, last_event_type, raw_payload
+        FROM billing_subscriptions
+       WHERE user_id IS NOT NULL
+         AND status = 'ACTIVE'
+       ORDER BY user_id, updated_at DESC, id DESC
+    )
+    UPDATE users u
+       SET billing_access_managed = TRUE,
+           subscription_access_expires_at = NOW() + INTERVAL '1 month',
+           subscription_plan_code = latest.plan_code,
+           subscription_billing_type = COALESCE(NULLIF(UPPER(latest.raw_payload->>'billingType'), ''), u.subscription_billing_type),
+           subscription_payment_status = 'ACTIVE',
+           subscription_last_event_type = COALESCE(latest.last_event_type, 'PAYMENT_CONFIRMED'),
+           subscription_payment_url = COALESCE(NULLIF(latest.raw_payload->>'invoiceUrl', ''), u.subscription_payment_url)
+      FROM latest_subscription latest
+     WHERE u.id = latest.user_id
+       AND u.role = 'professor'
+       AND u.billing_access_managed = FALSE
+  `);
+  await db.query(`
+    INSERT INTO billing_payment_periods (
+      provider_payment_id, user_id, billing_subscription_id,
+      access_started_at, access_expires_at, event_type
+    )
+    SELECT b.provider_payment_id, b.user_id, b.id, NOW(),
+           u.subscription_access_expires_at, 'MIGRATED_ACTIVE_PAYMENT'
+      FROM billing_subscriptions b
+      JOIN users u ON u.id = b.user_id
+     WHERE b.provider_payment_id IS NOT NULL
+       AND b.status = 'ACTIVE'
+       AND u.billing_access_managed = TRUE
+       AND u.subscription_access_expires_at IS NOT NULL
+    ON CONFLICT (provider_payment_id) DO NOTHING
+  `);
   await db.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ');
   await db.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_version TEXT');
   await db.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS marketing_consent_at TIMESTAMPTZ');
@@ -799,16 +844,77 @@ const activateProfessorFromSubscription = async (client, subscription) => {
 
   const includedCreditGrant = Math.max(0, Number(plan.platformCredits || 0) - Number(professor.platform_credits || 0));
   if (professor.role === 'professor' && includedCreditGrant > 0) {
+    const providerPaymentId = sanitizeText(subscription?.provider_payment_id || '', 80);
     const grant = await applyCreditChange({
       userId: professor.id,
       amount: includedCreditGrant,
       operationType: 'plan_included_credits',
-      idempotencyKey: `plan-credits:${subscription.id}`,
+      idempotencyKey: `plan-credits:${providerPaymentId || subscription.id}`,
       referenceType: 'billing_subscription',
       referenceId: subscription.id,
       metadata: { planCode: subscription.plan_code }
     }, client);
     professor.platform_credits = grant.balance;
+  }
+
+  if (professor.role === 'professor') {
+    const providerPaymentId = sanitizeText(subscription?.provider_payment_id || '', 80);
+    if (!providerPaymentId) {
+      throw new Error('A cobranca confirmada nao possui identificador para liberar o periodo de acesso.');
+    }
+    const { rows: lockedUsers } = await client.query(
+      `SELECT subscription_access_expires_at
+         FROM users
+        WHERE id = $1
+        FOR UPDATE`,
+      [professor.id]
+    );
+    const now = new Date();
+    const currentExpiration = lockedUsers[0]?.subscription_access_expires_at || null;
+    const nextExpiration = calculateNextAccessExpiration(currentExpiration, now);
+    const accessStart = currentExpiration && new Date(currentExpiration) > now
+      ? new Date(currentExpiration)
+      : now;
+    const periodResult = await client.query(
+      `INSERT INTO billing_payment_periods (
+         provider_payment_id, user_id, billing_subscription_id,
+         access_started_at, access_expires_at, event_type
+       )
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (provider_payment_id) DO NOTHING
+       RETURNING provider_payment_id`,
+      [providerPaymentId, professor.id, subscription.id, accessStart, nextExpiration, subscription.last_event_type || 'PAYMENT_CONFIRMED']
+    );
+    const payment = subscription.raw_payload || {};
+    const billingType = sanitizeText(payment.billingType || '', 30).toUpperCase() || null;
+    const paymentUrl = sanitizeText(payment.invoiceUrl || '', 500) || null;
+    await client.query(
+      `UPDATE users
+          SET is_active = TRUE,
+              billing_access_managed = TRUE,
+              subscription_access_expires_at = CASE
+                WHEN $2::boolean THEN $3
+                ELSE subscription_access_expires_at
+              END,
+              subscription_plan_code = $4,
+              subscription_billing_type = COALESCE($5, subscription_billing_type),
+              subscription_payment_status = 'ACTIVE',
+              subscription_last_event_type = $6,
+              subscription_payment_url = COALESCE($7, subscription_payment_url)
+        WHERE id = $1`,
+      [
+        professor.id,
+        periodResult.rows.length > 0,
+        nextExpiration,
+        subscription.plan_code,
+        billingType,
+        subscription.last_event_type || 'PAYMENT_CONFIRMED',
+        paymentUrl
+      ]
+    );
+    professor.subscription_access_expires_at = periodResult.rows.length > 0
+      ? nextExpiration
+      : currentExpiration;
   }
 
   await client.query(
@@ -830,25 +936,35 @@ const activateProfessorFromSubscription = async (client, subscription) => {
   };
 };
 
-const deactivateProfessorFromSubscription = async (client, subscription, nextStatus) => {
+const updateProfessorPaymentIssue = async (client, subscription, nextStatus, { revokeAccess = false } = {}) => {
   if (subscription?.user_id) {
     await client.query(
       `UPDATE users
-          SET is_active = FALSE
+          SET subscription_access_expires_at = CASE WHEN $3 THEN NOW() ELSE subscription_access_expires_at END,
+              subscription_payment_status = $2,
+              subscription_last_event_type = $2,
+              subscription_billing_type = COALESCE($4, subscription_billing_type),
+              subscription_payment_url = COALESCE($5, subscription_payment_url)
         WHERE id = $1
           AND role = 'professor'`,
-      [subscription.user_id]
+      [
+        subscription.user_id,
+        nextStatus,
+        revokeAccess,
+        sanitizeText(subscription.raw_payload?.billingType || '', 30).toUpperCase() || null,
+        sanitizeText(subscription.raw_payload?.invoiceUrl || '', 500) || null
+      ]
     );
   }
   await client.query(
     `
       UPDATE billing_subscriptions
          SET status = $1,
-             deactivated_at = NOW(),
-             updated_at = NOW()
+              deactivated_at = CASE WHEN $3 THEN NOW() ELSE deactivated_at END,
+              updated_at = NOW()
        WHERE id = $2
     `,
-    [nextStatus, subscription.id]
+    [nextStatus, subscription.id, revokeAccess]
   );
 };
 
@@ -873,6 +989,15 @@ const processAsaasWebhookEvent = async (eventPayload, requestMeta = {}) => {
       duplicate: Boolean(topupResult.duplicate),
       ignored: Boolean(topupResult.ignored),
       creditTopup: true
+    };
+  }
+  const seatUpgradeResult = await processStudentSeatUpgradeWebhook(eventPayload, fetchAsaasPayment);
+  if (seatUpgradeResult?.handled) {
+    return {
+      processed: Boolean(seatUpgradeResult.processed),
+      duplicate: Boolean(seatUpgradeResult.duplicate),
+      ignored: Boolean(seatUpgradeResult.ignored),
+      studentSeatUpgrade: true
     };
   }
   let eventPlanCode = normalizePlanCodeFromExternalReference(payment.externalReference || '');
@@ -957,8 +1082,10 @@ const processAsaasWebhookEvent = async (eventPayload, requestMeta = {}) => {
 
     if (shouldActivateAccountForEvent(eventType, subscription.plan_code)) {
       activationResult = await activateProfessorFromSubscription(client, subscription);
-    } else if (DEACTIVATION_EVENTS.has(eventType)) {
-      await deactivateProfessorFromSubscription(client, subscription, eventType);
+    } else if (ACCESS_REVOCATION_EVENTS.has(eventType)) {
+      await updateProfessorPaymentIssue(client, subscription, eventType, { revokeAccess: true });
+    } else if (PAYMENT_FAILURE_EVENTS.has(eventType) || PAYMENT_PENDING_EVENTS.has(eventType) || eventType === 'PAYMENT_DELETED') {
+      await updateProfessorPaymentIssue(client, subscription, eventType);
     }
 
     await client.query(
@@ -1169,6 +1296,194 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
     return redirect ? res.status(502).send(errorPayload.message) : res.status(502).json(errorPayload);
   }
 };
+
+const normalizeAsaasPaymentUrl = (value) => {
+  try {
+    const parsed = new URL(String(value || ''));
+    const hostname = parsed.hostname.toLowerCase();
+    return parsed.protocol === 'https:' && (hostname === 'asaas.com' || hostname.endsWith('.asaas.com'))
+      ? parsed.toString()
+      : null;
+  } catch (error) {
+    return null;
+  }
+};
+
+const describeBillingAccess = (access, user, subscription) => {
+  const automaticRenewal = user.subscription_billing_type === 'CREDIT_CARD'
+    && Boolean(subscription?.provider_subscription_id);
+  const descriptions = {
+    PAYMENT_CREDIT_CARD_CAPTURE_REFUSED: 'O cartão não autorizou a cobrança. Isso pode acontecer por limite insuficiente, dados desatualizados ou bloqueio do banco.',
+    PAYMENT_REPROVED_BY_RISK_ANALYSIS: 'O pagamento no cartão não foi aprovado pela análise de segurança. Tente novamente ou escolha Pix.',
+    PAYMENT_OVERDUE: 'A mensalidade está vencida. Regularize a cobrança para evitar ou remover o bloqueio do portal.'
+  };
+  let message = '';
+  if (access.state === 'expired') {
+    message = 'Sua assinatura venceu. Faça o pagamento do próximo mês para continuar usando o portal.';
+  } else if (access.state === 'payment_failed') {
+    message = descriptions[access.lastEvent] || 'Não foi possível confirmar a renovação. Revise o pagamento ou escolha outra forma.';
+  } else if (access.state === 'payment_pending') {
+    message = 'A renovação está sendo processada. O acesso atual continua disponível até a data informada.';
+  } else if (access.state === 'due_soon') {
+    message = automaticRenewal
+      ? `Sua assinatura vence em ${access.daysRemaining} dia(s). A cobrança no cartão será tentada automaticamente.`
+      : `Sua assinatura vence em ${access.daysRemaining} dia(s). Gere o pagamento do próximo mês para não perder o acesso.`;
+  }
+  return { automaticRenewal, message };
+};
+
+const loadProfessorSubscription = async (userId) => {
+  const { rows } = await db.query(
+    `SELECT u.id, u.full_name, u.email, u.role, u.is_active, u.student_limit,
+            u.billing_access_managed, u.subscription_access_expires_at,
+            u.subscription_plan_code, u.subscription_billing_type,
+            u.subscription_payment_status, u.subscription_last_event_type,
+            u.subscription_payment_url,
+            b.id AS billing_subscription_id, b.provider_subscription_id,
+            b.amount, b.plan_code, b.status AS billing_status
+       FROM users u
+       LEFT JOIN LATERAL (
+         SELECT id, provider_subscription_id, amount, plan_code, status
+           FROM billing_subscriptions
+          WHERE user_id = u.id OR LOWER(payer_email) = LOWER(u.email)
+          ORDER BY updated_at DESC, id DESC
+          LIMIT 1
+       ) b ON TRUE
+      WHERE u.id = $1 AND u.role = 'professor'`,
+    [userId]
+  );
+  return rows[0] || null;
+};
+
+router.get('/subscription/status', requireAuth, async (req, res) => {
+  await ensureBillingTables();
+  if (req.user.role !== 'professor') {
+    return res.json({ managed: false, state: 'not_applicable', blocked: false });
+  }
+  const user = await loadProfessorSubscription(req.user.id);
+  if (!user) return res.status(404).json({ message: 'Conta de professor não encontrada.' });
+  const access = getBillingAccessState(user);
+  const details = describeBillingAccess(access, user, user);
+  return res.json({
+    managed: access.managed,
+    state: access.state,
+    blocked: access.blocked,
+    daysRemaining: access.daysRemaining,
+    accessExpiresAt: access.expiration?.toISOString() || null,
+    billingType: user.subscription_billing_type || null,
+    paymentStatus: user.subscription_payment_status || null,
+    lastEventType: user.subscription_last_event_type || null,
+    paymentUrl: normalizeAsaasPaymentUrl(user.subscription_payment_url),
+    automaticRenewal: details.automaticRenewal,
+    message: details.message
+  });
+});
+
+router.post('/renewal-checkout', requireAuth, checkoutRateLimiter, async (req, res) => {
+  await ensureBillingTables();
+  if (!ASAAS_API_KEY) return res.status(503).json({ message: 'O checkout ainda não foi configurado.' });
+  if (req.user.role !== 'professor') return res.status(403).json({ message: 'Renovação disponível apenas para professores.' });
+
+  const user = await loadProfessorSubscription(req.user.id);
+  if (!user?.billing_access_managed) {
+    return res.status(409).json({ message: 'Esta conta não possui uma assinatura gerenciada pelo checkout.' });
+  }
+  const billingType = sanitizeText(req.body?.billingType || 'PIX', 30).toUpperCase();
+  if (!['PIX', 'CREDIT_CARD'].includes(billingType)) {
+    return res.status(400).json({ message: 'Escolha Pix ou cartão de crédito.' });
+  }
+  const access = getBillingAccessState(user);
+  const existingPaymentUrl = normalizeAsaasPaymentUrl(user.subscription_payment_url);
+  if (billingType === 'CREDIT_CARD' && existingPaymentUrl && ['payment_failed', 'expired'].includes(access.state)) {
+    return res.json({ checkoutUrl: existingPaymentUrl, paymentMode: 'existing_card_invoice' });
+  }
+  if (billingType === 'CREDIT_CARD' && user.provider_subscription_id && !['payment_failed', 'expired'].includes(access.state)) {
+    return res.status(409).json({
+      message: 'A renovação deste cartão já é automática. Aguarde a tentativa de cobrança na data de vencimento.'
+    });
+  }
+
+  if (user.provider_subscription_id && ['payment_failed', 'expired'].includes(access.state)) {
+    const cancelResponse = await fetch(`${ASAAS_BASE_URL}/subscriptions/${encodeURIComponent(user.provider_subscription_id)}`, {
+      method: 'DELETE',
+      headers: { accept: 'application/json', 'user-agent': APP_NAME, access_token: ASAAS_API_KEY }
+    });
+    if (!cancelResponse.ok && cancelResponse.status !== 404) {
+      return res.status(502).json({
+        message: billingType === 'PIX'
+          ? 'Não foi possível interromper a cobrança anterior no cartão. Aguarde e tente novamente.'
+          : 'Não foi possível substituir a assinatura anterior no cartão. Tente por Pix.'
+      });
+    }
+  }
+
+  const plan = getPlanConfig(user.plan_code || user.subscription_plan_code || 'pro');
+  const purchase = buildPlanPurchase({ plan, requestedStudentLimit: user.student_limit });
+  if (Number.isFinite(Number(user.amount)) && Number(user.amount) > 0) purchase.amount = Number(user.amount);
+  const externalReference = `checkout:${plan.id}:${crypto.randomUUID()}`;
+  const paymentMode = resolveCheckoutPaymentMode(plan, billingType);
+  const publicBaseUrl = buildPublicBaseUrl(req);
+  const callbackBase = `${publicBaseUrl}/checkout-status.html`;
+  const callbackQuery = `plan=${encodeURIComponent(plan.id)}&renewal=1`;
+  const payload = {
+    billingTypes: paymentMode.billingTypes,
+    chargeTypes: paymentMode.chargeTypes,
+    minutesToExpire: 60,
+    externalReference,
+    items: [{
+      externalReference: plan.id,
+      name: `${plan.label} - renovação`.slice(0, 30),
+      description: `Renovação mensal com acesso para ${purchase.studentLimit} alunos.`.slice(0, 150),
+      quantity: 1,
+      value: purchase.amount
+    }],
+    customerData: { name: user.full_name, email: user.email },
+    description: `${plan.label} - renovação (${user.email})`.slice(0, 200)
+  };
+  if (paymentMode.subscription) payload.subscription = paymentMode.subscription;
+  if (isPublicCallbackUrl(publicBaseUrl)) {
+    payload.callback = {
+      successUrl: `${callbackBase}?status=success&${callbackQuery}`,
+      cancelUrl: `${callbackBase}?status=cancel&${callbackQuery}`,
+      expiredUrl: `${callbackBase}?status=expired&${callbackQuery}`
+    };
+  }
+
+  try {
+    const response = await fetch(`${ASAAS_BASE_URL}/checkouts`, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json',
+        'user-agent': APP_NAME,
+        access_token: ASAAS_API_KEY
+      },
+      body: JSON.stringify(payload)
+    });
+    const responseBody = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const firstError = Array.isArray(responseBody?.errors) ? responseBody.errors[0] : null;
+      return res.status(response.status).json({ message: firstError?.description || 'Não foi possível iniciar a renovação.' });
+    }
+    const checkoutUrl = buildCheckoutUrl(responseBody);
+    if (!checkoutUrl) return res.status(502).json({ message: 'O Asaas não retornou o link de pagamento.' });
+    await persistCheckoutLead({
+      externalReference,
+      planCode: plan.id,
+      payerName: user.full_name,
+      payerEmail: user.email,
+      amount: purchase.amount,
+      studentLimit: purchase.studentLimit,
+      termsAccepted: true,
+      marketingConsent: false,
+      checkoutResponse: responseBody
+    });
+    return res.json({ checkoutUrl, paymentMode: paymentMode.paymentMode });
+  } catch (error) {
+    console.error('Erro ao criar renovação Asaas', error);
+    return res.status(502).json({ message: 'Falha ao conectar com o gateway de pagamento.' });
+  }
+});
 
 router.get('/checkout-session', checkoutRateLimiter, (req, res) => createCheckoutSession(req, res, { redirect: true }));
 router.post('/checkout-session', checkoutRateLimiter, (req, res) => createCheckoutSession(req, res));

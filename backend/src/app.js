@@ -8,6 +8,12 @@ const faceRoutes = require('./routes/face');
 const adminFaceRoutes = require('./routes/adminFace');
 const billingRoutes = require('./routes/billing');
 const chatRoutes = require('./routes/chat');
+const {
+  adminRouter: studentPaymentsAdminRoutes,
+  studentRouter: studentPaymentsStudentRoutes,
+  webhookRouter: studentPaymentsWebhookRoutes,
+  requireStudentPaymentAccess
+} = require('./studentPayments');
 const { requireAuth, requireRole } = require('./middleware/auth');
 
 const app = express();
@@ -104,16 +110,19 @@ app.use(
   requireRole(['admin', 'professor']),
   express.json({ limit: ADMIN_JSON_BODY_LIMIT }),
   adminFaceRoutes,
+  studentPaymentsAdminRoutes,
   adminRoutes
 );
 app.use(
   '/api/student',
   studentJsonParser,
   requireStudentApiAuth,
+  studentPaymentsStudentRoutes,
+  requireStudentPaymentAccess,
   faceRoutes,
   studentRoutes
 );
-app.use('/api/billing', express.json({ limit: '256kb' }), billingRoutes);
+app.use('/api/billing', express.json({ limit: '256kb' }), studentPaymentsWebhookRoutes, billingRoutes);
 app.use('/api/chat', requireAuth, express.json({ limit: '64kb' }), chatRoutes);
 
 app.use((err, req, res, next) => {

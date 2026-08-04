@@ -23,6 +23,7 @@
         <li><button type="button" class="nav-link" data-target="courseList">📚 <span>Conteúdos</span></button></li>
         <li><button type="button" class="nav-link" data-target="courseStoreSection">🛍️ <span>Loja de cursos</span></button></li>
         <li><button type="button" class="nav-link" data-target="portalProgressSection">⭐ <span>Progresso</span></button></li>
+        <li><button type="button" class="nav-link" data-target="studentPaymentSection"><span>Financeiro</span></button></li>
         <li><button type="button" class="nav-link" data-target="notificationPanel">🔔 <span>Notificações</span></button></li>
         <li><button type="button" class="nav-link" data-target="studentSettingsSection">⚙ <span>Configurações</span></button></li>
         <li><button type="button" class="nav-link logout-btn">🚪 <span>Sair da conta</span></button></li>
@@ -87,6 +88,28 @@
         <div class="course-grid course-store-grid" id="courseStoreGrid">
           <p class="muted" style="margin:0;">A vitrine de cursos aparece aqui.</p>
         </div>
+      </section>
+
+      <section class="student-payment-section" id="studentPaymentSection" data-section="studentPaymentSection">
+        <div class="student-payment-head">
+          <div>
+            <div class="badge">MENSALIDADE</div>
+            <h2 id="studentPaymentTitle">Situação financeira</h2>
+            <p id="studentPaymentMessage">Consultando sua mensalidade...</p>
+          </div>
+          <span class="student-payment-status" id="studentPaymentStatus">Consultando</span>
+        </div>
+        <div class="student-payment-current" id="studentPaymentCurrent" hidden>
+          <div><span>Valor</span><strong id="studentPaymentAmount">R$ 0,00</strong></div>
+          <div><span>Vencimento</span><strong id="studentPaymentDueDate">--</strong></div>
+          <div><span>Forma</span><strong id="studentPaymentMethod">--</strong></div>
+        </div>
+        <p class="student-payment-instructions" id="studentPaymentInstructions" hidden></p>
+        <div class="student-payment-actions">
+          <a class="primary-btn hidden" id="studentPaymentPayBtn" href="#" target="_blank" rel="noopener noreferrer">Pagar mensalidade</a>
+          <button class="secondary-btn" id="studentPaymentRefreshBtn" type="button">Verificar pagamento</button>
+        </div>
+        <div class="student-payment-history" id="studentPaymentHistory"></div>
       </section>
 
       <section class="notification-panel" id="notificationPanel" data-section="notificationPanel">

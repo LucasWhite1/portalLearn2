@@ -246,6 +246,82 @@ const tests = [
     }
   },
   {
+    name: 'honor requested block color and keep its text readable',
+    run() {
+      const actions = __test.buildSimpleBlockTextActions({
+        request: 'crie um bloco vermelho com o nome oi',
+        slides: [{ id: 'slide-atual', title: 'Atual', elements: [], backgroundColor: '#ffffff' }],
+        activeSlideId: 'slide-atual',
+        stageSize: { width: 1280, height: 720 }
+      });
+      assert.equal(actions[0].element.content, 'oi');
+      assert.equal(actions[0].element.backgroundColor, '#dc2626');
+      assert.equal(actions[0].element.solidColor, '#dc2626');
+      assert.equal(actions[0].element.textColor, '#ffffff');
+    }
+  },
+  {
+    name: 'update text color inside the selected block instead of creating another block',
+    run() {
+      const actions = __test.buildSimpleElementColorActions({
+        request: 'troque a cor do texto pra preto',
+        slides: [{
+          id: 'slide-atual',
+          elements: [
+            { id: 'bloco-oi', type: 'block', content: 'Oi', backgroundColor: '#dc2626', textColor: '#ffffff' },
+            { id: 'outro-texto', type: 'text', content: 'Outro elemento', textColor: '#ffffff' }
+          ]
+        }],
+        activeSlideId: 'slide-atual',
+        selectedElementId: 'bloco-oi'
+      });
+      assert.equal(actions.length, 1);
+      assert.equal(actions[0].type, 'update_element');
+      assert.equal(actions[0].elementId, 'bloco-oi');
+      assert.equal(actions[0].element.textColor, '#111827');
+      assert.equal(actions[0].element.backgroundColor, undefined);
+    }
+  },
+  {
+    name: 'understand required text color phrasing as an edit to the selected block',
+    run() {
+      const actions = __test.buildSimpleElementColorActions({
+        request: 'o texto tem que tá na cor vermelha',
+        slides: [{
+          id: 'slide-atual',
+          elements: [
+            { id: 'bloco-grande-dia', type: 'block', content: 'grande dia!', backgroundColor: '#facc15', textColor: '#111827' },
+            { id: 'texto-solto', type: 'text', content: 'Outro texto', textColor: '#111827' }
+          ]
+        }],
+        activeSlideId: 'slide-atual',
+        selectedElementId: 'bloco-grande-dia'
+      });
+      assert.equal(actions.length, 1);
+      assert.equal(actions[0].type, 'update_element');
+      assert.equal(actions[0].elementId, 'bloco-grande-dia');
+      assert.equal(actions[0].element.textColor, '#dc2626');
+      assert.equal(actions[0].element.backgroundColor, undefined);
+    }
+  },
+  {
+    name: 'update the latest block color without invoking the model',
+    run() {
+      const actions = __test.buildSimpleElementColorActions({
+        request: 'mude a cor do bloco para vermelho',
+        slides: [{
+          id: 'slide-atual',
+          elements: [{ id: 'bloco-1', type: 'block', content: 'Oi', backgroundColor: '#f97316' }]
+        }],
+        activeSlideId: 'slide-atual'
+      });
+      assert.equal(actions[0].type, 'update_element');
+      assert.equal(actions[0].elementId, 'bloco-1');
+      assert.equal(actions[0].element.backgroundColor, '#dc2626');
+      assert.equal(actions[0].element.textColor, '#ffffff');
+    }
+  },
+  {
     name: 'build deterministic action for simple slide background color prompt',
     run() {
       const actions = __test.buildSimpleBackgroundColorActions({
@@ -1346,7 +1422,7 @@ const tests = [
     }
   },
   {
-    name: 'functional design audit detects low contrast and palette drift',
+    name: 'functional design audit detects low contrast',
     run() {
       const theme = __test.inferDeckVisualTheme('aula criativa');
       const planItem = {

@@ -96,6 +96,41 @@ test('does not accept passwords in create-student action payloads', () => {
   assert.strictEqual(Object.prototype.hasOwnProperty.call(response.actions[0], 'password'), false);
 });
 
+test('normalizes student financial edits inside the scoped context', () => {
+  const action = __test.normalizeAction({
+    type: 'update_student_payment_plan',
+    studentId: STUDENT_ID,
+    amount: 149.9,
+    dueDay: 12,
+    billingType: 'manual',
+    graceDays: 4,
+    autoBlock: true
+  }, context);
+  assert.strictEqual(action.studentId, STUDENT_ID);
+  assert.strictEqual(action.amount, 149.9);
+  assert.strictEqual(action.dueDay, 12);
+  assert.strictEqual(action.billingType, 'MANUAL');
+  assert.strictEqual(action.graceDays, 4);
+  assert.strictEqual(action.autoBlock, true);
+});
+
+test('rejects financial edits for students outside the scoped context', () => {
+  assert.strictEqual(__test.normalizeAction({
+    type: 'mark_student_payment_paid',
+    studentId: OTHER_STUDENT_ID
+  }, context), null);
+});
+
+test('requires confirmation styling for financial mutations', () => {
+  const response = __test.normalizeAssistantResponse({
+    reply: 'Preparei o registro do pagamento.',
+    actions: [{ type: 'mark_student_payment_paid', studentId: STUDENT_ID }]
+  }, context);
+  assert.strictEqual(response.actions.length, 1);
+  assert.strictEqual(response.actions[0].dangerous, true);
+  assert(response.actions[0].summary.includes('João Silva'));
+});
+
 test('summarizes module strengths without exposing raw progress payloads', () => {
   const summary = __test.summarizeReportModules({
     interactive_progress: {

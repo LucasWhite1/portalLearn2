@@ -1,6 +1,7 @@
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const db = require('./db');
+const { ensureStudentPaymentSchema } = require('./studentPayments');
 const {
   sanitizeEmail,
   sanitizePhone,
@@ -27,7 +28,9 @@ const ALLOWED_ACTION_TYPES = new Set([
   'send_notification',
   'send_chat_message',
   'decide_access_request',
-  'mark_report_corrected'
+  'mark_report_corrected',
+  'update_student_payment_plan',
+  'mark_student_payment_paid'
 ]);
 
 const ACTION_LABELS = {
@@ -44,14 +47,18 @@ const ACTION_LABELS = {
   send_notification: 'Enviar notificação',
   send_chat_message: 'Responder no chat do curso',
   decide_access_request: 'Analisar solicitação de acesso',
-  mark_report_corrected: 'Marcar relatório como corrigido'
+  mark_report_corrected: 'Marcar relatório como corrigido',
+  update_student_payment_plan: 'Atualizar financeiro do aluno',
+  mark_student_payment_paid: 'Registrar mensalidade como paga'
 };
 
 const DANGEROUS_ACTIONS = new Set([
   'delete_student',
   'delete_class',
   'delete_course',
-  'remove_enrollments'
+  'remove_enrollments',
+  'update_student_payment_plan',
+  'mark_student_payment_paid'
 ]);
 
 const SECRET_PATTERNS = [
@@ -234,8 +241,9 @@ const summarizeReportModules = (report, modules = []) => {
 
 const loadAssistantContext = async (user) => {
   await ensureAssistantDataTables();
+  await ensureStudentPaymentSchema();
   const params = scopeParams(user);
-  const [studentsResult, coursesResult, classesResult, reportsResult, requestsResult, messagesResult, modulesResult] = await Promise.all([
+  const [studentsResult, coursesResult, classesResult, reportsResult, requestsResult, messagesResult, modulesResult, paymentsResult] = await Promise.all([
     db.query(
       `SELECT u.id, u.full_name, u.email, u.phone, u.class_name, u.is_active,
               COALESCE(jsonb_agg(jsonb_build_object('courseId', c.id, 'courseTitle', c.title))
@@ -314,6 +322,29 @@ const loadAssistantContext = async (user) => {
        ORDER BY m.course_id, m.position NULLS LAST, m.created_at
        LIMIT 1000`,
       params
+    ),
+    db.query(
+      `SELECT student.id AS student_id, student.owner_user_id AS professor_id,
+              professor.full_name AS professor_name,
+              p.id AS plan_id, p.amount, p.due_day, p.billing_type, p.grace_days,
+              p.auto_block, p.status AS plan_status, p.description, p.payment_instructions,
+              p.provider_subscription_id,
+              period.due_date, period.amount AS period_amount, period.status AS payment_status,
+              period.failure_reason, period.paid_at
+         FROM users student
+         LEFT JOIN users professor ON professor.id = student.owner_user_id
+         LEFT JOIN student_payment_plans p ON p.student_user_id = student.id
+         LEFT JOIN LATERAL (
+           SELECT due_date, amount, status, failure_reason, paid_at
+             FROM student_payment_periods
+            WHERE plan_id = p.id
+            ORDER BY due_date DESC
+            LIMIT 1
+         ) period ON TRUE
+        WHERE student.role = 'student'${user.role === 'professor' ? ' AND student.owner_user_id = $1' : ''}
+        ORDER BY student.full_name
+        LIMIT 250`,
+      params
     )
   ]);
 
@@ -336,10 +367,35 @@ const loadAssistantContext = async (user) => {
     progress_event_count: Number(report.progress_event_count || 0),
     modulePerformance: summarizeReportModules(report, modulesByCourse.get(report.course_id) || [])
   }));
+  const paymentByStudentId = new Map(paymentsResult.rows.map((payment) => [payment.student_id, {
+    professorId: payment.professor_id,
+    professorName: payment.professor_name,
+    configured: Boolean(payment.plan_id),
+    planId: payment.plan_id,
+    amount: payment.amount === null ? null : Number(payment.amount),
+    dueDay: payment.due_day === null ? null : Number(payment.due_day),
+    billingType: payment.billing_type,
+    graceDays: payment.grace_days === null ? null : Number(payment.grace_days),
+    autoBlock: payment.auto_block,
+    planStatus: payment.plan_status,
+    description: payment.description,
+    instructions: payment.payment_instructions,
+    automaticReady: Boolean(payment.provider_subscription_id),
+    currentPeriod: payment.due_date ? {
+      dueDate: payment.due_date,
+      amount: Number(payment.period_amount || payment.amount || 0),
+      status: payment.payment_status,
+      failureReason: payment.failure_reason,
+      paidAt: payment.paid_at
+    } : null
+  }]));
   return {
     generatedAt: new Date().toISOString(),
     role: user.role,
-    students: studentsResult.rows,
+    students: studentsResult.rows.map((student) => ({
+      ...student,
+      financial: paymentByStudentId.get(student.id) || { configured: false }
+    })),
     courses: coursesResult.rows,
     classes: classesResult.rows,
     reports,
@@ -374,6 +430,33 @@ const normalizeAction = (rawAction, context) => {
       action.isActive = typeof rawAction.isActive === 'boolean' ? rawAction.isActive : null;
       if (!action.fullName && !action.phone && !action.className && action.isActive === null) return null;
     }
+  }
+
+  if (type === 'update_student_payment_plan') {
+    action.studentId = validId(rawAction.studentId);
+    if (!findById(context.students, action.studentId)) return null;
+    const amount = Number(rawAction.amount);
+    const dueDay = Number.parseInt(rawAction.dueDay, 10);
+    const graceDays = Number.parseInt(rawAction.graceDays, 10);
+    action.amount = Number.isFinite(amount) && amount > 0 ? Number(amount.toFixed(2)) : null;
+    action.dueDay = Number.isInteger(dueDay) && dueDay >= 1 && dueDay <= 28 ? dueDay : null;
+    action.billingType = ['MANUAL', 'PIX', 'BOLETO', 'CREDIT_CARD'].includes(String(rawAction.billingType || '').toUpperCase())
+      ? String(rawAction.billingType).toUpperCase()
+      : null;
+    action.graceDays = Number.isInteger(graceDays) && graceDays >= 0 && graceDays <= 60 ? graceDays : null;
+    action.autoBlock = typeof rawAction.autoBlock === 'boolean' ? rawAction.autoBlock : null;
+    action.status = ['ACTIVE', 'PAUSED'].includes(String(rawAction.status || '').toUpperCase())
+      ? String(rawAction.status).toUpperCase()
+      : null;
+    action.description = sanitizeText(rawAction.description || '', 240) || null;
+    action.instructions = sanitizeText(rawAction.instructions || '', 800) || null;
+    if ([action.amount, action.dueDay, action.billingType, action.graceDays, action.autoBlock,
+      action.status, action.description, action.instructions].every((value) => value === null)) return null;
+  }
+
+  if (type === 'mark_student_payment_paid') {
+    action.studentId = validId(rawAction.studentId);
+    if (!findById(context.students, action.studentId)) return null;
   }
 
   if (['create_class'].includes(type)) {
@@ -470,7 +553,9 @@ const actionSummary = (action, context) => {
     send_notification: `${action.targetType === 'all' ? 'Todos' : action.targetValue}: ${action.message}`,
     send_chat_message: `${course?.title || action.courseId}: ${action.message}`,
     decide_access_request: action.decision === 'approved' ? 'Aprovar solicitação' : 'Recusar solicitação',
-    mark_report_corrected: `${student?.full_name || action.studentId} em ${course?.title || action.courseId}`
+    mark_report_corrected: `${student?.full_name || action.studentId} em ${course?.title || action.courseId}`,
+    update_student_payment_plan: `${student?.full_name || action.studentId}${action.amount ? ` · ${action.amount.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}` : ''}`,
+    mark_student_payment_paid: student?.full_name || action.studentId
   };
   return `${ACTION_LABELS[action.type]}: ${details[action.type] || ''}`.slice(0, 600);
 };
@@ -577,6 +662,33 @@ const ensureOwnedClassName = async (client, user, className) => {
   return cleanName;
 };
 
+const dateOnly = (value) => {
+  const date = new Date(value);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+};
+
+const ensureAssistantPaymentPeriod = async (client, plan) => {
+  if (!plan || plan.status !== 'ACTIVE') return null;
+  const now = new Date();
+  const buildDueDate = (year, month) => new Date(year, month, Math.min(Number(plan.due_day), new Date(year, month + 1, 0).getDate()), 12);
+  let dueDate = buildDueDate(now.getFullYear(), now.getMonth());
+  const createdAt = plan.created_at ? new Date(plan.created_at) : null;
+  if (createdAt && Number.isFinite(createdAt.getTime()) && dueDate < createdAt) {
+    dueDate = buildDueDate(now.getFullYear(), now.getMonth() + 1);
+  }
+  const { rows } = await client.query(
+    `INSERT INTO student_payment_periods (plan_id, due_date, amount, status, billing_type)
+     VALUES ($1,$2,$3,'PENDING',$4)
+     ON CONFLICT (plan_id, due_date) DO UPDATE SET
+       amount = CASE WHEN student_payment_periods.status = 'PENDING' THEN EXCLUDED.amount ELSE student_payment_periods.amount END,
+       billing_type = CASE WHEN student_payment_periods.status = 'PENDING' THEN EXCLUDED.billing_type ELSE student_payment_periods.billing_type END,
+       updated_at = NOW()
+     RETURNING *`,
+    [plan.id, dateOnly(dueDate), plan.amount, plan.billing_type]
+  );
+  return rows[0];
+};
+
 const executeAction = async (client, user, action) => {
   if (action.type === 'create_student') {
     const duplicate = await client.query('SELECT id FROM users WHERE email = $1', [action.email]);
@@ -585,7 +697,7 @@ const executeAction = async (client, user, action) => {
       const quota = await client.query(
         `SELECT u.student_limit, COUNT(s.id)::int AS student_count
          FROM users u
-         LEFT JOIN users s ON s.owner_user_id = u.id AND s.role = 'student'
+         LEFT JOIN users s ON s.owner_user_id = u.id AND s.role = 'student' AND s.is_active = TRUE
          WHERE u.id = $1 AND u.role = 'professor' AND u.is_active = TRUE
          GROUP BY u.id`,
         [user.id]
@@ -641,6 +753,80 @@ const executeAction = async (client, user, action) => {
     );
     if (!deleteResult.rowCount) throw new Error('Aluno não encontrado ou fora da sua conta.');
     return 'Aluno excluído.';
+  }
+
+  if (action.type === 'update_student_payment_plan') {
+    await assertOwnedStudent(client, user, action.studentId);
+    const { rows: studentRows } = await client.query(
+      `SELECT id, owner_user_id FROM users WHERE id=$1 AND role='student' FOR UPDATE`,
+      [action.studentId]
+    );
+    const professorId = user.role === 'professor' ? user.id : studentRows[0]?.owner_user_id;
+    if (!professorId) throw new Error('Este aluno não está vinculado a um professor responsável pela cobrança.');
+    const { rows: planRows } = await client.query(
+      `SELECT * FROM student_payment_plans WHERE professor_user_id=$1 AND student_user_id=$2 FOR UPDATE`,
+      [professorId, action.studentId]
+    );
+    const current = planRows[0] || null;
+    const next = {
+      amount: action.amount ?? (current ? Number(current.amount) : null),
+      dueDay: action.dueDay ?? (current ? Number(current.due_day) : null),
+      billingType: action.billingType ?? current?.billing_type ?? 'MANUAL',
+      graceDays: action.graceDays ?? (current ? Number(current.grace_days) : 5),
+      autoBlock: action.autoBlock ?? (current ? Boolean(current.auto_block) : true),
+      status: action.status ?? current?.status ?? 'ACTIVE',
+      description: action.description ?? current?.description ?? 'Mensalidade de aulas',
+      instructions: action.instructions ?? current?.payment_instructions ?? null
+    };
+    if (!Number.isFinite(next.amount) || next.amount <= 0 || !Number.isInteger(next.dueDay)) {
+      throw new Error('Para criar uma mensalidade, informe o valor e o dia de vencimento.');
+    }
+    const changesProviderDefinition = Boolean(current) && (
+      Number(current.amount) !== next.amount
+      || Number(current.due_day) !== next.dueDay
+      || current.billing_type !== next.billingType
+      || current.status !== next.status
+    );
+    if (next.billingType !== 'MANUAL' && (!current?.provider_subscription_id || changesProviderDefinition)) {
+      throw new Error('Esta alteração exige recriar ou sincronizar a cobrança no Asaas. Faça essa mudança na área Financeiro dos alunos.');
+    }
+    const { rows } = await client.query(
+      `INSERT INTO student_payment_plans (
+         professor_user_id,student_user_id,amount,due_day,billing_type,grace_days,
+         auto_block,status,description,payment_instructions
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       ON CONFLICT (professor_user_id,student_user_id) DO UPDATE SET
+         amount=EXCLUDED.amount,due_day=EXCLUDED.due_day,billing_type=EXCLUDED.billing_type,
+         grace_days=EXCLUDED.grace_days,auto_block=EXCLUDED.auto_block,status=EXCLUDED.status,
+         description=EXCLUDED.description,payment_instructions=EXCLUDED.payment_instructions,updated_at=NOW()
+       RETURNING *`,
+      [professorId, action.studentId, next.amount, next.dueDay, next.billingType, next.graceDays,
+        next.autoBlock, next.status, next.description, next.instructions]
+    );
+    await ensureAssistantPaymentPeriod(client, rows[0]);
+    return `Financeiro do aluno atualizado: ${next.amount.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}, vencimento no dia ${next.dueDay}.`;
+  }
+
+  if (action.type === 'mark_student_payment_paid') {
+    await assertOwnedStudent(client, user, action.studentId);
+    const params = [action.studentId];
+    let ownerClause = '';
+    if (user.role === 'professor') {
+      params.push(user.id);
+      ownerClause = ' AND p.professor_user_id=$2';
+    }
+    const { rows } = await client.query(
+      `SELECT p.* FROM student_payment_plans p WHERE p.student_user_id=$1${ownerClause} FOR UPDATE`,
+      params
+    );
+    if (!rows.length) throw new Error('O aluno ainda não possui mensalidade configurada.');
+    const period = await ensureAssistantPaymentPeriod(client, rows[0]);
+    if (!period) throw new Error('O plano financeiro está pausado e não possui período atual para pagamento.');
+    await client.query(
+      `UPDATE student_payment_periods SET status='PAID',paid_at=NOW(),failure_reason=NULL,updated_at=NOW() WHERE id=$1`,
+      [period.id]
+    );
+    return 'Mensalidade atual registrada como paga.';
   }
 
   if (action.type === 'create_class') {
@@ -888,6 +1074,7 @@ module.exports = {
     actionSummary,
     cleanHistory,
     containsSensitiveRequest,
+    executeAction,
     normalizeAction,
     normalizeAssistantResponse,
     redactSecrets,

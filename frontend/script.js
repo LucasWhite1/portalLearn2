@@ -22,6 +22,9 @@ let cachedCourses = [];
 let cachedStoreCourses = [];
 let adminStudentsCache = [];
 let adminProfessorsCache = [];
+let adminProfessorFinancialSummary = null;
+let studentFinanceCache = { settings: null, summary: null, students: [] };
+let globalStudentFinanceCache = { summary: null, professors: [] };
 let adminCoursesCache = [];
 let adminAccessRequestsCache = [];
 let adminClassesCache = [];
@@ -40,6 +43,9 @@ let adminChatPollTimer = null;
 let adminReplyTarget = null;
 let adminCurrentChatMessages = [];
 let currentStudentSignupLink = '';
+let pendingSeatUpgradeStudentId = '';
+let studentSeatUpgradeUnitPrice = 9.70;
+let studentSeatUpgradeCurrentLimit = 0;
 let liveStagePollTimer = null;
 let mobileSidenavCleanup = null;
 let selectedNotificationAttachment = null;
@@ -79,6 +85,12 @@ const formatStorageAmount = (bytes) => {
     return `${(numeric / (1024 * 1024 * 1024)).toLocaleString('pt-BR', { maximumFractionDigits: 2 })} GB`;
   }
   return `${(numeric / (1024 * 1024)).toLocaleString('pt-BR', { maximumFractionDigits: 2 })} MB`;
+};
+
+const formatPaymentDate = (value) => {
+  if (!value) return 'Não informado';
+  const date = new Date(`${String(value).slice(0, 10)}T12:00:00`);
+  return Number.isFinite(date.getTime()) ? date.toLocaleDateString('pt-BR') : 'Não informado';
 };
 
 const escapeHtml = (value) =>
@@ -1025,6 +1037,9 @@ const authorizedFetch = async (path, options = {}) => {
   if (response.status === 401) {
     redirectToLogin();
     throw new Error('Sessão expirada');
+  }
+  if (response.status === 402) {
+    window.dispatchEvent(new CustomEvent('subscription-access-required'));
   }
   return response;
 };
@@ -2151,6 +2166,16 @@ const initLogin = () => {
       if (!response.ok) {
         throw new Error(data?.message || 'Não foi possível concluir seu cadastro.');
       }
+      if (data?.approvalRequired) {
+        signupForm.reset();
+        if (signupTitle) signupTitle.textContent = 'Cadastro enviado';
+        if (signupSubtitle) signupSubtitle.textContent = data.message || 'Aguarde a autorização do professor para entrar.';
+        feedback.textContent = data.message || 'Aguarde a autorização do professor para entrar.';
+        feedback.style.color = '#16835d';
+        feedback.style.display = 'block';
+        if (signupSubmitBtn) signupSubmitBtn.disabled = true;
+        return;
+      }
       persistAuthSession(data);
       redirectAfterLogin(data.user.role);
     } catch (error) {
@@ -2158,7 +2183,7 @@ const initLogin = () => {
       feedback.style.color = '#ff6b6b';
       feedback.style.display = 'block';
     } finally {
-      if (signupSubmitBtn) signupSubmitBtn.disabled = false;
+      if (signupSubmitBtn && signupTitle?.textContent !== 'Cadastro enviado') signupSubmitBtn.disabled = false;
     }
   });
 
@@ -2200,10 +2225,16 @@ const initLogin = () => {
         }
         if (signupTitle) signupTitle.textContent = 'Criar conta de aluno';
         if (signupSubtitle) {
+          const amountLabel = Number(data?.monthlyAmount) > 0
+            ? ` Mensalidade: ${Number(data.monthlyAmount).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}.`
+            : '';
+          const approvalLabel = data?.approvalMode === 'AUTOMATIC'
+            ? ' A entrada será automática se houver vaga.'
+            : ' O professor autorizará sua entrada.';
           signupSubtitle.textContent =
             data?.acceptingRegistrations === false
               ? data?.message || 'Este link não está aceitando novos cadastros no momento.'
-              : `Cadastro vinculado a ${data?.professorName || 'seu professor'}.`;
+              : `Cadastro vinculado a ${data?.professorName || 'seu professor'}.${amountLabel}${approvalLabel}`;
         }
         if (data?.acceptingRegistrations === false) {
           feedback.textContent = data?.message || 'Este link não está aceitando novos cadastros no momento.';
@@ -2352,7 +2383,10 @@ const loadAdminStudents = async () => {
   try {
     const response = await authorizedFetch('/api/admin/students');
     const students = await response.json();
-    adminStudentsCache = students;
+    adminStudentsCache = students.filter((student) => (
+      student.is_active === true
+      && !['PENDING', 'REJECTED'].includes(String(student.signup_approval_status || '').toUpperCase())
+    ));
     syncFaceManualGrantOptions();
     const tbody = document.querySelector('#studentsTable tbody');
     const headerRow = document.querySelector('#studentsTable thead tr');
@@ -2378,11 +2412,25 @@ const loadAdminStudents = async () => {
     students.forEach((student) => {
       const ownerName = student.owner_name || (student.owner_user_id ? 'Professor não encontrado' : 'Seu aluno / sem professor');
       const ownerEmail = student.owner_email || '';
+      const approvalStatus = String(student.signup_approval_status || '').toUpperCase();
+      const isPendingApproval = approvalStatus === 'PENDING';
+      const isRejected = approvalStatus === 'REJECTED';
+      const statusLabel = isPendingApproval
+        ? 'Aguardando aprovação'
+        : isRejected
+          ? 'Cadastro recusado'
+          : student.is_active ? 'Ativo' : 'Bloqueado';
+      const statusBackground = isPendingApproval ? '#fff7df' : isRejected || !student.is_active ? '#fff0f0' : 'rgba(22, 131, 93, 0.12)';
+      const statusColor = isPendingApproval ? '#9a6700' : isRejected || !student.is_active ? '#c63838' : '#16835d';
+      const signupPrice = Number(student.signup_monthly_amount) > 0
+        ? `${Number(student.signup_monthly_amount).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}/mês`
+        : '';
       const row = document.createElement('tr');
       row.innerHTML = `
         <td data-label="Aluno">
           <strong>${escapeHtml(student.full_name)}</strong>
           <span style="font-size:0.85rem;color:#8b92b1;">${escapeHtml(student.email)}</span>
+          ${signupPrice ? `<span style="font-size:0.82rem;color:#16835d;">${escapeHtml(signupPrice)}</span>` : ''}
         </td>
         <td data-label="Turma">${escapeHtml(student.class_name || 'Sem turma')}</td>
         ${showOwnerColumn ? `
@@ -2393,15 +2441,20 @@ const loadAdminStudents = async () => {
         ` : ''}
         <td data-label="Telefone">${escapeHtml(student.phone || '—')}</td>
         <td data-label="Status">
-          <span class="toggle-pill" style="background:${student.is_active ? 'rgba(109, 99, 255, 0.15)' : '#fff0f0'}; color:${student.is_active ? '#6d63ff' : '#ff6b6b'};">
-            ${student.is_active ? 'Ativo' : 'Bloqueado'}
+          <span class="toggle-pill" style="background:${statusBackground}; color:${statusColor};">
+            ${statusLabel}
           </span>
         </td>
         <td data-label="Ações">
           <div class="table-actions">
-            <button data-student-id="${student.id}" data-action="toggle" class="primary-btn" style="width:auto; padding:0.4rem 0.9rem; font-size:0.85rem;">
-              ${student.is_active ? 'Bloquear' : 'Autorizar'}
-            </button>
+            ${isPendingApproval || isRejected ? `
+              <button data-student-id="${student.id}" data-action="approve" class="primary-btn" style="width:auto; padding:0.4rem 0.9rem; font-size:0.85rem;">Aprovar</button>
+            ` : `
+              <button data-student-id="${student.id}" data-action="toggle" class="primary-btn" style="width:auto; padding:0.4rem 0.9rem; font-size:0.85rem;">
+                ${student.is_active ? 'Bloquear' : 'Autorizar'}
+              </button>
+            `}
+            ${isPendingApproval ? `<button data-student-id="${student.id}" data-action="reject" class="secondary-btn small" type="button">Recusar</button>` : ''}
             <button data-student-id="${student.id}" data-action="delete" class="secondary-btn small" type="button">
               Excluir
             </button>
@@ -2651,7 +2704,7 @@ const renderStudentSignupLinkPanel = () => {
         : role === 'admin'
           ? 'O admin pode gerar alunos por link sem limite configurado neste painel.'
           : 'Sem limite de alunos configurado no momento.';
-    status.textContent = `Por segurança, o link completo aparece no momento da geração. Se precisar de outro, gere novamente e o anterior será invalidado. ${limitLabel}`;
+    status.textContent = `Configure a cobrança e gere o link reutilizável. Uma nova geração substitui apenas o endereço anterior. ${limitLabel}`;
     status.style.color = '#8b92b1';
   }
 };
@@ -2666,8 +2719,17 @@ const generateStudentSignupLink = async () => {
   }
   generateBtn.disabled = true;
   try {
+    const monthlyAmount = Number(document.getElementById('studentSignupMonthlyAmount')?.value || 0);
+    const dueDay = Number.parseInt(document.getElementById('studentSignupDueDay')?.value || '', 10);
+    const graceDays = Number.parseInt(document.getElementById('studentSignupGraceDays')?.value || '', 10);
+    const billingType = document.getElementById('studentSignupBillingType')?.value || 'PIX';
+    const autoApprove = Boolean(document.getElementById('studentSignupAutoApprove')?.checked);
+    if (!Number.isFinite(monthlyAmount) || monthlyAmount <= 0) {
+      throw new Error('Informe o valor mensal que será cobrado dos alunos.');
+    }
     const response = await authorizedFetch('/api/admin/student-signup-link', {
-      method: 'POST'
+      method: 'POST',
+      body: JSON.stringify({ monthlyAmount, dueDay, graceDays, billingType, autoApprove, autoBlock: true })
     });
     const payload = await response.json().catch(() => null);
     if (!response.ok) {
@@ -2680,7 +2742,10 @@ const generateStudentSignupLink = async () => {
       Number.isFinite(Number(payload?.studentLimit)) && Number(payload?.studentLimit) > 0
         ? `Uso atual: ${Number(payload?.studentCount || 0)}/${Number(payload.studentLimit)} alunos.`
         : 'Sem limite de alunos configurado.';
-    status.textContent = `Link gerado com sucesso. Compartilhe com o aluno. Se você gerar outro, este será invalidado. ${limitText}`;
+    const approvalText = payload?.autoApprove
+      ? 'Cadastros serão aprovados automaticamente enquanto houver vaga.'
+      : 'Cada cadastro ficará aguardando sua autorização.';
+    status.textContent = `Link reutilizável gerado. ${approvalText} ${limitText}`;
     status.style.color = '#50fa7b';
   } catch (error) {
     status.textContent = error.message || 'Não foi possível gerar o link de cadastro.';
@@ -2712,23 +2777,748 @@ const copyStudentSignupLink = async () => {
   }
 };
 
+const formatBrl = (value) => Number(value || 0).toLocaleString('pt-BR', {
+  style: 'currency',
+  currency: 'BRL'
+});
+
+const syncStudentSeatUpgradePrice = () => {
+  const input = document.getElementById('studentSeatUpgradeQuantity');
+  const detail = document.getElementById('studentSeatUpgradePriceDetail');
+  const total = document.getElementById('studentSeatUpgradeTotal');
+  if (!input || !detail || !total) return;
+  const quantity = Math.min(500, Math.max(1, Math.round(Number(input.value) || 1)));
+  input.value = String(quantity);
+  detail.textContent = `${quantity} vaga${quantity > 1 ? 's' : ''} × ${formatBrl(studentSeatUpgradeUnitPrice)} por mês`;
+  total.textContent = formatBrl(quantity * studentSeatUpgradeUnitPrice);
+};
+
+const openStudentSeatUpgradeModal = (studentId, payload = {}) => {
+  const modal = document.getElementById('studentSeatUpgradeModal');
+  if (!modal || getCurrentUserRole() !== 'professor') {
+    alert(payload?.message || 'O limite de alunos foi atingido.');
+    return;
+  }
+  pendingSeatUpgradeStudentId = studentId || '';
+  studentSeatUpgradeUnitPrice = Number(payload?.seatUpgrade?.unitPrice) || 9.70;
+  studentSeatUpgradeCurrentLimit = Number(payload?.quotaStatus?.studentLimit) || 0;
+  const summary = document.getElementById('studentSeatUpgradeSummary');
+  const input = document.getElementById('studentSeatUpgradeQuantity');
+  const status = document.getElementById('studentSeatUpgradeStatus');
+  if (summary) {
+    summary.textContent = `As ${studentSeatUpgradeCurrentLimit} vagas do plano estão ocupadas. Escolha quantas deseja adicionar.`;
+  }
+  if (input) input.value = '1';
+  if (status) status.textContent = '';
+  syncStudentSeatUpgradePrice();
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+};
+
+const closeStudentSeatUpgradeModal = () => {
+  const modal = document.getElementById('studentSeatUpgradeModal');
+  modal?.classList.add('hidden');
+  modal?.setAttribute('aria-hidden', 'true');
+};
+
+const approveStudentAfterSeatUpgrade = async () => {
+  const studentId = localStorage.getItem('curso-platform-pending-seat-approval') || '';
+  if (!studentId) return false;
+  const response = await authorizedFetch(`/api/admin/students/${encodeURIComponent(studentId)}/signup-approval`, {
+    method: 'PUT',
+    body: JSON.stringify({ decision: 'APPROVED' })
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.message || 'As vagas foram liberadas, mas não foi possível aprovar o aluno automaticamente.');
+  localStorage.removeItem('curso-platform-pending-seat-approval');
+  return true;
+};
+
+const resumeStudentSeatUpgrade = async () => {
+  const params = new URLSearchParams(window.location.search);
+  const callbackStatus = params.get('seatUpgrade');
+  const orderId = params.get('order');
+  if (!callbackStatus || !orderId || getCurrentUserRole() !== 'professor') return;
+  openStudentSeatUpgradeModal(localStorage.getItem('curso-platform-pending-seat-approval') || '', {
+    quotaStatus: { studentLimit: Number(getCurrentUserData().studentLimit) || 0 },
+    seatUpgrade: { unitPrice: 9.70 }
+  });
+  const status = document.getElementById('studentSeatUpgradeStatus');
+  if (callbackStatus !== 'success') {
+    if (status) status.textContent = callbackStatus === 'expired'
+      ? 'O checkout expirou. Escolha a quantidade e tente novamente.'
+      : 'O pagamento foi cancelado e nenhuma vaga foi adicionada.';
+    return;
+  }
+  if (status) status.textContent = 'Pagamento recebido. Aguardando a confirmação segura do Asaas...';
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const response = await authorizedFetch(`/api/admin/student-seats/orders/${encodeURIComponent(orderId)}`);
+    const order = await response.json().catch(() => ({}));
+    if (response.ok && order.status === 'PAID') {
+      setCurrentUserData({ studentLimit: order.targetStudentLimit });
+      let approved = false;
+      try {
+        approved = await approveStudentAfterSeatUpgrade();
+      } catch (error) {
+        if (status) status.textContent = error.message;
+        await loadAdminStudents();
+        return;
+      }
+      if (status) status.textContent = approved
+        ? `Novo limite: ${order.targetStudentLimit} alunos. O cadastro pendente foi aprovado.`
+        : `Novo limite liberado: ${order.targetStudentLimit} alunos.`;
+      params.delete('seatUpgrade');
+      params.delete('order');
+      history.replaceState({}, '', `${location.pathname}${params.size ? `?${params}` : ''}${location.hash}`);
+      await loadAdminStudents();
+      return;
+    }
+    if (['CANCELED', 'EXPIRED', 'REFUNDED', 'CHARGEBACK'].includes(order.status)) {
+      if (status) status.textContent = `A compra de vagas não foi concluída (${order.status}).`;
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+  if (status) status.textContent = 'A confirmação ainda está sendo processada. O limite será atualizado pelo webhook.';
+};
+
+const initStudentSeatUpgrade = () => {
+  const modal = document.getElementById('studentSeatUpgradeModal');
+  modal?.addEventListener('click', async (event) => {
+    if (event.target.closest('[data-seat-upgrade-close]')) {
+      closeStudentSeatUpgradeModal();
+      return;
+    }
+    const stepButton = event.target.closest('[data-seat-step]');
+    if (stepButton) {
+      const input = document.getElementById('studentSeatUpgradeQuantity');
+      if (input) input.value = String((Number(input.value) || 1) + Number(stepButton.dataset.seatStep || 0));
+      syncStudentSeatUpgradePrice();
+    }
+  });
+  document.getElementById('studentSeatUpgradeQuantity')?.addEventListener('input', syncStudentSeatUpgradePrice);
+  document.getElementById('studentSeatUpgradeCheckoutBtn')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    const status = document.getElementById('studentSeatUpgradeStatus');
+    const quantity = Number(document.getElementById('studentSeatUpgradeQuantity')?.value || 1);
+    button.disabled = true;
+    if (status) status.textContent = 'Criando checkout seguro...';
+    try {
+      const response = await authorizedFetch('/api/admin/student-seats/checkout', {
+        method: 'POST',
+        body: JSON.stringify({ quantity })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.order?.checkoutUrl) throw new Error(payload.message || 'Não foi possível criar o checkout.');
+      if (pendingSeatUpgradeStudentId) {
+        localStorage.setItem('curso-platform-pending-seat-approval', pendingSeatUpgradeStudentId);
+      }
+      window.location.assign(payload.order.checkoutUrl);
+    } catch (error) {
+      button.disabled = false;
+      if (status) status.textContent = error.message;
+    }
+  });
+  void resumeStudentSeatUpgrade();
+};
+
+const STUDENT_PAYMENT_STATES = {
+  pending: { label: 'Pendente', tone: 'neutral' },
+  due_soon: { label: 'Vence em breve', tone: 'warning' },
+  overdue: { label: 'Em atraso', tone: 'warning' },
+  blocked: { label: 'Acesso restrito', tone: 'danger' },
+  failed: { label: 'Pagamento recusado', tone: 'danger' },
+  chargeback: { label: 'Chargeback', tone: 'danger' },
+  refunded: { label: 'Estornado', tone: 'warning' },
+  canceled: { label: 'Cancelado', tone: 'neutral' },
+  paid: { label: 'Pago', tone: 'success' },
+  paused: { label: 'Pausado', tone: 'neutral' },
+  unconfigured: { label: 'Sem mensalidade', tone: 'neutral' }
+};
+
+const getStudentPaymentState = (student = {}) => student.payment?.state || (student.plan ? 'pending' : 'unconfigured');
+
+const renderStudentFinanceMetrics = (summary = {}) => {
+  const host = document.getElementById('studentFinanceMetrics');
+  if (!host) return;
+  host.innerHTML = `
+    <div><span>Recebido no mês</span><strong>${formatBrl(summary.received)}</strong></div>
+    <div><span>A receber</span><strong>${formatBrl(summary.pending)}</strong></div>
+    <div><span>Em atraso</span><strong>${Number(summary.overdue || 0)}</strong></div>
+    <div><span>Acessos restritos</span><strong>${Number(summary.blocked || 0)}</strong></div>
+  `;
+};
+
+const renderStudentFinanceProvider = (settings = {}) => {
+  const mode = document.getElementById('studentFinanceProviderMode');
+  const status = document.getElementById('studentFinanceProviderStatus');
+  const onboardingForm = document.getElementById('studentFinanceSubaccountForm');
+  const onboardingStatus = document.getElementById('studentFinanceOnboardingStatus');
+  const saveModeButton = document.getElementById('saveStudentFinanceProviderBtn');
+  const hasSubaccount = Boolean(settings.accountId && settings.hasApiKey);
+  if (mode) mode.value = settings.mode === 'ASAAS' ? 'ASAAS' : 'MANUAL';
+  if (onboardingForm) onboardingForm.hidden = mode?.value !== 'ASAAS' || hasSubaccount;
+  if (onboardingStatus) onboardingStatus.hidden = !hasSubaccount;
+  if (saveModeButton) {
+    saveModeButton.hidden = mode?.value === 'ASAAS' && !hasSubaccount;
+    saveModeButton.textContent = mode?.value === 'ASAAS' ? 'Usar esta subconta' : 'Usar controle manual';
+  }
+  if (status) {
+    status.textContent = settings.mode === 'ASAAS' && hasSubaccount
+      ? settings.status === 'APPROVED'
+        ? `Subconta aprovada${settings.accountName ? `: ${settings.accountName}` : ''}. Os recebimentos automáticos estão liberados.`
+        : `Subconta criada${settings.accountName ? ` para ${settings.accountName}` : ''}. Conclua a análise cadastral para liberar cobranças automáticas.`
+      : settings.mode === 'ASAAS'
+        ? 'Preencha o cadastro abaixo para criar sua subconta sem sair do portal.'
+        : 'No modo manual, você confirma os pagamentos recebidos fora do portal.';
+  }
+  renderStudentFinanceOnboarding(settings.onboarding || {}, settings.status || 'DISCONNECTED');
+};
+
+const getAsaasStatusLabel = (value) => ({
+  APPROVED: 'Aprovado', PENDING: 'Pendente', AWAITING_APPROVAL: 'Em análise', REJECTED: 'Reprovado'
+})[String(value || '').toUpperCase()] || 'Pendente';
+
+const renderStudentFinanceOnboarding = (onboarding = {}, providerStatus = 'PENDING') => {
+  const host = document.getElementById('studentFinanceAccountStatuses');
+  const documentsHost = document.getElementById('studentFinanceDocumentList');
+  const message = document.getElementById('studentFinanceOnboardingMessage');
+  const general = String(onboarding.general || providerStatus || 'PENDING').toUpperCase();
+  if (message) {
+    message.textContent = general === 'APPROVED'
+      ? 'Cadastro aprovado. A subconta já pode receber as mensalidades automáticas.'
+      : general === 'REJECTED'
+        ? 'O cadastro precisa de correção. Confira os documentos solicitados.'
+        : general === 'AWAITING_APPROVAL'
+          ? 'Os dados foram enviados e estão em análise pelo Asaas.'
+          : 'Existem etapas cadastrais pendentes antes da liberação dos recebimentos.';
+  }
+  if (host) {
+    const statuses = [
+      ['Geral', general],
+      ['Dados cadastrais', onboarding.commercialInfo],
+      ['Documentos', onboarding.documentation],
+      ['Conta bancária', onboarding.bankAccountInfo]
+    ];
+    host.innerHTML = statuses.map(([label, value]) => {
+      const normalized = String(value || 'PENDING').toUpperCase();
+      const tone = normalized === 'APPROVED' ? 'success' : normalized === 'REJECTED' ? 'danger' : 'warning';
+      return `<div><span>${escapeHtml(label)}</span><strong class="financial-status ${tone}">${escapeHtml(getAsaasStatusLabel(normalized))}</strong></div>`;
+    }).join('');
+  }
+  if (documentsHost) {
+    const documents = Array.isArray(onboarding.documents) ? onboarding.documents : [];
+    documentsHost.innerHTML = documents.length
+      ? documents.map((document) => `
+          <div class="student-finance-document">
+            <div><strong>${escapeHtml(document.title || 'Documento')}</strong><span>${escapeHtml(document.description || getAsaasStatusLabel(document.status))}</span></div>
+            ${document.onboardingUrl
+              ? `<a class="secondary-btn small" href="${escapeAttribute(document.onboardingUrl)}" target="_blank" rel="noopener noreferrer">Enviar documento</a>`
+              : `<span class="financial-status ${document.status === 'APPROVED' ? 'success' : 'warning'}">${escapeHtml(getAsaasStatusLabel(document.status))}</span>`}
+          </div>
+        `).join('')
+      : '<p class="muted" style="margin:0;">Atualize a análise para consultar os documentos solicitados.</p>';
+  }
+};
+
+const refreshStudentFinanceOnboarding = async () => {
+  const response = await authorizedFetch('/api/admin/student-payments/subaccount/onboarding');
+  const payload = await parseJsonSafely(response);
+  if (!response.ok) throw new Error(payload?.message || 'Não foi possível consultar a análise cadastral.');
+  if (!payload.ready) {
+    const message = document.getElementById('studentFinanceOnboardingMessage');
+    if (message) message.textContent = `Aguarde ${Number(payload.waitSeconds || 1)} segundos para a validação inicial do Asaas.`;
+    return payload;
+  }
+  studentFinanceCache.settings = {
+    ...(studentFinanceCache.settings || {}),
+    status: payload.status,
+    onboarding: payload.onboarding
+  };
+  renderStudentFinanceProvider(studentFinanceCache.settings);
+  return payload;
+};
+
+const getFilteredStudentPayments = () => {
+  const search = String(document.getElementById('studentFinanceSearch')?.value || '').trim().toLowerCase();
+  const filter = document.getElementById('studentFinanceFilter')?.value || 'all';
+  return (studentFinanceCache.students || []).filter((student) => {
+    const matchesSearch = !search || `${student.fullName} ${student.email} ${student.className || ''}`.toLowerCase().includes(search);
+    const state = getStudentPaymentState(student);
+    return matchesSearch && (filter === 'all' || state === filter);
+  });
+};
+
+const renderStudentPaymentList = () => {
+  const host = document.getElementById('studentPaymentList');
+  if (!host) return;
+  const students = getFilteredStudentPayments();
+  if (!students.length) {
+    host.innerHTML = '<p class="financial-empty-state">Nenhum aluno encontrado para estes filtros.</p>';
+    return;
+  }
+  host.innerHTML = students.map((student) => {
+    const plan = student.plan || {};
+    const payment = student.payment || {};
+    const stateKey = getStudentPaymentState(student);
+    const state = STUDENT_PAYMENT_STATES[stateKey] || STUDENT_PAYMENT_STATES.pending;
+    const automaticPaymentsReady = studentFinanceCache.settings?.mode === 'ASAAS'
+      && ['APPROVED', 'CONNECTED'].includes(studentFinanceCache.settings?.status);
+    const disableAutomatic = !automaticPaymentsReady && (!plan.billingType || plan.billingType === 'MANUAL');
+    return `
+      <article class="student-payment-item" data-payment-state="${escapeAttribute(stateKey)}">
+        <div class="student-payment-item-head">
+          <div>
+            <h3>${escapeHtml(student.fullName)}</h3>
+            <p>${escapeHtml(student.email)}${student.className ? ` · ${escapeHtml(student.className)}` : ''}</p>
+          </div>
+          <span class="financial-status ${escapeAttribute(state.tone)}">${escapeHtml(state.label)}</span>
+        </div>
+        <div class="student-payment-form" data-student-payment-form="${escapeAttribute(student.id)}">
+          <label><span>Mensalidade</span><input type="number" min="0.01" step="0.01" data-payment-field="amount" value="${escapeAttribute(plan.amount || '')}" placeholder="97,00" /></label>
+          <label><span>Vencimento</span><input type="number" min="1" max="28" step="1" data-payment-field="dueDay" value="${escapeAttribute(plan.dueDay || 10)}" /></label>
+          <label><span>Forma</span><select data-payment-field="billingType">
+            <option value="MANUAL" ${!plan.billingType || plan.billingType === 'MANUAL' ? 'selected' : ''}>Manual / combinado</option>
+            <option value="PIX" ${plan.billingType === 'PIX' ? 'selected' : ''} ${disableAutomatic ? 'disabled' : ''}>Pix pelo Asaas</option>
+            <option value="BOLETO" ${plan.billingType === 'BOLETO' ? 'selected' : ''} ${disableAutomatic ? 'disabled' : ''}>Boleto pelo Asaas</option>
+            <option value="CREDIT_CARD" ${plan.billingType === 'CREDIT_CARD' ? 'selected' : ''} ${disableAutomatic ? 'disabled' : ''}>Cartão recorrente</option>
+          </select></label>
+          <label><span>Tolerância</span><input type="number" min="0" max="60" step="1" data-payment-field="graceDays" value="${escapeAttribute(plan.graceDays ?? 5)}" /></label>
+          <label><span>Situação</span><select data-payment-field="status">
+            <option value="ACTIVE" ${plan.status !== 'PAUSED' ? 'selected' : ''}>Ativa</option>
+            <option value="PAUSED" ${plan.status === 'PAUSED' ? 'selected' : ''}>Pausada</option>
+          </select></label>
+          <label class="student-payment-switch"><input type="checkbox" data-payment-field="autoBlock" ${plan.autoBlock !== false ? 'checked' : ''} /><span>Restringir acesso após a tolerância</span></label>
+          <label class="student-payment-wide"><span>Instruções para pagamento manual</span><input type="text" maxlength="800" data-payment-field="instructions" value="${escapeAttribute(plan.instructions || '')}" placeholder="Ex: Pix na chave informada pelo professor" /></label>
+        </div>
+        <div class="student-payment-item-footer">
+          <span>${payment.dueDate ? `Vencimento atual: <strong>${formatPaymentDate(payment.dueDate)}</strong>` : 'Configure a primeira mensalidade.'}</span>
+          <div>
+            ${plan.id && stateKey !== 'paid' ? `<button class="secondary-btn small" type="button" data-payment-mark-paid="${escapeAttribute(plan.id)}">Marcar como pago</button>` : ''}
+            ${plan.id && plan.billingType !== 'MANUAL' ? `<button class="secondary-btn small" type="button" data-payment-sync="${escapeAttribute(plan.id)}">Sincronizar</button>` : ''}
+            <button class="primary-btn small" type="button" data-payment-save="${escapeAttribute(student.id)}">Salvar mensalidade</button>
+          </div>
+        </div>
+      </article>
+    `;
+  }).join('');
+};
+
+const loadStudentFinance = async () => {
+  const response = await authorizedFetch('/api/admin/student-payments/overview');
+  const payload = await parseJsonSafely(response);
+  if (!response.ok) throw new Error(payload?.message || 'Não foi possível carregar as mensalidades.');
+  studentFinanceCache = {
+    settings: payload?.settings || {},
+    summary: payload?.summary || {},
+    students: Array.isArray(payload?.students) ? payload.students : []
+  };
+  renderStudentFinanceProvider(studentFinanceCache.settings);
+  renderStudentFinanceMetrics(studentFinanceCache.summary);
+  renderStudentPaymentList();
+};
+
+const saveStudentPaymentPlan = async (studentId, button) => {
+  const form = document.querySelector(`[data-student-payment-form="${CSS.escape(studentId)}"]`);
+  if (!form) return;
+  const value = (name) => form.querySelector(`[data-payment-field="${name}"]`);
+  button.disabled = true;
+  try {
+    const response = await authorizedFetch(`/api/admin/student-payments/plans/${encodeURIComponent(studentId)}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        amount: Number(value('amount')?.value),
+        dueDay: Number(value('dueDay')?.value),
+        billingType: value('billingType')?.value,
+        graceDays: Number(value('graceDays')?.value),
+        status: value('status')?.value,
+        autoBlock: value('autoBlock')?.checked === true,
+        instructions: value('instructions')?.value
+      })
+    });
+    const payload = await parseJsonSafely(response);
+    if (!response.ok) throw new Error(payload?.message || 'Não foi possível salvar a mensalidade.');
+    await loadStudentFinance();
+  } catch (error) {
+    alert(error.message);
+    button.disabled = false;
+  }
+};
+
+const initStudentFinanceAdmin = () => {
+  document.getElementById('studentFinanceProviderMode')?.addEventListener('change', (event) => {
+    renderStudentFinanceProvider({
+      ...(studentFinanceCache.settings || {}),
+      mode: event.target.value
+    });
+  });
+  document.getElementById('saveStudentFinanceProviderBtn')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const response = await authorizedFetch('/api/admin/student-payments/settings', {
+        method: 'PUT',
+        body: JSON.stringify({
+          mode: document.getElementById('studentFinanceProviderMode')?.value
+        })
+      });
+      const payload = await parseJsonSafely(response);
+      if (!response.ok) throw new Error(payload?.message || 'Não foi possível salvar a conexão.');
+      await loadStudentFinance();
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      button.disabled = false;
+    }
+  });
+  const currentUser = getCurrentUserData();
+  const accountName = document.getElementById('studentFinanceAccountName');
+  const accountEmail = document.getElementById('studentFinanceAccountEmail');
+  if (accountName && !accountName.value) accountName.value = currentUser.fullName || '';
+  if (accountEmail && !accountEmail.value) accountEmail.value = currentUser.email || '';
+  const syncPersonFields = () => {
+    const documentDigits = String(document.getElementById('studentFinanceCpfCnpj')?.value || '').replace(/\D/g, '');
+    const isCompany = documentDigits.length > 11;
+    const birthField = document.getElementById('studentFinanceBirthDateField');
+    const companyField = document.getElementById('studentFinanceCompanyTypeField');
+    if (birthField) birthField.hidden = isCompany;
+    if (companyField) companyField.hidden = !isCompany;
+  };
+  document.getElementById('studentFinanceCpfCnpj')?.addEventListener('input', syncPersonFields);
+  document.getElementById('studentFinanceSubaccountForm')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = document.getElementById('createStudentFinanceSubaccountBtn');
+    const feedback = document.getElementById('studentFinanceSubaccountFeedback');
+    if (button) button.disabled = true;
+    if (feedback) feedback.textContent = 'Criando a subconta com segurança...';
+    try {
+      const response = await authorizedFetch('/api/admin/student-payments/subaccount', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: document.getElementById('studentFinanceAccountName')?.value,
+          email: document.getElementById('studentFinanceAccountEmail')?.value,
+          cpfCnpj: document.getElementById('studentFinanceCpfCnpj')?.value,
+          birthDate: document.getElementById('studentFinanceBirthDate')?.value,
+          companyType: document.getElementById('studentFinanceCompanyType')?.value,
+          mobilePhone: document.getElementById('studentFinanceMobilePhone')?.value,
+          incomeValue: Number(document.getElementById('studentFinanceIncomeValue')?.value),
+          postalCode: document.getElementById('studentFinancePostalCode')?.value,
+          address: document.getElementById('studentFinanceAddress')?.value,
+          addressNumber: document.getElementById('studentFinanceAddressNumber')?.value,
+          complement: document.getElementById('studentFinanceComplement')?.value,
+          province: document.getElementById('studentFinanceProvince')?.value,
+          consentAccepted: document.getElementById('studentFinanceConsent')?.checked === true
+        })
+      });
+      const payload = await parseJsonSafely(response);
+      if (!response.ok) throw new Error(payload?.message || 'Não foi possível criar a subconta.');
+      if (feedback) feedback.textContent = 'Subconta criada. Aguarde alguns segundos e atualize a análise cadastral.';
+      await loadStudentFinance();
+    } catch (error) {
+      if (feedback) feedback.textContent = error.message;
+      if (button) button.disabled = false;
+    }
+  });
+  document.getElementById('refreshStudentFinanceOnboardingBtn')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      await refreshStudentFinanceOnboarding();
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      button.disabled = false;
+    }
+  });
+  document.getElementById('refreshStudentFinanceBtn')?.addEventListener('click', () => loadStudentFinance().catch((error) => alert(error.message)));
+  document.getElementById('studentFinanceSearch')?.addEventListener('input', renderStudentPaymentList);
+  document.getElementById('studentFinanceFilter')?.addEventListener('change', renderStudentPaymentList);
+  document.getElementById('studentPaymentList')?.addEventListener('click', async (event) => {
+    const save = event.target.closest('[data-payment-save]');
+    if (save) return saveStudentPaymentPlan(save.dataset.paymentSave, save);
+    const markPaid = event.target.closest('[data-payment-mark-paid]');
+    const sync = event.target.closest('[data-payment-sync]');
+    const action = markPaid || sync;
+    if (!action) return;
+    action.disabled = true;
+    try {
+      const planId = markPaid?.dataset.paymentMarkPaid || sync?.dataset.paymentSync;
+      const endpoint = markPaid ? 'mark-paid' : 'sync';
+      const response = await authorizedFetch(`/api/admin/student-payments/plans/${encodeURIComponent(planId)}/${endpoint}`, { method: 'POST' });
+      const payload = await parseJsonSafely(response);
+      if (!response.ok) throw new Error(payload?.message || 'Não foi possível atualizar o pagamento.');
+      await loadStudentFinance();
+    } catch (error) {
+      alert(error.message);
+      action.disabled = false;
+    }
+  });
+  loadStudentFinance().catch((error) => {
+    const host = document.getElementById('studentPaymentList');
+    if (host) host.innerHTML = `<p class="financial-empty-state">${escapeHtml(error.message)}</p>`;
+  });
+};
+
+const getGlobalStudentFinanceFilters = () => ({
+  search: String(document.getElementById('globalStudentFinanceSearch')?.value || '').trim().toLowerCase(),
+  professorId: document.getElementById('globalStudentFinanceProfessor')?.value || 'all',
+  status: document.getElementById('globalStudentFinanceStatus')?.value || 'all'
+});
+
+const renderGlobalStudentFinanceSummary = () => {
+  const summary = globalStudentFinanceCache.summary || {};
+  const values = {
+    globalStudentMonthlyExpected: formatBrl(summary.monthlyExpected),
+    globalStudentReceived: formatBrl(summary.received),
+    globalStudentPending: formatBrl(summary.pending),
+    globalStudentConfigured: Number(summary.configured || 0),
+    globalStudentOverdue: Number(summary.overdue || 0),
+    globalStudentBlocked: Number(summary.blocked || 0)
+  };
+  Object.entries(values).forEach(([id, value]) => {
+    const node = document.getElementById(id);
+    if (node) node.textContent = value;
+  });
+};
+
+const renderGlobalStudentFinance = () => {
+  const host = document.getElementById('globalProfessorStudentFinanceList');
+  if (!host) return;
+  const filters = getGlobalStudentFinanceFilters();
+  let visibleStudents = 0;
+  const groups = (globalStudentFinanceCache.professors || []).map((professor) => {
+    if (filters.professorId !== 'all' && professor.id !== filters.professorId) return null;
+    const students = (professor.students || []).filter((student) => {
+      const state = getStudentPaymentState(student);
+      const haystack = `${professor.name} ${professor.email} ${student.fullName} ${student.email} ${student.className || ''}`.toLowerCase();
+      return (!filters.search || haystack.includes(filters.search))
+        && (filters.status === 'all' || state === filters.status);
+    });
+    if (!students.length) return null;
+    visibleStudents += students.length;
+    const summary = professor.summary || {};
+    const modeLabel = professor.paymentSettings?.mode === 'ASAAS'
+      ? `Asaas · ${getAsaasStatusLabel(professor.paymentSettings.status)}`
+      : 'Cobrança manual';
+    return `
+      <details class="global-professor-finance-group" open>
+        <summary>
+          <span><strong>${escapeHtml(professor.name)}</strong><small>${escapeHtml(professor.email)} · ${escapeHtml(modeLabel)}</small></span>
+          <span class="global-professor-finance-totals">
+            <small>${students.length} aluno${students.length === 1 ? '' : 's'}</small>
+            <strong>${formatBrl(summary.monthlyExpected)} / mês</strong>
+            ${summary.overdue ? `<em>${Number(summary.overdue)} em atraso</em>` : ''}
+          </span>
+        </summary>
+        <div class="global-student-finance-table-wrap">
+          <table class="table admin-responsive-table global-student-finance-table">
+            <thead><tr><th>Aluno</th><th>Plano</th><th>Vencimento</th><th>Pagamento</th><th>Situação</th><th>Conta</th></tr></thead>
+            <tbody>
+              ${students.map((student) => {
+                const stateKey = getStudentPaymentState(student);
+                const state = STUDENT_PAYMENT_STATES[stateKey] || STUDENT_PAYMENT_STATES.pending;
+                const plan = student.plan;
+                const payment = student.payment || {};
+                const billingType = plan?.billingType === 'CREDIT_CARD'
+                  ? `Cartão${plan.automaticReady ? ' · automático' : ''}`
+                  : plan?.billingType === 'PIX' ? 'Pix' : plan?.billingType === 'BOLETO' ? 'Boleto' : plan ? 'Manual' : 'Não configurado';
+                return `<tr>
+                  <td data-label="Aluno"><strong>${escapeHtml(student.fullName)}</strong><small>${escapeHtml(student.email)}${student.className ? ` · ${escapeHtml(student.className)}` : ''}</small></td>
+                  <td data-label="Plano"><strong>${plan ? formatBrl(plan.amount) : '—'}</strong><small>${plan ? `Dia ${Number(plan.dueDay || 1)} · ${escapeHtml(plan.status || '')}` : 'Sem mensalidade'}</small></td>
+                  <td data-label="Vencimento"><strong>${payment.dueDate ? formatPaymentDate(payment.dueDate) : '—'}</strong><small>${payment.paidAt ? `Pago em ${formatFinancialDate(payment.paidAt)}` : payment.failureReason ? escapeHtml(payment.failureReason) : ''}</small></td>
+                  <td data-label="Pagamento"><strong>${escapeHtml(billingType)}</strong><small>${payment.amount ? formatBrl(payment.amount) : ''}</small></td>
+                  <td data-label="Situação"><span class="financial-status is-${escapeAttribute(state.tone)}">${escapeHtml(state.label)}</span></td>
+                  <td data-label="Conta"><span class="financial-status is-${student.accountActive ? 'success' : 'danger'}">${student.accountActive ? 'Ativa' : 'Bloqueada'}</span></td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </details>`;
+  }).filter(Boolean);
+  const resultCount = document.getElementById('globalStudentFinanceResultCount');
+  if (resultCount) resultCount.textContent = `${visibleStudents} aluno${visibleStudents === 1 ? '' : 's'}`;
+  host.innerHTML = groups.length
+    ? groups.join('')
+    : '<p class="financial-empty-state">Nenhum aluno encontrado para estes filtros.</p>';
+};
+
+const loadGlobalStudentFinance = async () => {
+  const section = document.getElementById('globalStudentFinanceSection');
+  if (!section || !isGlobalAdminUser()) return;
+  try {
+    const response = await authorizedFetch('/api/admin/student-payments/global-overview');
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.message || 'Não foi possível carregar o financeiro dos alunos.');
+    globalStudentFinanceCache = {
+      summary: payload.summary || {},
+      professors: Array.isArray(payload.professors) ? payload.professors : []
+    };
+    const select = document.getElementById('globalStudentFinanceProfessor');
+    if (select) {
+      const selected = select.value || 'all';
+      select.innerHTML = '<option value="all">Todos os professores</option>'
+        + globalStudentFinanceCache.professors.map((professor) => `<option value="${escapeAttribute(professor.id)}">${escapeHtml(professor.name)}</option>`).join('');
+      if (Array.from(select.options).some((option) => option.value === selected)) select.value = selected;
+    }
+    renderGlobalStudentFinanceSummary();
+    renderGlobalStudentFinance();
+    const updatedAt = document.getElementById('globalStudentFinanceUpdatedAt');
+    if (updatedAt) updatedAt.textContent = `Atualizado em ${new Date(payload.generatedAt || Date.now()).toLocaleString('pt-BR')}`;
+  } catch (error) {
+    const host = document.getElementById('globalProfessorStudentFinanceList');
+    if (host) host.innerHTML = `<p class="financial-empty-state">${escapeHtml(error.message)}</p>`;
+  }
+};
+
+const initGlobalStudentFinance = () => {
+  ['globalStudentFinanceSearch', 'globalStudentFinanceProfessor', 'globalStudentFinanceStatus'].forEach((id) => {
+    const eventName = id === 'globalStudentFinanceSearch' ? 'input' : 'change';
+    document.getElementById(id)?.addEventListener(eventName, renderGlobalStudentFinance);
+  });
+  void loadGlobalStudentFinance();
+};
+
+const formatFinancialDate = (value) => {
+  const date = value ? new Date(value) : null;
+  if (!date || !Number.isFinite(date.getTime())) return 'Sem vencimento';
+  return date.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' });
+};
+
+const getProfessorFinancialStatus = (professor = {}) => {
+  if (!professor.is_active) return { key: 'blocked', label: 'Bloqueado', tone: 'danger' };
+  if (!professor.billing?.managed) return { key: 'manual', label: 'Sem assinatura', tone: 'neutral' };
+  const states = {
+    active: { label: 'Em dia', tone: 'success' },
+    due_soon: { label: 'Vence em breve', tone: 'warning' },
+    payment_pending: { label: 'Pagamento pendente', tone: 'info' },
+    payment_failed: { label: 'Falha no pagamento', tone: 'danger' },
+    expired: { label: 'Vencida', tone: 'danger' }
+  };
+  return { key: professor.billing.state, ...(states[professor.billing.state] || states.active) };
+};
+
+const getPaymentEventLabel = (eventType) => ({
+  PAYMENT_CONFIRMED: 'Pagamento confirmado',
+  PAYMENT_RECEIVED: 'Pagamento recebido',
+  PAYMENT_CREATED: 'Cobrança criada',
+  PAYMENT_UPDATED: 'Cobrança atualizada',
+  PAYMENT_OVERDUE: 'Cobrança vencida',
+  PAYMENT_CREDIT_CARD_CAPTURE_REFUSED: 'Cartão recusado',
+  PAYMENT_REPROVED_BY_RISK_ANALYSIS: 'Reprovado na análise',
+  PAYMENT_AWAITING_RISK_ANALYSIS: 'Em análise de risco',
+  PAYMENT_REFUNDED: 'Pagamento estornado',
+  PAYMENT_CHARGEBACK_REQUESTED: 'Chargeback solicitado',
+  PAYMENT_DELETED: 'Cobrança removida'
+}[eventType] || (eventType ? String(eventType).replaceAll('_', ' ') : 'Sem evento financeiro'));
+
+const getPaymentStatusLabel = (paymentStatus) => ({
+  ACTIVE: 'Ativa',
+  CONFIRMED: 'Confirmado',
+  RECEIVED: 'Recebido',
+  PENDING: 'Pendente',
+  OVERDUE: 'Vencido',
+  REFUNDED: 'Estornado',
+  REFUSED: 'Recusado',
+  FAILED: 'Falhou',
+  INACTIVE: 'Inativa'
+}[String(paymentStatus || '').toUpperCase()] || (paymentStatus ? String(paymentStatus).replaceAll('_', ' ') : 'Sem cobrança'));
+
+const renderProfessorFinancialSummary = () => {
+  const summary = adminProfessorFinancialSummary || {};
+  const values = {
+    financeEstimatedMrr: formatBrl(summary.projectedMonthlyRevenue),
+    financeReceivedMonth: formatBrl(summary.receivedThisMonth),
+    financeActiveSubscriptions: Number(summary.activeSubscriptions || 0),
+    financeDueSoon: Number(summary.dueSoon || 0),
+    financeAtRisk: Number(summary.atRisk || 0),
+    financeTotalStudents: Number(summary.totalStudents || 0)
+  };
+  Object.entries(values).forEach(([id, value]) => {
+    const node = document.getElementById(id);
+    if (node) node.textContent = value;
+  });
+  const breakdown = document.getElementById('professorFinancialBreakdown');
+  if (breakdown) {
+    const plans = Array.isArray(summary.planBreakdown) ? summary.planBreakdown : [];
+    breakdown.innerHTML = `
+      <span><strong>${Number(summary.pixSubscriptions || 0)}</strong> Pix</span>
+      <span><strong>${Number(summary.cardSubscriptions || 0)}</strong> cartão</span>
+      <span><strong>${Number(summary.managedSubscriptions || 0)}</strong> assinaturas gerenciadas</span>
+      ${plans.map((item) => `<span><strong>${Number(item.professors || 0)}</strong> ${escapeHtml(item.plan)} · ${formatBrl(item.monthlyRevenue)}</span>`).join('')}
+    `;
+  }
+};
+
+const getFilteredAdminProfessors = () => {
+  const search = String(document.getElementById('professorFinanceSearch')?.value || '').trim().toLowerCase();
+  const statusFilter = document.getElementById('professorFinanceStatus')?.value || 'all';
+  const billingFilter = document.getElementById('professorFinanceBillingType')?.value || 'all';
+  const rank = { blocked: 0, expired: 1, payment_failed: 2, due_soon: 3, payment_pending: 4, active: 5, manual: 6 };
+  return adminProfessorsCache
+    .filter((professor) => {
+      const status = getProfessorFinancialStatus(professor);
+      const matchesSearch = !search || `${professor.full_name} ${professor.email}`.toLowerCase().includes(search);
+      const matchesStatus = statusFilter === 'all' || status.key === statusFilter;
+      const paymentType = professor.billing?.managed ? professor.billing.billingType : 'manual';
+      const matchesBilling = billingFilter === 'all' || paymentType === billingFilter;
+      return matchesSearch && matchesStatus && matchesBilling;
+    })
+    .sort((a, b) => {
+      const statusDifference = (rank[getProfessorFinancialStatus(a).key] ?? 9) - (rank[getProfessorFinancialStatus(b).key] ?? 9);
+      if (statusDifference) return statusDifference;
+      const aExpiration = new Date(a.billing?.accessExpiresAt || '9999-12-31').getTime();
+      const bExpiration = new Date(b.billing?.accessExpiresAt || '9999-12-31').getTime();
+      return aExpiration - bExpiration || a.full_name.localeCompare(b.full_name, 'pt-BR');
+    });
+};
+
 const renderAdminProfessors = () => {
   const list = document.getElementById('adminProfessorList');
   if (!list) return;
-  if (!adminProfessorsCache.length) {
-    list.innerHTML = '<p style="margin:0; color:#8b92b1;">Nenhum professor cadastrado.</p>';
+  const professors = getFilteredAdminProfessors();
+  const count = document.getElementById('professorFinanceResultCount');
+  if (count) count.textContent = `${professors.length} ${professors.length === 1 ? 'professor' : 'professores'}`;
+  if (!professors.length) {
+    list.innerHTML = '<p class="financial-empty-state">Nenhum professor encontrado para estes filtros.</p>';
     return;
   }
-  list.innerHTML = adminProfessorsCache
-    .map((professor) => `
-      <div class="module-list-item">
-        <h4>${escapeHtml(professor.full_name)}</h4>
-        <p>${escapeHtml(professor.email)}${professor.phone ? ` • ${escapeHtml(professor.phone)}` : ''}</p>
-        <p>Créditos da plataforma: <strong>${Number(professor.platformCredits || 0)}</strong></p>
-        <p>Alunos: <strong>${Number(professor.studentCount || 0)}</strong>${professor.studentLimit ? ` / ${Number(professor.studentLimit)}` : ' / sem limite'}</p>
-        <p>Armazenamento: <strong>${formatStorageAmount(professor.storageUsedBytes || 0)}</strong>${professor.storageLimitBytes ? ` / ${formatStorageAmount(professor.storageLimitBytes)}` : ' / sem limite'}</p>
-        <p>Status: ${professor.is_active ? 'Ativo' : 'Bloqueado'}</p>
-        <div class="form-actions" style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
+  list.innerHTML = professors
+    .map((professor) => {
+      const status = getProfessorFinancialStatus(professor);
+      const billing = professor.billing || {};
+      const paymentLabel = billing.billingType === 'PIX'
+        ? 'Pix'
+        : billing.billingType === 'CREDIT_CARD'
+          ? `Cartão${billing.automaticRenewal ? ' · automático' : ''}`
+          : 'Cadastro manual';
+      const expirationDetail = billing.managed
+        ? `${formatFinancialDate(billing.accessExpiresAt)}${Number.isFinite(Number(billing.daysRemaining)) ? ` · ${Number(billing.daysRemaining)} dia(s)` : ''}`
+        : 'Não controlado pelo financeiro';
+      return `
+      <article class="professor-financial-item" data-financial-state="${escapeAttribute(status.key)}">
+        <div class="professor-financial-head">
+          <div>
+            <h3>${escapeHtml(professor.full_name)}</h3>
+            <p>${escapeHtml(professor.email)}${professor.phone ? ` · ${escapeHtml(professor.phone)}` : ''}</p>
+          </div>
+          <span class="financial-status is-${status.tone}">${escapeHtml(status.label)}</span>
+        </div>
+        <div class="professor-financial-data">
+          <div><span>Plano</span><strong>${escapeHtml(billing.planLabel || 'Cadastro manual')}</strong></div>
+          <div><span>Mensalidade</span><strong>${billing.amount === null || billing.amount === undefined ? '—' : formatBrl(billing.amount)}</strong></div>
+          <div><span>Próximo vencimento</span><strong>${escapeHtml(expirationDetail)}</strong></div>
+          <div><span>Pagamento</span><strong>${escapeHtml(paymentLabel)}</strong></div>
+          <div><span>Status no gateway</span><strong>${escapeHtml(getPaymentStatusLabel(billing.paymentStatus))}</strong></div>
+          <div><span>Último evento</span><strong>${escapeHtml(getPaymentEventLabel(billing.lastEventType))}</strong></div>
+          <div><span>Desde</span><strong>${formatFinancialDate(billing.activatedAt || professor.created_at)}</strong></div>
+        </div>
+        <div class="professor-capacity-strip">
+          <span>Créditos <strong>${Number(professor.platformCredits || 0)}</strong></span>
+          <span>Alunos <strong>${Number(professor.studentCount || 0)}${professor.studentLimit ? ` / ${Number(professor.studentLimit)}` : ''}</strong></span>
+          <span>Armazenamento <strong>${formatStorageAmount(professor.storageUsedBytes || 0)}${professor.storageLimitBytes ? ` / ${formatStorageAmount(professor.storageLimitBytes)}` : ''}</strong></span>
+        </div>
+        <div class="professor-management-controls">
           <input type="number" min="0.5" step="0.5" value="10" data-professor-credit-input="${professor.id}" style="max-width:120px;" />
           <input type="number" min="1" step="1" value="${professor.studentLimit || ''}" data-professor-student-limit="${professor.id}" placeholder="Limite alunos" style="max-width:140px;" />
           <input type="number" min="0" step="0.1" value="${professor.storageLimitBytes ? (Number(professor.storageLimitBytes) / (1024 * 1024 * 1024)).toFixed(2) : ''}" data-professor-storage-limit="${professor.id}" placeholder="Limite GB" style="max-width:140px;" />
@@ -2741,8 +3531,9 @@ const renderAdminProfessors = () => {
             Excluir
           </button>
         </div>
-      </div>
-    `)
+      </article>
+    `;
+    })
     .join('');
 };
 
@@ -2755,9 +3546,14 @@ const loadAdminProfessors = async () => {
     return;
   }
   try {
-    const response = await authorizedFetch('/api/admin/professors');
-    const professors = await response.json();
-    adminProfessorsCache = Array.isArray(professors) ? professors : [];
+    const response = await authorizedFetch('/api/admin/professors/financial-overview');
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload?.message || 'Não foi possível carregar o financeiro.');
+    adminProfessorsCache = Array.isArray(payload?.professors) ? payload.professors : [];
+    adminProfessorFinancialSummary = payload?.summary || null;
+    renderProfessorFinancialSummary();
+    const updatedAt = document.getElementById('professorFinanceUpdatedAt');
+    if (updatedAt) updatedAt.textContent = `Atualizado em ${new Date(payload.generatedAt || Date.now()).toLocaleString('pt-BR')}`;
     renderAdminProfessors();
   } catch (error) {
     const list = document.getElementById('adminProfessorList');
@@ -3788,7 +4584,210 @@ const setupFaceReviewActions = () => {
   });
 };
 
-const initAdminPage = () => {
+const formatSubscriptionDate = (value) => {
+  const date = value ? new Date(value) : null;
+  if (!date || !Number.isFinite(date.getTime())) return '';
+  return date.toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
+};
+
+const renderSubscriptionAccess = (status = {}) => {
+  const notice = document.getElementById('subscriptionAccessNotice');
+  if (!notice) return false;
+  if (!status.managed || status.state === 'active' || status.state === 'not_applicable') {
+    notice.classList.add('hidden');
+    document.body.classList.remove('subscription-blocked');
+    return false;
+  }
+
+  notice.classList.remove('hidden');
+  notice.dataset.state = status.state || 'due_soon';
+  const blocked = status.blocked === true;
+  document.body.classList.toggle('subscription-blocked', blocked);
+  const title = document.getElementById('subscriptionAccessTitle');
+  const message = document.getElementById('subscriptionAccessMessage');
+  const date = document.getElementById('subscriptionAccessDate');
+  const label = document.getElementById('subscriptionAccessLabel');
+  const pixButton = document.getElementById('subscriptionPayPix');
+  const cardButton = document.getElementById('subscriptionPayCard');
+
+  if (title) {
+    title.textContent = blocked
+      ? 'Seu acesso precisa ser renovado'
+      : status.state === 'payment_failed'
+        ? 'Não conseguimos renovar seu pagamento'
+        : status.state === 'payment_pending'
+          ? 'Pagamento em processamento'
+          : 'Sua assinatura vence em breve';
+  }
+  if (label) label.textContent = blocked ? 'Acesso restrito' : 'Assinatura mensal';
+  if (message) message.textContent = status.message || 'Confira a situação da sua assinatura.';
+  if (date) {
+    const formatted = formatSubscriptionDate(status.accessExpiresAt);
+    date.textContent = formatted ? `Acesso contratado até ${formatted}.` : '';
+  }
+
+  const canTakePayment = ['due_soon', 'payment_failed', 'expired'].includes(status.state);
+  const cardAutomaticAndHealthy = status.automaticRenewal && status.state === 'due_soon';
+  if (pixButton) {
+    pixButton.classList.toggle('hidden', !canTakePayment || cardAutomaticAndHealthy);
+    pixButton.disabled = false;
+  }
+  if (cardButton) {
+    cardButton.classList.toggle('hidden', !canTakePayment);
+    cardButton.disabled = cardAutomaticAndHealthy;
+    cardButton.textContent = cardAutomaticAndHealthy
+      ? 'Renovação automática no cartão'
+      : status.billingType === 'CREDIT_CARD'
+        ? 'Tentar cartão novamente'
+        : 'Pagar com cartão';
+  }
+  return blocked;
+};
+
+const startSubscriptionRenewal = async (billingType) => {
+  const feedback = document.getElementById('subscriptionPaymentFeedback');
+  const buttons = [document.getElementById('subscriptionPayPix'), document.getElementById('subscriptionPayCard')].filter(Boolean);
+  buttons.forEach((button) => { button.disabled = true; });
+  if (feedback) feedback.textContent = 'Abrindo o pagamento seguro...';
+  try {
+    const response = await authorizedFetch('/api/billing/renewal-checkout', {
+      method: 'POST',
+      body: JSON.stringify({ billingType })
+    });
+    const payload = await parseJsonSafely(response);
+    if (!response.ok) throw new Error(payload?.message || 'Não foi possível iniciar a renovação.');
+    if (!payload?.checkoutUrl) throw new Error('O gateway não retornou o link de pagamento.');
+    window.location.assign(payload.checkoutUrl);
+  } catch (error) {
+    if (feedback) feedback.textContent = error.message;
+    buttons.forEach((button) => { button.disabled = false; });
+  }
+};
+
+const initSubscriptionAccess = async () => {
+  const notice = document.getElementById('subscriptionAccessNotice');
+  if (!notice) return false;
+  if (notice.dataset.bound !== 'true') {
+    notice.dataset.bound = 'true';
+    document.getElementById('subscriptionPayPix')?.addEventListener('click', () => startSubscriptionRenewal('PIX'));
+    document.getElementById('subscriptionPayCard')?.addEventListener('click', () => startSubscriptionRenewal('CREDIT_CARD'));
+    window.addEventListener('subscription-access-required', () => {
+      initSubscriptionAccess().catch(console.error);
+    });
+  }
+  try {
+    const response = await authorizedFetch('/api/billing/subscription/status');
+    const status = await parseJsonSafely(response);
+    if (!response.ok) throw new Error(status?.message || 'Não foi possível consultar a assinatura.');
+    return renderSubscriptionAccess(status);
+  } catch (error) {
+    console.error('Não foi possível carregar a assinatura', error);
+    return false;
+  }
+};
+
+const renderStudentPaymentStatus = (payment = {}) => {
+  const section = document.getElementById('studentPaymentSection');
+  if (!section) return false;
+  const configured = payment.configured === true;
+  const state = configured ? payment.state || 'pending' : 'unconfigured';
+  const stateConfig = STUDENT_PAYMENT_STATES[state] || STUDENT_PAYMENT_STATES.pending;
+  const status = document.getElementById('studentPaymentStatus');
+  const title = document.getElementById('studentPaymentTitle');
+  const message = document.getElementById('studentPaymentMessage');
+  const current = document.getElementById('studentPaymentCurrent');
+  const instructions = document.getElementById('studentPaymentInstructions');
+  const payButton = document.getElementById('studentPaymentPayBtn');
+  const history = document.getElementById('studentPaymentHistory');
+  section.dataset.paymentState = state;
+  if (status) {
+    status.className = `student-payment-status ${stateConfig.tone}`;
+    status.textContent = stateConfig.label;
+  }
+  if (title) title.textContent = payment.blocked ? 'Regularize para continuar estudando' : 'Situação financeira';
+  if (message) {
+    message.textContent = !configured
+      ? 'Seu professor ainda não configurou uma mensalidade para sua conta.'
+      : state === 'paid'
+        ? 'Mensalidade confirmada. Seu acesso está liberado.'
+        : state === 'failed'
+          ? 'A tentativa de pagamento não foi aprovada. Use a fatura para tentar novamente.'
+          : payment.blocked
+            ? 'O prazo de tolerância terminou. Assim que o pagamento for confirmado, o acesso será liberado automaticamente.'
+            : state === 'due_soon'
+              ? 'Sua mensalidade vence em breve. Você já pode fazer o pagamento.'
+              : state === 'overdue'
+                ? `A mensalidade venceu, mas você ainda está dentro da tolerância de ${Number(payment.graceDays || 0)} dias.`
+                : 'Acompanhe aqui os próximos vencimentos e pagamentos.';
+  }
+  if (current) current.hidden = !configured;
+  const amount = document.getElementById('studentPaymentAmount');
+  const dueDate = document.getElementById('studentPaymentDueDate');
+  const method = document.getElementById('studentPaymentMethod');
+  if (amount) amount.textContent = formatBrl(payment.amount);
+  if (dueDate) dueDate.textContent = formatPaymentDate(payment.dueDate);
+  if (method) method.textContent = ({ MANUAL: 'Combinado com o professor', PIX: 'Pix', BOLETO: 'Boleto', CREDIT_CARD: 'Cartão' })[payment.billingType] || payment.billingType || '--';
+  if (instructions) {
+    instructions.hidden = !payment.instructions;
+    instructions.textContent = payment.instructions || '';
+  }
+  if (payButton) {
+    const canPay = Boolean(payment.paymentUrl) && state !== 'paid';
+    payButton.classList.toggle('hidden', !canPay);
+    payButton.href = canPay ? payment.paymentUrl : '#';
+  }
+  if (history) {
+    const rows = Array.isArray(payment.history) ? payment.history : [];
+    history.innerHTML = rows.length ? `
+      <h3>Histórico</h3>
+      ${rows.map((item) => `
+        <div><span>${formatPaymentDate(item.dueDate)} · ${escapeHtml(item.billingType)}</span><strong>${formatBrl(item.amount)} · ${escapeHtml(STUDENT_PAYMENT_STATES[String(item.status || '').toLowerCase()]?.label || item.status)}</strong></div>
+      `).join('')}
+    ` : '';
+  }
+  document.body.classList.toggle('student-payment-blocked', payment.blocked === true);
+  return payment.blocked === true;
+};
+
+const loadStudentPaymentStatus = async () => {
+  const response = await authorizedFetch('/api/student/payments/status');
+  const payload = await parseJsonSafely(response);
+  if (!response.ok) throw new Error(payload?.message || 'Não foi possível consultar sua mensalidade.');
+  return { payload, blocked: renderStudentPaymentStatus(payload || {}) };
+};
+
+const initStudentPayments = async () => {
+  document.getElementById('studentPaymentRefreshBtn')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const response = await authorizedFetch('/api/student/payments/refresh', { method: 'POST' });
+      const payload = await parseJsonSafely(response);
+      if (!response.ok) throw new Error(payload?.message || 'Não foi possível verificar o pagamento.');
+      const result = await loadStudentPaymentStatus();
+      if (!result.blocked) {
+        await renderDashboard();
+        startLiveStagePolling();
+      }
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      button.disabled = false;
+    }
+  });
+  try {
+    const result = await loadStudentPaymentStatus();
+    if (result.blocked) {
+      document.querySelector('[data-target="studentPaymentSection"]')?.click();
+    }
+    return result.blocked;
+  } catch (error) {
+    console.error('Não foi possível carregar a mensalidade', error);
+    return false;
+  }
+};
+
+const initAdminFeatures = () => {
   if (adminChatPollTimer) {
     clearInterval(adminChatPollTimer);
     adminChatPollTimer = null;
@@ -3796,6 +4795,8 @@ const initAdminPage = () => {
   if (!isGlobalAdminUser()) {
     document.querySelector('[data-target="adminProfessorsSection"]')?.closest('li')?.remove();
     document.getElementById('adminProfessorsSection')?.remove();
+    document.getElementById('globalStudentFinanceNavItem')?.remove();
+    document.getElementById('globalStudentFinanceSection')?.remove();
     document.querySelector('#adminSettingsSection h2')?.replaceChildren(document.createTextNode('Configuracoes'));
     document.getElementById('adminSmtpSettingsSection')?.remove();
     const aiTextCostField = document.getElementById('aiTextCreditCostPerCall')?.closest('.field-group');
@@ -3803,8 +4804,14 @@ const initAdminPage = () => {
     const aiImageCostField = document.getElementById('aiImageCreditCostPerCall')?.closest('.field-group');
     if (aiImageCostField) aiImageCostField.remove();
     document.getElementById('adminAiSettingsPanel')?.remove();
+    initStudentFinanceAdmin();
+  } else {
+    document.querySelector('[data-target="studentFinanceSection"]')?.closest('li')?.remove();
+    document.getElementById('studentFinanceSection')?.remove();
+    initGlobalStudentFinance();
   }
   initPlatformCredits();
+  initStudentSeatUpgrade();
   if (isGlobalAdminUser()) {
     loadCreditPackages({ admin: true }).catch(console.error);
     document.getElementById('adminCreditPackageList')?.addEventListener('click', async (event) => {
@@ -3969,6 +4976,9 @@ const initAdminPage = () => {
       alert(error.message || 'Não foi possível criar o professor.');
     }
   });
+  document.getElementById('professorFinanceSearch')?.addEventListener('input', renderAdminProfessors);
+  document.getElementById('professorFinanceStatus')?.addEventListener('change', renderAdminProfessors);
+  document.getElementById('professorFinanceBillingType')?.addEventListener('change', renderAdminProfessors);
 
   document.getElementById('classForm')?.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -4051,16 +5061,38 @@ const initAdminPage = () => {
     try {
       if (action === 'delete') {
         await authorizedFetch(`/api/admin/students/${studentId}`, { method: 'DELETE' });
+      } else if (action === 'approve' || action === 'reject') {
+        const response = await authorizedFetch(`/api/admin/students/${studentId}/signup-approval`, {
+          method: 'PUT',
+          body: JSON.stringify({ decision: action === 'approve' ? 'APPROVED' : 'REJECTED' })
+        });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+          if (
+            action === 'approve'
+            && payload?.code === 'PROFESSOR_STUDENT_LIMIT_REACHED'
+            && payload?.seatUpgrade?.available
+          ) {
+            openStudentSeatUpgradeModal(studentId, payload);
+            return;
+          }
+          throw new Error(payload?.message || 'Não foi possível analisar o cadastro.');
+        }
+        if (payload?.paymentWarning) alert(payload.paymentWarning);
       } else {
         const shouldEnable = button.textContent.trim() === 'Autorizar';
-        await authorizedFetch(`/api/admin/students/${studentId}/status`, {
+        const response = await authorizedFetch(`/api/admin/students/${studentId}/status`, {
           method: 'PUT',
           body: JSON.stringify({ isActive: shouldEnable })
         });
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null);
+          throw new Error(payload?.message || 'Não foi possível atualizar o aluno.');
+        }
       }
       loadAdminStudents();
     } catch (error) {
-      alert('Não foi possível atualizar o status.');
+      alert(error.message || 'Não foi possível atualizar o status.');
     }
   });
 
@@ -4676,6 +5708,11 @@ const initChatModal = () => {
   });
 };
 
+const initAdminPage = async () => {
+  const blocked = await initSubscriptionAccess();
+  if (!blocked) initAdminFeatures();
+};
+
 const init = () => {
   setupLogoutButtons();
   setupNotificationAttachmentClicks();
@@ -4708,8 +5745,12 @@ const init = () => {
       if (!button) return;
       await requestStoreCourseAccess(button.dataset.storeCourseId);
     });
-    renderDashboard();
-    startLiveStagePolling();
+    initStudentPayments().then((blocked) => {
+      if (!blocked) {
+        renderDashboard();
+        startLiveStagePolling();
+      }
+    });
     return;
   }
   if (isAdmin) {

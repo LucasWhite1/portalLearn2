@@ -2,6 +2,26 @@ const { getSession } = require('../sessionStore');
 const { isSessionToken } = require('../security');
 const db = require('../db');
 const { ensurePlatformCreditTables } = require('../platformCredits');
+const { ensureBillingAccessSchema, getBillingAccessState } = require('../billingAccess');
+
+const isBillingRecoveryRequest = (req) => {
+  const path = String(req.originalUrl || '').split('?')[0];
+  return path === '/api/billing/subscription/status' || path === '/api/billing/renewal-checkout';
+};
+
+const enforceBillingAccess = (req, res, user) => {
+  const access = getBillingAccessState(user);
+  req.billingAccess = access;
+  if (access.blocked && !isBillingRecoveryRequest(req)) {
+    res.status(402).json({
+      message: 'Sua assinatura venceu. Renove o plano para continuar usando o portal.',
+      code: 'SUBSCRIPTION_EXPIRED',
+      accessExpiresAt: access.expiration?.toISOString() || null
+    });
+    return false;
+  }
+  return true;
+};
 
 async function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization || '';
@@ -52,13 +72,19 @@ async function requireAuth(req, res, next) {
     req.user = user;
     req.sessionToken = token;
     req.authenticatedSessionToken = token;
+    if (!enforceBillingAccess(req, res, user)) return;
     return next();
   }
   try {
     await ensurePlatformCreditTables();
+    await ensureBillingAccessSchema();
     const { rows } = await db.query(
       `SELECT id, role, full_name, email, class_name, owner_user_id, is_active,
-              platform_credits, student_limit, storage_limit_bytes
+              platform_credits, student_limit, storage_limit_bytes,
+              billing_access_managed, subscription_access_expires_at,
+              subscription_plan_code, subscription_billing_type,
+              subscription_payment_status, subscription_last_event_type,
+              subscription_payment_url
          FROM users
         WHERE id = $1`,
       [user.id]
@@ -81,14 +107,23 @@ async function requireAuth(req, res, next) {
       email: currentUser.email,
       className: currentUser.class_name,
       ownerUserId: currentUser.owner_user_id || null,
+      isActive: currentUser.is_active !== false,
       platformCredits: Number(currentUser.platform_credits || 0),
       studentLimit: Number.isFinite(Number(currentUser.student_limit)) ? Number(currentUser.student_limit) : null,
-      storageLimitBytes: Number.isFinite(Number(currentUser.storage_limit_bytes)) ? Number(currentUser.storage_limit_bytes) : null
+      storageLimitBytes: Number.isFinite(Number(currentUser.storage_limit_bytes)) ? Number(currentUser.storage_limit_bytes) : null,
+      billing_access_managed: currentUser.billing_access_managed === true,
+      subscription_access_expires_at: currentUser.subscription_access_expires_at || null,
+      subscription_plan_code: currentUser.subscription_plan_code || null,
+      subscription_billing_type: currentUser.subscription_billing_type || null,
+      subscription_payment_status: currentUser.subscription_payment_status || null,
+      subscription_last_event_type: currentUser.subscription_last_event_type || null,
+      subscription_payment_url: currentUser.subscription_payment_url || null
     });
     user.lastValidatedAt = Date.now();
     req.user = user;
     req.sessionToken = token;
     req.authenticatedSessionToken = token;
+    if (!enforceBillingAccess(req, res, user)) return;
     return next();
   } catch (error) {
     return next(error);

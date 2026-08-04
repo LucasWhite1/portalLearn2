@@ -101,6 +101,7 @@
     const params = new URLSearchParams(window.location.search);
     const status = params.get('status') || 'success';
     const plan = params.get('plan') || 'pro';
+    const renewal = params.get('renewal') === '1';
 
     const messages = {
       success: {
@@ -133,8 +134,16 @@
     document.getElementById('statusText').textContent = current.text;
     document.getElementById('statusNote').textContent = current.note;
     document.getElementById('statusPrimaryAction').textContent = status === 'success'
-      ? 'Ja recebi meu acesso'
+      ? (renewal ? 'Voltar ao painel' : 'Ja recebi meu acesso')
       : 'Ir para o login';
+    if (renewal) {
+      document.getElementById('statusPrimaryAction').href = 'admin.html';
+      if (status === 'success') {
+        document.getElementById('statusHeading').textContent = 'Pagamento enviado';
+        document.getElementById('statusText').textContent = 'Estamos aguardando a confirmação do Asaas para renovar seu acesso.';
+        document.getElementById('statusNote').textContent = 'No Pix a confirmação costuma ser rápida. No cartão, aguarde a autorização da operadora.';
+      }
+    }
   </script>
 </body>
 </html>

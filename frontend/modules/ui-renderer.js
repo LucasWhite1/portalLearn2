@@ -372,7 +372,7 @@ export const createQuizNode = (element, callbacks = {}) => {
       )
       .join('')}
     </div>
-    <button type="button" class="secondary-btn builder-quiz-action">${escapeHtml(element.actionLabel)}</button>
+    <button type="button" class="builder-quiz-action">${escapeHtml(element.actionLabel)}</button>
     <div class="builder-quiz-feedback" aria-live="polite"></div>
   `;
   const actionBtn = node.querySelector('.builder-quiz-action');
@@ -386,7 +386,7 @@ export const createQuizNode = (element, callbacks = {}) => {
   if (actionBtn) {
     actionBtn.style.background = element.quizButtonBackgroundColor;
     actionBtn.style.backgroundColor = element.quizButtonBackgroundColor;
-    actionBtn.style.color = '#ffffff';
+    actionBtn.style.color = element.quizButtonTextColor || '#ffffff';
   }
   actionBtn?.addEventListener('click', (event) => {
     event.stopPropagation();
@@ -443,9 +443,9 @@ export const createInputElementNode = (element, { runActions = null, preview = f
         ${textFieldMarkup}
       </div>
       <div class="builder-input-composer-actions">
-        <button type="button" class="secondary-btn builder-input-upload builder-input-upload-icon builder-input-image-btn ${element.allowImage ? '' : 'hidden'}" aria-label="Anexar imagem" title="Anexar imagem">+</button>
-        <button type="button" class="secondary-btn builder-input-upload builder-input-upload-icon builder-input-audio-btn ${element.allowAudio ? '' : 'hidden'}" aria-label="Anexar audio" title="Anexar audio">Mic</button>
-        <button type="button" class="primary-btn builder-input-submit" style="background-color: ${buttonBgColor}; color: ${buttonTextColor};" aria-label="${escapeAttribute(element.submitLabel || 'Enviar resposta')}" title="${escapeAttribute(element.submitLabel || 'Enviar resposta')}">
+        <button type="button" class="builder-input-upload builder-input-upload-icon builder-input-image-btn ${element.allowImage ? '' : 'hidden'}" aria-label="Anexar imagem" title="Anexar imagem">+</button>
+        <button type="button" class="builder-input-upload builder-input-upload-icon builder-input-audio-btn ${element.allowAudio ? '' : 'hidden'}" aria-label="Anexar audio" title="Anexar audio">Mic</button>
+        <button type="button" class="builder-input-submit" style="background-color: ${buttonBgColor}; color: ${buttonTextColor};" aria-label="${escapeAttribute(element.submitLabel || 'Enviar resposta')}" title="${escapeAttribute(element.submitLabel || 'Enviar resposta')}">
           <span class="builder-input-submit-icon" aria-hidden="true">➤</span>
         </button>
       </div>

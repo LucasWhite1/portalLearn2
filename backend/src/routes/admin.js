@@ -64,6 +64,14 @@ const {
   getCreditTopupOrder
 } = require('../creditTopups');
 const {
+  createStudentSeatUpgradeCheckout,
+  getExtraStudentPrice,
+  getStudentSeatUpgradeOrder
+} = require('../studentSeatUpgrades');
+const { ensureBillingAccessSchema, getBillingAccessState } = require('../billingAccess');
+const { configureSignupPaymentPlan } = require('../studentPayments');
+const { canApproveStudent } = require('../studentSignupPolicy');
+const {
   sanitizeText,
   sanitizeEmail,
   sanitizePhone,
@@ -242,10 +250,46 @@ const ensureStudentSignupLinksTable = async () => {
     CREATE TABLE IF NOT EXISTS student_signup_links (
       professor_user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       token_hash TEXT NOT NULL UNIQUE,
+      auto_approve BOOLEAN NOT NULL DEFAULT FALSE,
+      monthly_amount NUMERIC(12,2),
+      due_day INT NOT NULL DEFAULT 10,
+      billing_type TEXT NOT NULL DEFAULT 'PIX',
+      grace_days INT NOT NULL DEFAULT 5,
+      auto_block BOOLEAN NOT NULL DEFAULT TRUE,
+      payment_description TEXT,
+      payment_instructions TEXT,
       revoked_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ DEFAULT NOW(),
       updated_at TIMESTAMPTZ DEFAULT NOW()
-    )
+    );
+    ALTER TABLE student_signup_links
+      ADD COLUMN IF NOT EXISTS auto_approve BOOLEAN NOT NULL DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS monthly_amount NUMERIC(12,2),
+      ADD COLUMN IF NOT EXISTS due_day INT NOT NULL DEFAULT 10,
+      ADD COLUMN IF NOT EXISTS billing_type TEXT NOT NULL DEFAULT 'PIX',
+      ADD COLUMN IF NOT EXISTS grace_days INT NOT NULL DEFAULT 5,
+      ADD COLUMN IF NOT EXISTS auto_block BOOLEAN NOT NULL DEFAULT TRUE,
+      ADD COLUMN IF NOT EXISTS payment_description TEXT,
+      ADD COLUMN IF NOT EXISTS payment_instructions TEXT;
+    CREATE TABLE IF NOT EXISTS student_signup_requests (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      student_user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+      professor_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','APPROVED','REJECTED')),
+      auto_approval_requested BOOLEAN NOT NULL DEFAULT FALSE,
+      monthly_amount NUMERIC(12,2),
+      due_day INT NOT NULL DEFAULT 10,
+      billing_type TEXT NOT NULL DEFAULT 'PIX',
+      grace_days INT NOT NULL DEFAULT 5,
+      auto_block BOOLEAN NOT NULL DEFAULT TRUE,
+      payment_description TEXT,
+      payment_instructions TEXT,
+      reviewed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_student_signup_requests_professor
+      ON student_signup_requests(professor_user_id, status, created_at DESC)
   `);
   studentSignupLinksTableEnsured = true;
 };
@@ -714,7 +758,8 @@ const getProfessorStudentCount = async (professorId) => {
     `SELECT COUNT(*)::int AS total
        FROM users
       WHERE role = 'student'
-        AND owner_user_id = $1`,
+        AND owner_user_id = $1
+        AND is_active = TRUE`,
     [professorId]
   );
   return Number(rows[0]?.total || 0);
@@ -1282,17 +1327,25 @@ const ensureAdminAiImageColumns = async () => {
 router.get('/students', async (req, res) => {
   await ensureClassesTable();
   await ensureOwnershipColumns();
+  await ensureStudentSignupLinksTable();
   const params = [];
   let studentQuery = `SELECT s.id, s.full_name, s.email, s.phone, s.role, s.class_name, s.is_active, s.created_at,
-                             s.owner_user_id, owner.full_name AS owner_name, owner.email AS owner_email
+                             s.owner_user_id, owner.full_name AS owner_name, owner.email AS owner_email,
+                             signup.status AS signup_approval_status,
+                             signup.monthly_amount AS signup_monthly_amount,
+                             signup.billing_type AS signup_billing_type,
+                             signup.due_day AS signup_due_day
                       FROM users s
                       LEFT JOIN users owner ON owner.id = s.owner_user_id
+                      LEFT JOIN student_signup_requests signup ON signup.student_user_id = s.id
                       WHERE s.role = 'student'`;
   if (isProfessor(req)) {
     params.push(req.user.id);
     studentQuery += ` AND s.owner_user_id = $1`;
   }
-  studentQuery += ' ORDER BY s.full_name';
+  studentQuery += ` ORDER BY
+    CASE signup.status WHEN 'PENDING' THEN 0 WHEN 'REJECTED' THEN 2 ELSE 1 END,
+    s.created_at DESC`;
   const result = await db.query(studentQuery, params);
 
   const students = await Promise.all(
@@ -1643,6 +1696,142 @@ router.get('/me/platform-credits', async (req, res) => {
   res.json(payload);
 });
 
+router.get('/professors/financial-overview', async (req, res) => {
+  if (!ensureGlobalAdmin(req, res)) return;
+  await ensureProfessorCreditColumns();
+  await ensureProfessorQuotaColumns();
+  await ensureBillingAccessSchema();
+
+  const tableResult = await db.query("SELECT to_regclass('public.billing_subscriptions') AS billing_table");
+  const hasBillingTable = Boolean(tableResult.rows[0]?.billing_table);
+  const billingColumns = hasBillingTable
+    ? `latest.plan_code, latest.amount, latest.status AS billing_status,
+       latest.activated_at, latest.deactivated_at, latest.last_event_type AS billing_last_event_type,
+       latest.provider_subscription_id,
+       latest.raw_payload->>'billingType' AS latest_billing_type,
+       latest.raw_payload->>'invoiceUrl' AS latest_invoice_url`
+    : `NULL::text AS plan_code, NULL::numeric AS amount, NULL::text AS billing_status,
+       NULL::timestamptz AS activated_at, NULL::timestamptz AS deactivated_at,
+       NULL::text AS billing_last_event_type, NULL::text AS provider_subscription_id,
+       NULL::text AS latest_billing_type, NULL::text AS latest_invoice_url`;
+  const billingJoin = hasBillingTable
+    ? `LEFT JOIN LATERAL (
+         SELECT plan_code, amount, status, activated_at, deactivated_at,
+                last_event_type, provider_subscription_id, raw_payload
+           FROM billing_subscriptions
+          WHERE user_id = u.id OR LOWER(payer_email) = LOWER(u.email)
+          ORDER BY updated_at DESC, id DESC
+          LIMIT 1
+       ) latest ON TRUE`
+    : '';
+  const { rows } = await db.query(
+    `SELECT u.id, u.full_name, u.email, u.phone, u.role, u.is_active,
+            u.platform_credits, u.platform_credits_updated_at, u.student_limit,
+            u.storage_limit_bytes, u.created_at, u.billing_access_managed,
+            u.subscription_access_expires_at, u.subscription_plan_code,
+            u.subscription_billing_type, u.subscription_payment_status,
+            u.subscription_last_event_type, u.subscription_payment_url,
+            ${billingColumns},
+            COALESCE(student_stats.student_count, 0)::int AS student_count
+       FROM users u
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*)::int AS student_count
+           FROM users student
+          WHERE student.role = 'student' AND student.owner_user_id = u.id AND student.is_active = TRUE
+       ) student_stats ON TRUE
+       ${billingJoin}
+      WHERE u.role = 'professor'
+      ORDER BY u.full_name`
+  );
+
+  const now = new Date();
+  const professors = await Promise.all(rows.map(async (row) => {
+    const access = getBillingAccessState(row, now);
+    const planCode = row.plan_code || row.subscription_plan_code || null;
+    return {
+      id: row.id,
+      full_name: row.full_name,
+      email: row.email,
+      phone: row.phone,
+      role: row.role,
+      is_active: row.is_active,
+      created_at: row.created_at,
+      studentCount: Number(row.student_count || 0),
+      storageUsedBytes: await getProfessorStorageUsageBytes(row.id),
+      ...buildProfessorCreditPayload(row),
+      ...getProfessorLimitPayload(row),
+      billing: {
+        managed: access.managed,
+        state: access.state,
+        blocked: access.blocked,
+        daysRemaining: access.daysRemaining,
+        accessExpiresAt: access.expiration?.toISOString() || null,
+        planCode,
+        planLabel: planCode === 'pro'
+          ? 'Criatyve Pro'
+          : planCode === 'trial-30-dias'
+            ? 'Trial 30 dias'
+            : 'Cadastro manual',
+        amount: row.amount !== null && Number.isFinite(Number(row.amount)) ? Number(row.amount) : null,
+        billingType: String(row.latest_billing_type || row.subscription_billing_type || '').toUpperCase() || null,
+        paymentStatus: row.subscription_payment_status || row.billing_status || null,
+        lastEventType: row.subscription_last_event_type || row.billing_last_event_type || null,
+        automaticRenewal: Boolean(row.provider_subscription_id),
+        activatedAt: row.activated_at || null,
+        deactivatedAt: row.deactivated_at || null
+      }
+    };
+  }));
+
+  const managed = professors.filter((professor) => professor.billing.managed);
+  const active = managed.filter((professor) => !professor.billing.blocked && professor.is_active);
+  const atRiskStates = new Set(['payment_failed', 'expired']);
+  const projectedMonthlyRevenue = active.reduce(
+    (sum, professor) => sum + Number(professor.billing.amount || 0),
+    0
+  );
+  let receivedThisMonth = 0;
+  if (hasBillingTable) {
+    const receivedResult = await db.query(`
+      SELECT COALESCE(SUM(subscription.amount), 0)::numeric AS total
+        FROM billing_payment_periods period
+        JOIN billing_subscriptions subscription ON subscription.id = period.billing_subscription_id
+       WHERE period.created_at >= DATE_TRUNC('month', NOW())
+         AND period.event_type <> 'MIGRATED_ACTIVE_PAYMENT'
+    `);
+    receivedThisMonth = Number(receivedResult.rows[0]?.total || 0);
+  }
+  const planMap = new Map();
+  managed.forEach((professor) => {
+    const key = professor.billing.planLabel;
+    const current = planMap.get(key) || { plan: key, professors: 0, monthlyRevenue: 0 };
+    current.professors += 1;
+    if (!professor.billing.blocked && professor.is_active) {
+      current.monthlyRevenue += Number(professor.billing.amount || 0);
+    }
+    planMap.set(key, current);
+  });
+
+  res.json({
+    generatedAt: now.toISOString(),
+    summary: {
+      totalProfessors: professors.length,
+      managedSubscriptions: managed.length,
+      activeSubscriptions: active.length,
+      dueSoon: managed.filter((professor) => professor.billing.state === 'due_soon').length,
+      atRisk: managed.filter((professor) => atRiskStates.has(professor.billing.state)).length,
+      manuallyBlocked: professors.filter((professor) => !professor.is_active).length,
+      projectedMonthlyRevenue,
+      receivedThisMonth,
+      totalStudents: professors.reduce((sum, professor) => sum + professor.studentCount, 0),
+      pixSubscriptions: active.filter((professor) => professor.billing.billingType === 'PIX').length,
+      cardSubscriptions: active.filter((professor) => professor.billing.billingType === 'CREDIT_CARD').length,
+      planBreakdown: Array.from(planMap.values()).sort((a, b) => b.professors - a.professors)
+    },
+    professors
+  });
+});
+
 router.get('/credit-packages', async (req, res) => {
   res.json(await listCreditPackages({ activeOnly: isProfessor(req) }));
 });
@@ -1692,6 +1881,26 @@ router.get('/credit-topups/:orderId', async (req, res) => {
   res.json(order);
 });
 
+router.post('/student-seats/checkout', async (req, res) => {
+  if (!isProfessor(req)) {
+    return res.status(403).json({ message: 'Somente professores podem adicionar vagas.' });
+  }
+  try {
+    res.status(201).json(await createStudentSeatUpgradeCheckout(req, req.body?.quantity));
+  } catch (error) {
+    res.status(error.statusCode || 400).json({ message: error.message || 'Não foi possível criar a compra de vagas.' });
+  }
+});
+
+router.get('/student-seats/orders/:orderId', async (req, res) => {
+  if (!isProfessor(req) || !isUuid(req.params.orderId)) {
+    return res.status(403).json({ message: 'Pedido de vagas inválido.' });
+  }
+  const order = await getStudentSeatUpgradeOrder(req.user.id, req.params.orderId);
+  if (!order) return res.status(404).json({ message: 'Pedido de vagas não encontrado.' });
+  res.json(order);
+});
+
 router.post('/student-signup-link', async (req, res) => {
   await ensureStudentSignupLinksTable();
   await ensureProfessorQuotaColumns();
@@ -1705,19 +1914,63 @@ router.post('/student-signup-link', async (req, res) => {
   const studentCount = isProfessor(req)
     ? Number(quotaStatus?.studentCount || 0)
     : await getProfessorStudentCount(req.user.id);
+  const monthlyAmount = Number(req.body?.monthlyAmount);
+  const dueDay = Number.parseInt(req.body?.dueDay, 10);
+  const graceDays = Number.parseInt(req.body?.graceDays ?? 5, 10);
+  const billingType = String(req.body?.billingType || 'PIX').toUpperCase();
+  const allowedBillingTypes = new Set(['PIX', 'BOLETO', 'CREDIT_CARD']);
+  if (!Number.isFinite(monthlyAmount) || monthlyAmount <= 0) {
+    return res.status(400).json({ message: 'Informe o valor mensal cobrado dos alunos deste link.' });
+  }
+  if (!Number.isInteger(dueDay) || dueDay < 1 || dueDay > 28) {
+    return res.status(400).json({ message: 'O vencimento deve estar entre os dias 1 e 28.' });
+  }
+  if (!Number.isInteger(graceDays) || graceDays < 0 || graceDays > 60) {
+    return res.status(400).json({ message: 'A tolerância deve estar entre 0 e 60 dias.' });
+  }
+  if (!allowedBillingTypes.has(billingType)) {
+    return res.status(400).json({ message: 'Escolha Pix, boleto ou cartão para a cobrança via Asaas.' });
+  }
   const inviteToken = crypto.randomBytes(32).toString('hex');
   const tokenHash = hashSignupLinkToken(inviteToken);
   await db.query(
-    `INSERT INTO student_signup_links (professor_user_id, token_hash, revoked_at, created_at, updated_at)
-     VALUES ($1, $2, NULL, NOW(), NOW())
+    `INSERT INTO student_signup_links (
+       professor_user_id, token_hash, auto_approve, monthly_amount, due_day,
+       billing_type, grace_days, auto_block, payment_description,
+       payment_instructions, revoked_at, created_at, updated_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,NOW(),NOW())
      ON CONFLICT (professor_user_id)
-     DO UPDATE SET token_hash = EXCLUDED.token_hash, revoked_at = NULL, updated_at = NOW()`,
-    [req.user.id, tokenHash]
+     DO UPDATE SET token_hash = EXCLUDED.token_hash,
+       auto_approve = EXCLUDED.auto_approve,
+       monthly_amount = EXCLUDED.monthly_amount,
+       due_day = EXCLUDED.due_day,
+       billing_type = EXCLUDED.billing_type,
+       grace_days = EXCLUDED.grace_days,
+       auto_block = EXCLUDED.auto_block,
+       payment_description = EXCLUDED.payment_description,
+       payment_instructions = EXCLUDED.payment_instructions,
+       revoked_at = NULL, updated_at = NOW()`,
+    [
+      req.user.id,
+      tokenHash,
+      req.body?.autoApprove === true,
+      Number(monthlyAmount.toFixed(2)),
+      dueDay,
+      billingType,
+      graceDays,
+      req.body?.autoBlock !== false,
+      sanitizeText(req.body?.description || 'Mensalidade de aulas', 240) || null,
+      sanitizeText(req.body?.instructions || '', 800) || null
+    ]
   );
   const origin = `${req.protocol}://${req.get('host')}`;
   res.json({
     professorName: req.user.fullName || (isGlobalAdmin(req) ? 'Admin' : 'Professor'),
     inviteUrl: `${origin}/login.html?invite=${inviteToken}`,
+    autoApprove: req.body?.autoApprove === true,
+    monthlyAmount: Number(monthlyAmount.toFixed(2)),
+    dueDay,
+    billingType,
     studentLimit: isProfessor(req) ? quotaStatus?.studentLimit ?? null : null,
     studentCount
   });
@@ -1887,6 +2140,20 @@ router.put('/students/:id/status', async (req, res) => {
   if (typeof isActive !== 'boolean') {
     return res.status(400).json({ message: 'Informe isActive como booleano' });
   }
+  if (isActive && isProfessor(req)) {
+    await ensureStudentSignupLinksTable();
+    const current = await db.query(
+      `SELECT student.is_active, request.status AS signup_status
+         FROM users student
+         LEFT JOIN student_signup_requests request ON request.student_user_id = student.id
+        WHERE student.id = $1 AND student.role = 'student' AND student.owner_user_id = $2`,
+      [id, req.user.id]
+    );
+    if (['PENDING', 'REJECTED'].includes(current.rows[0]?.signup_status)) {
+      return res.status(409).json({ message: 'Use a ação Aprovar para autorizar este cadastro.' });
+    }
+    if (current.rows[0]?.is_active === false) await assertProfessorStudentLimit(req);
+  }
   const params = [isActive, id];
   if (isProfessor(req)) {
     params.push(req.user.id);
@@ -1901,6 +2168,112 @@ router.put('/students/:id/status', async (req, res) => {
     return res.status(404).json({ message: 'Aluno nao encontrado' });
   }
   res.status(204).send();
+});
+
+router.put('/students/:id/signup-approval', async (req, res) => {
+  await ensureOwnershipColumns();
+  await ensureProfessorQuotaColumns();
+  await ensureStudentSignupLinksTable();
+  const studentId = req.params.id;
+  const decision = String(req.body?.decision || '').toUpperCase();
+  if (!isUuid(studentId) || !['APPROVED', 'REJECTED'].includes(decision)) {
+    return res.status(400).json({ message: 'Informe uma decisão válida para o cadastro.' });
+  }
+
+  const client = await db.getClient();
+  let signupRequest = null;
+  try {
+    await client.query('BEGIN');
+    const params = [studentId];
+    let ownershipSql = '';
+    if (isProfessor(req)) {
+      params.push(req.user.id);
+      ownershipSql = ' AND request.professor_user_id = $2';
+    }
+    const { rows } = await client.query(
+      `SELECT request.*, student.is_active, student.owner_user_id,
+              professor.role AS professor_role, professor.student_limit
+         FROM student_signup_requests request
+         JOIN users student ON student.id = request.student_user_id AND student.role = 'student'
+         JOIN users professor ON professor.id = request.professor_user_id
+        WHERE request.student_user_id = $1${ownershipSql}
+        FOR UPDATE OF request, student, professor`,
+      params
+    );
+    signupRequest = rows[0];
+    if (!signupRequest) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Solicitação de cadastro não encontrada.' });
+    }
+
+    if (decision === 'APPROVED' && !signupRequest.is_active) {
+      const countResult = await client.query(
+        `SELECT COUNT(*)::int AS total
+           FROM users
+          WHERE role = 'student' AND owner_user_id = $1 AND is_active = TRUE`,
+        [signupRequest.professor_user_id]
+      );
+      const activeStudents = Number(countResult.rows[0]?.total || 0);
+      const studentLimit = Number(signupRequest.student_limit || 0);
+      if (!canApproveStudent({
+        professorRole: signupRequest.professor_role,
+        studentLimit,
+        activeStudents,
+        alreadyActive: signupRequest.is_active
+      })) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          message: `O limite de ${studentLimit} aluno(s) está preenchido. Adicione vagas ao plano para aprovar este cadastro.`,
+          code: 'PROFESSOR_STUDENT_LIMIT_REACHED',
+          quotaStatus: { studentLimit, studentCount: activeStudents },
+          seatUpgrade: {
+            available: signupRequest.professor_role === 'professor',
+            unitPrice: getExtraStudentPrice(),
+            minimumQuantity: 1
+          }
+        });
+      }
+    }
+
+    await client.query(
+      `UPDATE student_signup_requests
+          SET status = $2, reviewed_at = NOW(), updated_at = NOW()
+        WHERE student_user_id = $1`,
+      [studentId, decision]
+    );
+    await client.query(
+      `UPDATE users SET is_active = $2 WHERE id = $1 AND role = 'student'`,
+      [studentId, decision === 'APPROVED']
+    );
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  let payment = null;
+  let paymentWarning = null;
+  if (decision === 'APPROVED' && signupRequest.monthly_amount !== null) {
+    try {
+      payment = await configureSignupPaymentPlan({
+        professorId: signupRequest.professor_user_id,
+        studentId,
+        amount: signupRequest.monthly_amount,
+        dueDay: signupRequest.due_day,
+        preferredBillingType: signupRequest.billing_type,
+        graceDays: signupRequest.grace_days,
+        autoBlock: signupRequest.auto_block,
+        description: signupRequest.payment_description,
+        instructions: signupRequest.payment_instructions
+      });
+    } catch (error) {
+      paymentWarning = 'O aluno foi aprovado, mas a cobrança automática precisa ser sincronizada no financeiro.';
+      console.error('Falha ao preparar cobrança após aprovação:', error.message);
+    }
+  }
+  res.json({ approved: decision === 'APPROVED', payment, paymentWarning });
 });
 
 router.delete('/students/:id', async (req, res) => {
@@ -2936,7 +3309,7 @@ router.post('/assistant/chat', aiRequestRateLimiter, async (req, res) => {
   }
   if (containsSensitiveRequest(rawMessage)) {
     return res.json({
-      reply: 'Não posso mostrar ou manipular senhas, tokens, chaves, configurações privadas ou código interno. Posso ajudar com alunos, cursos, matrículas, relatórios, notificações e chats.',
+      reply: 'Não posso mostrar ou manipular senhas, tokens, chaves, configurações privadas ou código interno. Posso ajudar com alunos, cursos, matrículas, relatórios, notificações, chats e o financeiro dos alunos.',
       actions: [],
       proposalId: null,
       requiresConfirmation: false
@@ -3022,6 +3395,7 @@ router.post('/ai/slide-actions', aiRequestRateLimiter, async (req, res) => {
   const request = sanitizeText(req.body?.request || '', 1800, { trim: true });
   const slides = sanitizeBuilderData({ slides: Array.isArray(req.body?.slides) ? req.body.slides : [] }).slides || [];
   const activeSlideId = sanitizeText(req.body?.activeSlideId || '', 120);
+  const selectedElementId = sanitizeText(req.body?.selectedElementId || '', 120);
   const stageSize = req.body?.stageSize && typeof req.body.stageSize === 'object' ? req.body.stageSize : null;
   const attachments = Array.isArray(req.body?.attachments) ? req.body.attachments : [];
   const executionPlan = req.body?.executionPlan && typeof req.body.executionPlan === 'object' ? req.body.executionPlan : null;
@@ -3051,6 +3425,7 @@ router.post('/ai/slide-actions', aiRequestRateLimiter, async (req, res) => {
       request,
       slides,
       activeSlideId: activeSlideId || null,
+      selectedElementId: selectedElementId || null,
       stageSize: stageSize || null,
       attachments: Array.isArray(attachments) ? attachments : [],
       executionPlan,

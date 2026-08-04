@@ -8,6 +8,9 @@ const { sanitizeEmail, sanitizePhone, sanitizeText, createRateLimiter, isSession
 const nodemailer = require('nodemailer');
 const { decryptStoredSecret } = require('../aiConfigCrypto');
 const { ensurePlatformCreditTables } = require('../platformCredits');
+const { ensureBillingAccessSchema, getBillingAccessState } = require('../billingAccess');
+const { configureSignupPaymentPlan } = require('../studentPayments');
+const { shouldAutoApproveSignup } = require('../studentSignupPolicy');
 
 let resetTokenColumnsEnsured = false;
 let roleAndOwnershipEnsured = false;
@@ -139,10 +142,46 @@ const ensureStudentSignupLinksTable = async () => {
     CREATE TABLE IF NOT EXISTS student_signup_links (
       professor_user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       token_hash TEXT NOT NULL UNIQUE,
+      auto_approve BOOLEAN NOT NULL DEFAULT FALSE,
+      monthly_amount NUMERIC(12,2),
+      due_day INT NOT NULL DEFAULT 10,
+      billing_type TEXT NOT NULL DEFAULT 'PIX',
+      grace_days INT NOT NULL DEFAULT 5,
+      auto_block BOOLEAN NOT NULL DEFAULT TRUE,
+      payment_description TEXT,
+      payment_instructions TEXT,
       revoked_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ DEFAULT NOW(),
       updated_at TIMESTAMPTZ DEFAULT NOW()
-    )
+    );
+    ALTER TABLE student_signup_links
+      ADD COLUMN IF NOT EXISTS auto_approve BOOLEAN NOT NULL DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS monthly_amount NUMERIC(12,2),
+      ADD COLUMN IF NOT EXISTS due_day INT NOT NULL DEFAULT 10,
+      ADD COLUMN IF NOT EXISTS billing_type TEXT NOT NULL DEFAULT 'PIX',
+      ADD COLUMN IF NOT EXISTS grace_days INT NOT NULL DEFAULT 5,
+      ADD COLUMN IF NOT EXISTS auto_block BOOLEAN NOT NULL DEFAULT TRUE,
+      ADD COLUMN IF NOT EXISTS payment_description TEXT,
+      ADD COLUMN IF NOT EXISTS payment_instructions TEXT;
+    CREATE TABLE IF NOT EXISTS student_signup_requests (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      student_user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+      professor_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','APPROVED','REJECTED')),
+      auto_approval_requested BOOLEAN NOT NULL DEFAULT FALSE,
+      monthly_amount NUMERIC(12,2),
+      due_day INT NOT NULL DEFAULT 10,
+      billing_type TEXT NOT NULL DEFAULT 'PIX',
+      grace_days INT NOT NULL DEFAULT 5,
+      auto_block BOOLEAN NOT NULL DEFAULT TRUE,
+      payment_description TEXT,
+      payment_instructions TEXT,
+      reviewed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_student_signup_requests_professor
+      ON student_signup_requests(professor_user_id, status, created_at DESC)
   `);
   studentSignupLinksTableEnsured = true;
 };
@@ -196,7 +235,14 @@ const buildSessionPayload = (user, res) => {
     ownerUserId: user.owner_user_id || null,
     platformCredits: Number.isFinite(Number(user.platform_credits)) ? Number(user.platform_credits) : 0,
     studentLimit: Number.isFinite(Number(user.student_limit)) ? Number(user.student_limit) : null,
-    storageLimitBytes: Number.isFinite(Number(user.storage_limit_bytes)) ? Number(user.storage_limit_bytes) : null
+    storageLimitBytes: Number.isFinite(Number(user.storage_limit_bytes)) ? Number(user.storage_limit_bytes) : null,
+    billing_access_managed: user.billing_access_managed === true,
+    subscription_access_expires_at: user.subscription_access_expires_at || null,
+    subscription_plan_code: user.subscription_plan_code || null,
+    subscription_billing_type: user.subscription_billing_type || null,
+    subscription_payment_status: user.subscription_payment_status || null,
+    subscription_last_event_type: user.subscription_last_event_type || null,
+    subscription_payment_url: user.subscription_payment_url || null
   });
   setSessionCookie(res, sessionToken);
   return {
@@ -213,7 +259,8 @@ const buildSessionPayload = (user, res) => {
         ? Number(user.platform_credits)
         : null,
       studentLimit: Number.isFinite(Number(user.student_limit)) ? Number(user.student_limit) : null,
-      storageLimitBytes: Number.isFinite(Number(user.storage_limit_bytes)) ? Number(user.storage_limit_bytes) : null
+      storageLimitBytes: Number.isFinite(Number(user.storage_limit_bytes)) ? Number(user.storage_limit_bytes) : null,
+      billingAccess: getBillingAccessState(user)
     }
   };
 };
@@ -234,7 +281,8 @@ const getProfessorSignupAvailability = async (professorId, client = db) => {
     `SELECT COUNT(*)::int AS total
        FROM users
       WHERE role = 'student'
-        AND owner_user_id = $1`,
+        AND owner_user_id = $1
+        AND is_active = TRUE`,
     [professorId]
   );
   const studentCount = Number(countResult.rows[0]?.total || 0);
@@ -314,6 +362,7 @@ router.post('/login', authIpRateLimiter, loginRateLimiter, async (req, res) => {
   await ensureRoleAndOwnershipSetup();
   await ensurePlatformCreditTables();
   await ensureProfessorQuotaColumns();
+  await ensureBillingAccessSchema();
   const email = sanitizeEmail(req.body?.email || '');
   const password = sanitizeText(req.body?.password || '', 256, { trim: false });
   if (!email || !password) {
@@ -341,6 +390,25 @@ router.post('/login', authIpRateLimiter, loginRateLimiter, async (req, res) => {
     });
   }
   if (!user.is_active && user.role !== 'admin') {
+    if (user.role === 'student') {
+      await ensureStudentSignupLinksTable();
+      const request = await db.query(
+        'SELECT status FROM student_signup_requests WHERE student_user_id = $1',
+        [user.id]
+      );
+      if (request.rows[0]?.status === 'PENDING') {
+        return res.status(403).json({
+          message: 'Seu cadastro aguarda autorização do professor.',
+          code: 'STUDENT_APPROVAL_PENDING'
+        });
+      }
+      if (request.rows[0]?.status === 'REJECTED') {
+        return res.status(403).json({
+          message: 'Seu cadastro não foi autorizado pelo professor.',
+          code: 'STUDENT_APPROVAL_REJECTED'
+        });
+      }
+    }
     return res.status(403).json({ message: 'Conta bloqueada. Verifique o pagamento.' });
   }
   if (user.role === 'admin' && user.is_active === false) {
@@ -560,7 +628,7 @@ router.get('/student-signup-link/:token', signupLinkLookupRateLimiter, async (re
   }
   const tokenHash = hashSignupLinkToken(inviteToken);
   const { rows } = await db.query(
-    `SELECT professor_user_id, created_at
+    `SELECT professor_user_id, auto_approve, monthly_amount, due_day, billing_type, grace_days, created_at
        FROM student_signup_links
       WHERE token_hash = $1
         AND revoked_at IS NULL`,
@@ -581,20 +649,16 @@ router.get('/student-signup-link/:token', signupLinkLookupRateLimiter, async (re
       message: 'Este link de cadastro está indisponível no momento.'
     });
   }
-  if (availability.limitReached) {
-    return res.json({
-      professorName: availability.professorName,
-      acceptingRegistrations: false,
-      studentLimit: availability.studentLimit,
-      studentCount: availability.studentCount,
-      message: 'O professor atingiu o limite de alunos e não pode aceitar novos cadastros agora.'
-    });
-  }
   res.json({
     professorName: availability.professorName,
     acceptingRegistrations: true,
+    approvalMode: invite.auto_approve ? 'AUTOMATIC' : 'MANUAL',
+    monthlyAmount: invite.monthly_amount === null ? null : Number(invite.monthly_amount),
+    dueDay: Number(invite.due_day || 10),
+    billingType: invite.billing_type || 'PIX',
     studentLimit: availability.studentLimit,
     studentCount: availability.studentCount,
+    limitReached: availability.limitReached,
     createdAt: invite.created_at
   });
 });
@@ -626,7 +690,7 @@ router.post('/student-signup-link/:token/register', signupIpRateLimiter, signupL
   try {
     await client.query('BEGIN');
     const { rows: inviteRows } = await client.query(
-      `SELECT l.professor_user_id
+      `SELECT l.*
          FROM student_signup_links l
          JOIN users u ON u.id = l.professor_user_id
         WHERE l.token_hash = $1
@@ -645,17 +709,6 @@ router.post('/student-signup-link/:token/register', signupIpRateLimiter, signupL
       await client.query('ROLLBACK');
       return res.status(403).json({ message: 'Este link de cadastro está indisponível no momento.' });
     }
-    if (availability.limitReached) {
-      await client.query('ROLLBACK');
-      return res.status(403).json({
-        message: 'O professor atingiu o limite de alunos e não pode aceitar novos cadastros agora.',
-        code: 'PROFESSOR_STUDENT_LIMIT_REACHED',
-        quotaStatus: {
-          studentLimit: availability.studentLimit,
-          studentCount: availability.studentCount
-        }
-      });
-    }
     const { rows: existingUsers } = await client.query('SELECT id FROM users WHERE email = $1', [email]);
     if (existingUsers.length) {
       await client.query('ROLLBACK');
@@ -663,6 +716,11 @@ router.post('/student-signup-link/:token/register', signupIpRateLimiter, signupL
     }
     const passwordHash = await bcrypt.hash(password, 10);
     const userId = crypto.randomUUID();
+    const autoApproved = shouldAutoApproveSignup({
+      autoApprove: invite.auto_approve,
+      limitReached: availability.limitReached,
+      professorActive: availability.isActive
+    });
     await client.query(
       `INSERT INTO classes (id, name, owner_user_id)
        VALUES ($1, 'Turma A', $2)
@@ -674,7 +732,7 @@ router.post('/student-signup-link/:token/register', signupIpRateLimiter, signupL
          id, full_name, email, phone, password_hash, role, class_name, is_active, owner_user_id,
          terms_accepted_at, terms_version, marketing_consent_at
        )
-       VALUES ($1, $2, $3, $4, $5, 'student', $6, TRUE, $7, NOW(), $8, $9)`,
+       VALUES ($1, $2, $3, $4, $5, 'student', $6, $7, $8, NOW(), $9, $10)`,
       [
         userId,
         fullName,
@@ -682,13 +740,59 @@ router.post('/student-signup-link/:token/register', signupIpRateLimiter, signupL
         phone || null,
         passwordHash,
         'Turma A',
+        autoApproved,
         invite.professor_user_id,
         LEGAL_TERMS_VERSION,
         req.body?.marketingConsent === false ? null : new Date()
       ]
     );
+    await client.query(
+      `INSERT INTO student_signup_requests (
+         student_user_id, professor_user_id, status, auto_approval_requested,
+         monthly_amount, due_day, billing_type, grace_days, auto_block,
+         payment_description, payment_instructions, reviewed_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [
+        userId,
+        invite.professor_user_id,
+        autoApproved ? 'APPROVED' : 'PENDING',
+        invite.auto_approve === true,
+        invite.monthly_amount,
+        invite.due_day,
+        invite.billing_type,
+        invite.grace_days,
+        invite.auto_block,
+        invite.payment_description,
+        invite.payment_instructions,
+        autoApproved ? new Date() : null
+      ]
+    );
     const { rows: createdRows } = await client.query('SELECT * FROM users WHERE id = $1', [userId]);
     await client.query('COMMIT');
+    if (!autoApproved) {
+      return res.status(201).json({
+        approvalRequired: true,
+        status: 'PENDING',
+        message: availability.limitReached
+          ? 'Cadastro enviado ao professor. A aprovação será possível quando houver vaga no limite de alunos.'
+          : 'Cadastro enviado. Aguarde a autorização do professor para entrar.'
+      });
+    }
+    try {
+      await configureSignupPaymentPlan({
+        professorId: invite.professor_user_id,
+        studentId: userId,
+        amount: invite.monthly_amount,
+        dueDay: invite.due_day,
+        preferredBillingType: invite.billing_type,
+        graceDays: invite.grace_days,
+        autoBlock: invite.auto_block,
+        description: invite.payment_description,
+        instructions: invite.payment_instructions
+      });
+    } catch (paymentError) {
+      console.error('Falha ao preparar cobrança do cadastro aprovado:', paymentError.message);
+    }
     return res.status(201).json(buildSessionPayload(createdRows[0], res));
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});

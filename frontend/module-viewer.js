@@ -171,6 +171,10 @@ const authorizedFetch = async (path, options = {}) => {
     redirectToLogin();
     throw new Error('Sessão expirada');
   }
+  if (response.status === 402) {
+    window.location.replace('admin.html?billing=required');
+    throw new Error('Assinatura vencida');
+  }
   return response;
 };
 
@@ -4515,9 +4519,9 @@ const createInputElementNode = (element, slide, { runActions = null } = {}) => {
         <textarea class="builder-input-text" style="background-color: ${inputBgColor}; color: ${inputTextColor}; --placeholder-color: ${placeholderColor};" placeholder="${escapeHtml(element.placeholder || 'Digite sua resposta')}"></textarea>
       </div>
       <div class="builder-input-composer-actions ${isStaticMode ? 'hidden' : ''}">
-        <button type="button" class="secondary-btn builder-input-upload builder-input-upload-icon builder-input-image-btn ${element.allowImage ? '' : 'hidden'}" aria-label="Anexar imagem" title="Anexar imagem">+</button>
-        <button type="button" class="secondary-btn builder-input-upload builder-input-upload-icon builder-input-audio-btn ${element.allowAudio ? '' : 'hidden'}" aria-label="Anexar audio" title="Anexar audio">Mic</button>
-        <button type="button" class="primary-btn builder-input-submit" style="background-color: ${buttonBgColor}; color: ${buttonTextColor};" aria-label="${escapeAttribute(element.submitLabel || 'Enviar resposta')}" title="${escapeAttribute(element.submitLabel || 'Enviar resposta')}">
+        <button type="button" class="builder-input-upload builder-input-upload-icon builder-input-image-btn ${element.allowImage ? '' : 'hidden'}" aria-label="Anexar imagem" title="Anexar imagem">+</button>
+        <button type="button" class="builder-input-upload builder-input-upload-icon builder-input-audio-btn ${element.allowAudio ? '' : 'hidden'}" aria-label="Anexar audio" title="Anexar audio">Mic</button>
+        <button type="button" class="builder-input-submit" style="background-color: ${buttonBgColor}; color: ${buttonTextColor};" aria-label="${escapeAttribute(element.submitLabel || 'Enviar resposta')}" title="${escapeAttribute(element.submitLabel || 'Enviar resposta')}">
           <span class="builder-input-submit-icon" aria-hidden="true">➤</span>
         </button>
       </div>
@@ -5116,7 +5120,7 @@ const createQuizNode = (element, slide) => {
       )
       .join('')}
     </div>
-    <button type="button" class="secondary-btn builder-quiz-action">${escapeHtml(element.actionLabel)}</button>
+    <button type="button" class="builder-quiz-action">${escapeHtml(element.actionLabel)}</button>
     <div class="builder-quiz-feedback" aria-live="polite"></div>
   `;
   const actionBtn = node.querySelector('.builder-quiz-action');
@@ -5147,7 +5151,7 @@ const createQuizNode = (element, slide) => {
   }
   if (actionBtn) {
     actionBtn.style.backgroundColor = element.quizButtonBackgroundColor;
-    actionBtn.style.color = '#ffffff';
+    actionBtn.style.color = element.quizButtonTextColor || '#ffffff';
   }
   if (attempt?.answered) {
     feedbackNode.textContent = attempt.isCorrect ? element.successMessage : element.errorMessage;
