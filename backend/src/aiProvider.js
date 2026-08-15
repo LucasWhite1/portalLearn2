@@ -184,6 +184,7 @@ const TEMPLATE_TRIGGER_ACTION_TYPES = [
   'showElement',
   'hideElement',
   'moveElement',
+  'toggleTrigger',
   'playAnimation'
 ];
 const TEMPLATE_ANIMATION_TYPES = [
@@ -555,10 +556,11 @@ function createAiCapabilityCatalog() {
     triggerActionTypes: TEMPLATE_TRIGGER_ACTION_TYPES,
     detectorAcceptedDragExamples: ['any', 'type:image', 'type:text', 'element:element-id'],
     runtimeCapabilities: {
-      actionTriggerElements: ['floatingButton', 'detector', 'timedTrigger', 'input', 'key'],
+      actionTriggerElements: ['floatingButton', 'detector', 'timedTrigger', 'input', 'key', 'quiz', 'video'],
       draggableElementTypes: ['text', 'block', 'image'],
       insertActions: ['addText', 'addImage', 'addAudio', 'addVideo', 'addQuiz'],
       targetActions: ['replaceText', 'showElement', 'hideElement', 'moveElement', 'playAnimation', 'playAudio', 'playVideo', 'pauseVideo', 'seekVideo'],
+      triggerActions: ['toggleTrigger'],
       navigationActions: ['nextSlide', 'jumpSlide', 'redirect'],
       mediaActions: ['playAudio', 'playVideo', 'pauseVideo', 'seekVideo', 'addAudio', 'addVideo'],
       revealPattern: 'Elemento alvo com initiallyHidden true + trigger showElement apontando para targetElementId.',
@@ -1012,7 +1014,7 @@ function normalizeElementPatch(element) {
 
 function normalizeActionConfig(config) {
   const normalized = {};
-  ['type', 'targetSlideId', 'targetElementId', 'text', 'url', 'quizQuestion', 'ruleGroup', 'textColor', 'backgroundColor', 'textAlign', 'fontFamily', 'fontWeight', 'successMessage', 'errorMessage', 'actionLabel', 'quizBackgroundColor', 'quizQuestionColor', 'quizOptionBackgroundColor', 'quizOptionTextColor', 'quizButtonBackgroundColor', 'replaceMode', 'replaceText', 'detectorAcceptedDrag'].forEach((key) => {
+  ['type', 'targetSlideId', 'targetElementId', 'targetTriggerId', 'text', 'url', 'quizQuestion', 'ruleGroup', 'textColor', 'backgroundColor', 'textAlign', 'fontFamily', 'fontWeight', 'successMessage', 'errorMessage', 'actionLabel', 'quizBackgroundColor', 'quizQuestionColor', 'quizOptionBackgroundColor', 'quizOptionTextColor', 'quizButtonBackgroundColor', 'replaceMode', 'replaceText', 'detectorAcceptedDrag'].forEach((key) => {
     if (typeof config[key] === 'string') {
       normalized[key] = config[key];
     }

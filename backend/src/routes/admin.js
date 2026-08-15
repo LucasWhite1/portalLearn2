@@ -72,6 +72,11 @@ const { ensureBillingAccessSchema, getBillingAccessState } = require('../billing
 const { configureSignupPaymentPlan } = require('../studentPayments');
 const { canApproveStudent } = require('../studentSignupPolicy');
 const {
+  countProfessorStudents,
+  ensureStudentProfessorLinksSchema,
+  linkStudentToProfessor
+} = require('../studentProfessorLinks');
+const {
   sanitizeText,
   sanitizeEmail,
   sanitizePhone,
@@ -754,15 +759,7 @@ const estimateNotificationAttachmentsStorageBytes = (attachments = []) =>
   }, 0);
 
 const getProfessorStudentCount = async (professorId) => {
-  const { rows } = await db.query(
-    `SELECT COUNT(*)::int AS total
-       FROM users
-      WHERE role = 'student'
-        AND owner_user_id = $1
-        AND is_active = TRUE`,
-    [professorId]
-  );
-  return Number(rows[0]?.total || 0);
+  return countProfessorStudents(professorId);
 };
 
 const getProfessorStorageUsageBytes = async (professorId) => {
@@ -1025,11 +1022,16 @@ const sendNotificationDataAttachment = (res, attachment) => {
 };
 
 const ensureProfessorOwnsStudent = async (req, studentId) => {
+  await ensureStudentProfessorLinksSchema();
   const params = [studentId];
   let query = "SELECT id FROM users WHERE id = $1 AND role = 'student'";
   if (isProfessor(req)) {
     params.push(req.user.id);
-    query += " AND owner_user_id = $2";
+    query += ` AND EXISTS (
+      SELECT 1 FROM professor_students relation
+       WHERE relation.student_user_id = users.id
+         AND relation.professor_user_id = $2
+    )`;
   }
   const { rows } = await db.query(query, params);
   return rows[0] || null;
@@ -1048,7 +1050,11 @@ const ensureProfessorOwnsCourse = async (req, courseId) => {
 
 const buildStudentOwnershipWriteClause = (req, idParamIndex) =>
   isProfessor(req)
-    ? `id = $${idParamIndex} AND role = 'student' AND owner_user_id = $${idParamIndex + 1}`
+    ? `id = $${idParamIndex} AND role = 'student' AND EXISTS (
+        SELECT 1 FROM professor_students relation
+         WHERE relation.student_user_id = users.id
+           AND relation.professor_user_id = $${idParamIndex + 1}
+      )`
     : `id = $${idParamIndex} AND role = 'student'`;
 
 const ensureCourseCoverColumn = async () => {
@@ -1328,20 +1334,27 @@ router.get('/students', async (req, res) => {
   await ensureClassesTable();
   await ensureOwnershipColumns();
   await ensureStudentSignupLinksTable();
+  await ensureStudentProfessorLinksSchema();
   const params = [];
   let studentQuery = `SELECT s.id, s.full_name, s.email, s.phone, s.role, s.class_name, s.is_active, s.created_at,
-                             s.owner_user_id, owner.full_name AS owner_name, owner.email AS owner_email,
+                             COALESCE(relation.professor_user_id, s.owner_user_id) AS owner_user_id,
+                             owner.full_name AS owner_name, owner.email AS owner_email,
+                             relation.active AS professor_link_active,
+                             relation.class_name AS professor_class_name,
                              signup.status AS signup_approval_status,
                              signup.monthly_amount AS signup_monthly_amount,
                              signup.billing_type AS signup_billing_type,
                              signup.due_day AS signup_due_day
                       FROM users s
-                      LEFT JOIN users owner ON owner.id = s.owner_user_id
-                      LEFT JOIN student_signup_requests signup ON signup.student_user_id = s.id
+                      LEFT JOIN professor_students relation ON relation.student_user_id = s.id
+                      LEFT JOIN users owner ON owner.id = COALESCE(relation.professor_user_id, s.owner_user_id)
+                      LEFT JOIN student_signup_requests signup
+                        ON signup.student_user_id = s.id
+                       AND signup.professor_user_id = relation.professor_user_id
                       WHERE s.role = 'student'`;
   if (isProfessor(req)) {
     params.push(req.user.id);
-    studentQuery += ` AND s.owner_user_id = $1`;
+    studentQuery += ` AND relation.professor_user_id = $1`;
   }
   studentQuery += ` ORDER BY
     CASE signup.status WHEN 'PENDING' THEN 0 WHEN 'REJECTED' THEN 2 ELSE 1 END,
@@ -1354,10 +1367,16 @@ router.get('/students', async (req, res) => {
       `SELECT c.id, c.title, c.description, c.slug, e.video_position, e.interactive_step, e.current_module, e.grade
          FROM enrollments e
          JOIN courses c ON c.id = e.course_id
-         WHERE e.user_id = $1`,
-        [student.id]
+         WHERE e.user_id = $1
+           ${isProfessor(req) ? 'AND c.owner_user_id = $2' : ''}`,
+        isProfessor(req) ? [student.id, req.user.id] : [student.id]
       );
-      return { ...student, enrollments };
+      return {
+        ...student,
+        class_name: student.professor_class_name || student.class_name,
+        is_active: isProfessor(req) ? student.professor_link_active !== false : student.is_active,
+        enrollments
+      };
     })
   );
 
@@ -1568,7 +1587,11 @@ router.delete('/professors/:id', async (req, res) => {
     }
 
     await client.query('DELETE FROM notifications WHERE created_by = $1 OR owner_user_id = $1', [id]);
-    await client.query('DELETE FROM users WHERE owner_user_id = $1 AND role = \'student\'', [id]);
+    await client.query(
+      `UPDATE users SET owner_user_id = NULL
+        WHERE owner_user_id = $1 AND role = 'student'`,
+      [id]
+    );
     await client.query('DELETE FROM courses WHERE owner_user_id = $1', [id]);
     await client.query('UPDATE modules SET created_by = NULL WHERE created_by = $1', [id]);
     await client.query('DELETE FROM users WHERE id = $1 AND role = \'professor\'', [id]);
@@ -1700,6 +1723,7 @@ router.get('/professors/financial-overview', async (req, res) => {
   if (!ensureGlobalAdmin(req, res)) return;
   await ensureProfessorCreditColumns();
   await ensureProfessorQuotaColumns();
+  await ensureStudentProfessorLinksSchema();
   await ensureBillingAccessSchema();
 
   const tableResult = await db.query("SELECT to_regclass('public.billing_subscriptions') AS billing_table");
@@ -1736,8 +1760,8 @@ router.get('/professors/financial-overview', async (req, res) => {
        FROM users u
        LEFT JOIN LATERAL (
          SELECT COUNT(*)::int AS student_count
-           FROM users student
-          WHERE student.role = 'student' AND student.owner_user_id = u.id AND student.is_active = TRUE
+           FROM professor_students relation
+          WHERE relation.professor_user_id = u.id AND relation.active = TRUE
        ) student_stats ON TRUE
        ${billingJoin}
       WHERE u.role = 'professor'
@@ -1979,6 +2003,7 @@ router.post('/student-signup-link', async (req, res) => {
 router.post('/students', async (req, res) => {
   await ensureOwnershipColumns();
   await ensureProfessorQuotaColumns();
+  await ensureStudentProfessorLinksSchema();
   const fullName = sanitizeText(req.body?.fullName, 160);
   const email = sanitizeEmail(req.body?.email || '');
   const phone = sanitizePhone(req.body?.phone || '');
@@ -2007,6 +2032,14 @@ router.post('/students', async (req, res) => {
      VALUES ($1, $2, $3, $4, $5, 'student', $6, $7, $8)`,
     [id, fullName, email, phone || null, hashedPassword, className || 'Turma A', isActive !== false, req.user.id]
   );
+  if (isProfessor(req)) {
+    await linkStudentToProfessor(null, {
+      professorId: req.user.id,
+      studentId: id,
+      className: className || 'Turma A',
+      source: 'admin-created'
+    });
+  }
 
   res.status(201).json({ id, fullName, email });
 });
@@ -2056,7 +2089,12 @@ router.delete('/students/:id/enrollments/:courseId', async (req, res) => {
                             AND u.role = 'student'`;
   if (isProfessor(req)) {
     params.push(req.user.id);
-    query += ' AND u.owner_user_id = $3 AND c.owner_user_id = $3';
+    query += ` AND c.owner_user_id = $3
+      AND EXISTS (
+        SELECT 1 FROM professor_students relation
+         WHERE relation.student_user_id = u.id
+           AND relation.professor_user_id = $3
+      )`;
   }
   query += ')';
   await db.query(query, params);
@@ -2145,14 +2183,27 @@ router.put('/students/:id/status', async (req, res) => {
     const current = await db.query(
       `SELECT student.is_active, request.status AS signup_status
          FROM users student
-         LEFT JOIN student_signup_requests request ON request.student_user_id = student.id
-        WHERE student.id = $1 AND student.role = 'student' AND student.owner_user_id = $2`,
+         JOIN professor_students relation
+           ON relation.student_user_id = student.id AND relation.professor_user_id = $2
+         LEFT JOIN student_signup_requests request
+           ON request.student_user_id = student.id AND request.professor_user_id = $2
+        WHERE student.id = $1 AND student.role = 'student'`,
       [id, req.user.id]
     );
     if (['PENDING', 'REJECTED'].includes(current.rows[0]?.signup_status)) {
       return res.status(409).json({ message: 'Use a ação Aprovar para autorizar este cadastro.' });
     }
     if (current.rows[0]?.is_active === false) await assertProfessorStudentLimit(req);
+  }
+  if (isProfessor(req)) {
+    const { rowCount } = await db.query(
+      `UPDATE professor_students
+          SET active = $1, updated_at = NOW()
+        WHERE student_user_id = $2 AND professor_user_id = $3`,
+      [isActive, id, req.user.id]
+    );
+    if (!rowCount) return res.status(404).json({ message: 'Aluno nao encontrado' });
+    return res.status(204).send();
   }
   const params = [isActive, id];
   if (isProfessor(req)) {
@@ -2174,6 +2225,7 @@ router.put('/students/:id/signup-approval', async (req, res) => {
   await ensureOwnershipColumns();
   await ensureProfessorQuotaColumns();
   await ensureStudentSignupLinksTable();
+  await ensureStudentProfessorLinksSchema();
   const studentId = req.params.id;
   const decision = String(req.body?.decision || '').toUpperCase();
   if (!isUuid(studentId) || !['APPROVED', 'REJECTED'].includes(decision)) {
@@ -2192,10 +2244,14 @@ router.put('/students/:id/signup-approval', async (req, res) => {
     }
     const { rows } = await client.query(
       `SELECT request.*, student.is_active, student.owner_user_id,
+              relation.active AS professor_link_active,
               professor.role AS professor_role, professor.student_limit
          FROM student_signup_requests request
          JOIN users student ON student.id = request.student_user_id AND student.role = 'student'
          JOIN users professor ON professor.id = request.professor_user_id
+         LEFT JOIN professor_students relation
+           ON relation.professor_user_id = request.professor_user_id
+          AND relation.student_user_id = request.student_user_id
         WHERE request.student_user_id = $1${ownershipSql}
         FOR UPDATE OF request, student, professor`,
       params
@@ -2206,20 +2262,14 @@ router.put('/students/:id/signup-approval', async (req, res) => {
       return res.status(404).json({ message: 'Solicitação de cadastro não encontrada.' });
     }
 
-    if (decision === 'APPROVED' && !signupRequest.is_active) {
-      const countResult = await client.query(
-        `SELECT COUNT(*)::int AS total
-           FROM users
-          WHERE role = 'student' AND owner_user_id = $1 AND is_active = TRUE`,
-        [signupRequest.professor_user_id]
-      );
-      const activeStudents = Number(countResult.rows[0]?.total || 0);
+    if (decision === 'APPROVED' && signupRequest.professor_link_active !== true) {
+      const activeStudents = await countProfessorStudents(signupRequest.professor_user_id, client);
       const studentLimit = Number(signupRequest.student_limit || 0);
       if (!canApproveStudent({
         professorRole: signupRequest.professor_role,
         studentLimit,
         activeStudents,
-        alreadyActive: signupRequest.is_active
+        alreadyActive: signupRequest.professor_link_active === true
       })) {
         await client.query('ROLLBACK');
         return res.status(403).json({
@@ -2242,9 +2292,17 @@ router.put('/students/:id/signup-approval', async (req, res) => {
       [studentId, decision]
     );
     await client.query(
-      `UPDATE users SET is_active = $2 WHERE id = $1 AND role = 'student'`,
-      [studentId, decision === 'APPROVED']
+      `UPDATE users SET is_active = TRUE WHERE id = $1 AND role = 'student'`,
+      [studentId]
     );
+    if (decision === 'APPROVED') {
+      await linkStudentToProfessor(client, {
+        professorId: signupRequest.professor_user_id,
+        studentId,
+        className: signupRequest.class_name || 'Turma A',
+        source: 'signup-link'
+      });
+    }
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
@@ -2280,6 +2338,35 @@ router.delete('/students/:id', async (req, res) => {
   await ensureOwnershipColumns();
   if (!isUuid(req.params.id)) {
     return res.status(400).json({ message: 'Aluno invalido' });
+  }
+  if (isProfessor(req)) {
+    const client = await db.getClient();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `DELETE FROM enrollments enrollment
+          USING courses course
+         WHERE enrollment.user_id = $1
+           AND enrollment.course_id = course.id
+           AND course.owner_user_id = $2`,
+        [req.params.id, req.user.id]
+      );
+      await client.query(
+        'DELETE FROM student_payment_plans WHERE student_user_id = $1 AND professor_user_id = $2',
+        [req.params.id, req.user.id]
+      );
+      await client.query(
+        'DELETE FROM professor_students WHERE student_user_id = $1 AND professor_user_id = $2',
+        [req.params.id, req.user.id]
+      );
+      await client.query('COMMIT');
+      return res.status(204).send();
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
   }
   if (!(await ensureProfessorOwnsStudent(req, req.params.id))) {
     return res.status(404).json({ message: 'Aluno nao encontrado' });
@@ -2330,10 +2417,16 @@ router.get('/reports', async (req, res) => {
                FROM enrollments e
                JOIN users u ON u.id = e.user_id
                JOIN courses c ON c.id = e.course_id
-               LEFT JOIN users owner ON owner.id = u.owner_user_id`;
+                LEFT JOIN users owner ON owner.id = c.owner_user_id`;
   if (isProfessor(req)) {
     params.push(req.user.id);
-    query += ` WHERE u.owner_user_id = $1 AND c.owner_user_id = $1 AND ${reportVisibilityCondition}`;
+    query += ` WHERE c.owner_user_id = $1
+      AND EXISTS (
+        SELECT 1 FROM professor_students relation
+         WHERE relation.student_user_id = u.id
+           AND relation.professor_user_id = $1
+      )
+      AND ${reportVisibilityCondition}`;
   } else {
     query += ` WHERE ${reportVisibilityCondition}`;
   }
@@ -2360,7 +2453,10 @@ router.post('/reports/:userId/:courseId/correct', async (req, res) => {
       AND c.id = e.course_id`;
   if (isProfessor(req)) {
     params.push(req.user.id);
-    query += ' AND u.owner_user_id = $3 AND c.owner_user_id = $3';
+    query += ` AND c.owner_user_id = $3 AND EXISTS (
+      SELECT 1 FROM professor_students relation
+       WHERE relation.student_user_id = u.id AND relation.professor_user_id = $3
+    )`;
   }
   query += ' RETURNING e.user_id, e.course_id, e.report_corrected_at';
   const { rows } = await db.query(query, params);
@@ -2398,7 +2494,10 @@ router.delete('/reports/:userId/:courseId/corrected', async (req, res) => {
       AND c.id = e.course_id`;
   if (isProfessor(req)) {
     params.push(req.user.id);
-    query += ' AND u.owner_user_id = $3 AND c.owner_user_id = $3';
+    query += ` AND c.owner_user_id = $3 AND EXISTS (
+      SELECT 1 FROM professor_students relation
+       WHERE relation.student_user_id = u.id AND relation.professor_user_id = $3
+    )`;
   }
   query += ' RETURNING e.user_id, e.course_id';
   const { rows } = await db.query(query, params);
@@ -2423,7 +2522,10 @@ router.get('/reports/:userId/:courseId/timeline', async (req, res) => {
      WHERE e.user_id = $1 AND e.course_id = $2`;
   if (isProfessor(req)) {
     params.push(req.user.id);
-    query += ' AND u.owner_user_id = $3 AND c.owner_user_id = $3';
+    query += ` AND c.owner_user_id = $3 AND EXISTS (
+      SELECT 1 FROM professor_students relation
+       WHERE relation.student_user_id = u.id AND relation.professor_user_id = $3
+    )`;
   }
   const { rows } = await db.query(query, params);
   const enrollment = rows[0];
@@ -2464,7 +2566,10 @@ router.get('/reports/:userId/:courseId/replay', async (req, res) => {
      WHERE e.user_id = $1 AND e.course_id = $2`;
   if (isProfessor(req)) {
     params.push(req.user.id);
-    query += ' AND u.owner_user_id = $3 AND c.owner_user_id = $3';
+    query += ` AND c.owner_user_id = $3 AND EXISTS (
+      SELECT 1 FROM professor_students relation
+       WHERE relation.student_user_id = u.id AND relation.professor_user_id = $3
+    )`;
   }
   const { rows } = await db.query(query, params);
   const enrollment = rows[0];
@@ -2564,6 +2669,9 @@ router.get('/course-access-requests', async (req, res) => {
 router.post('/course-access-requests/:requestId/decision', async (req, res) => {
   await ensureCourseAccessRequestsTable();
   await ensureOwnershipColumns();
+  await ensureStudentSignupLinksTable();
+  await ensureProfessorQuotaColumns();
+  await ensureStudentProfessorLinksSchema();
   const { requestId } = req.params;
   if (!isUuid(requestId)) {
     return res.status(400).json({ message: 'SolicitaÃ§Ã£o invÃ¡lida.' });
@@ -2574,16 +2682,29 @@ router.post('/course-access-requests/:requestId/decision', async (req, res) => {
   }
 
   const client = await db.getClient();
+  let approvedPaymentRequest = null;
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
-      `SELECT car.id, car.user_id, car.course_id, car.status, c.title AS course_title, u.full_name AS student_name
+      `SELECT car.id, car.user_id, car.course_id, car.status,
+              c.title AS course_title, c.owner_user_id AS professor_user_id,
+              u.full_name AS student_name,
+              professor.role AS professor_role, professor.student_limit,
+              link.monthly_amount, link.due_day, link.billing_type, link.grace_days,
+              link.auto_block, link.payment_description, link.payment_instructions,
+              relation.active AS professor_link_active
        FROM course_access_requests car
        JOIN courses c ON c.id = car.course_id
        JOIN users u ON u.id = car.user_id
+       LEFT JOIN users professor ON professor.id = c.owner_user_id
+       LEFT JOIN student_signup_links link
+         ON link.professor_user_id = c.owner_user_id AND link.revoked_at IS NULL
+       LEFT JOIN professor_students relation
+         ON relation.professor_user_id = c.owner_user_id
+        AND relation.student_user_id = car.user_id
        WHERE car.id = $1
        ${isProfessor(req) ? 'AND c.owner_user_id = $2' : ''}
-       FOR UPDATE`,
+       FOR UPDATE OF car`,
       isProfessor(req) ? [requestId, req.user.id] : [requestId]
     );
     const request = rows[0];
@@ -2591,9 +2712,34 @@ router.post('/course-access-requests/:requestId/decision', async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(404).json({ message: 'SolicitaÃ§Ã£o nÃ£o encontrada.' });
     }
-    if (request.status !== 'pending') {
+    const canReviewRequest = request.status === 'pending'
+      || (decision === 'approved' && request.status === 'rejected');
+    if (!canReviewRequest) {
       await client.query('ROLLBACK');
       return res.status(409).json({ message: 'Esta solicitaÃ§Ã£o jÃ¡ foi analisada.' });
+    }
+
+    if (decision === 'approved' && request.professor_user_id && request.professor_link_active !== true) {
+      const activeStudents = await countProfessorStudents(request.professor_user_id, client);
+      const studentLimit = Number(request.student_limit || 0);
+      if (!canApproveStudent({
+        professorRole: request.professor_role,
+        studentLimit,
+        activeStudents,
+        alreadyActive: false
+      })) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          message: `O limite de ${studentLimit} aluno(s) está preenchido. Adicione vagas ao plano para aprovar este acesso.`,
+          code: 'PROFESSOR_STUDENT_LIMIT_REACHED',
+          quotaStatus: { studentLimit, studentCount: activeStudents },
+          seatUpgrade: {
+            available: request.professor_role === 'professor',
+            unitPrice: getExtraStudentPrice(),
+            minimumQuantity: 1
+          }
+        });
+      }
     }
 
     await client.query(
@@ -2604,6 +2750,13 @@ router.post('/course-access-requests/:requestId/decision', async (req, res) => {
     );
 
     if (decision === 'approved') {
+      if (request.professor_user_id) {
+        await linkStudentToProfessor(client, {
+          professorId: request.professor_user_id,
+          studentId: request.user_id,
+          source: 'course-store'
+        });
+      }
       await client.query(
         `INSERT INTO enrollments (user_id, course_id, video_position, interactive_step, current_module, grade, updated_at)
          VALUES ($1, $2, 0, '0/0 slides', 'MÃ³dulo 1', 0, NOW())
@@ -2611,14 +2764,37 @@ router.post('/course-access-requests/:requestId/decision', async (req, res) => {
          DO NOTHING`,
         [request.user_id, request.course_id]
       );
+      approvedPaymentRequest = request;
     }
 
     await client.query('COMMIT');
+    let payment = null;
+    let paymentWarning = null;
+    if (approvedPaymentRequest?.professor_user_id && approvedPaymentRequest.monthly_amount !== null) {
+      try {
+        payment = await configureSignupPaymentPlan({
+          professorId: approvedPaymentRequest.professor_user_id,
+          studentId: approvedPaymentRequest.user_id,
+          amount: approvedPaymentRequest.monthly_amount,
+          dueDay: approvedPaymentRequest.due_day,
+          preferredBillingType: approvedPaymentRequest.billing_type,
+          graceDays: approvedPaymentRequest.grace_days,
+          autoBlock: approvedPaymentRequest.auto_block,
+          description: approvedPaymentRequest.payment_description,
+          instructions: approvedPaymentRequest.payment_instructions
+        });
+      } catch (paymentError) {
+        paymentWarning = 'O acesso foi aprovado, mas a cobrança precisa ser sincronizada no financeiro.';
+        console.error('Falha ao preparar cobrança após acesso pela vitrine:', paymentError.message);
+      }
+    }
     res.json({
       success: true,
       status: decision,
       courseTitle: request.course_title,
-      studentName: request.student_name
+      studentName: request.student_name,
+      payment,
+      paymentWarning
     });
   } catch (error) {
     await client.query('ROLLBACK');

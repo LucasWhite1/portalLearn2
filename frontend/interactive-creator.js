@@ -44,6 +44,8 @@ import {
   getSlideExportAnimationProgress,
   interpolateSlideExportNumber
 } from './modules/slide-export-runtime.mjs';
+import { getTriggerTargetAllowedTypes } from './modules/trigger-target-types.mjs';
+import { getSlideTriggerTargets, toggleSlideTrigger } from './modules/trigger-toggle.mjs';
 
 const backgroundRemovalModulePromise = import('./image-background-removal.js');
 const eraserUtilsPromise = import('./eraser-utils.js');
@@ -421,6 +423,7 @@ let floatingActionTypeLabel;
 let floatingActionTypeSelect;
 let floatingTargetSlideSelect;
 let floatingTargetElementSelect;
+let floatingTargetTriggerSelect;
 let floatingPickTargetElementBtn;
 let builderProfessorCreditsStatus;
 let floatingRequireAllToggle;
@@ -475,6 +478,7 @@ let videoTriggerTimeInput;
 let videoTriggerActionSelect;
 let videoTriggerSeekTimeInput;
 let videoTriggerTargetElementSelect;
+let videoTriggerTargetTriggerSelect;
 let videoTriggerTargetSlideSelect;
 let videoTriggerUrlInput;
 let videoTriggerActionTextLabel;
@@ -648,7 +652,11 @@ let videoCaptionManualExpanded = false;
 
 const FLOATING_INSERT_ACTIONS = ['addText', 'addImage', 'addAudio', 'addVideo', 'addQuiz'];
 const FLOATING_TARGET_ACTIONS = ['moveElement', 'playAnimation', 'replaceText', 'playAudio', 'playVideo', 'pauseVideo', 'seekVideo', 'showElement', 'hideElement'];
-const ACTION_TRIGGER_ELEMENT_TYPES = ['floatingButton', 'detector', 'timedTrigger', 'input', 'key'];
+const ACTION_TRIGGER_ELEMENT_TYPES = ['floatingButton', 'detector', 'timedTrigger', 'input', 'key', 'quiz'];
+const QUIZ_RESULT_TRIGGERS = [
+  { result: 'correct', name: 'Ao acertar' },
+  { result: 'wrong', name: 'Ao errar' }
+];
 const MAX_ELEMENT_TRIGGER_COUNT = 40;
 const STUDENT_DRAGGABLE_TYPES = new Set(['text', 'block', 'image']);
 const REPLACEABLE_TEXT_TYPES = new Set(['text', 'block', 'floatingButton']);
@@ -2538,7 +2546,7 @@ const loadTemplateStore = async () => {
     const payload = await response.json();
     templateStoreCatalog = Array.isArray(payload?.templates) ? payload.templates : [];
     templateStoreStatus.textContent = templateStoreCatalog.length
-      ? `${templateStoreCatalog.length} template(s) publicados na pasta ${payload?.folder || 'template-store'}.`
+      ? `${templateStoreCatalog.length} template(s) publicados na loja.`
       : `Nenhum template encontrado na pasta ${payload?.folder || 'template-store'}.`;
     renderTemplateStoreList();
   } catch (error) {
@@ -4755,6 +4763,7 @@ const getTextDecorationFlags = (source = {}, fallback = DEFAULT_INSERT_TEXT_STYL
 
 const normalizeRuntimeActionConfig = (config = {}) => ({
   ...config,
+  targetTriggerId: typeof config.targetTriggerId === 'string' ? config.targetTriggerId : '',
   url: typeof config.url === 'string' ? config.url : '',
   text: typeof config.text === 'string' && config.text ? config.text : 'Novo texto',
   replaceMode:
@@ -4786,6 +4795,7 @@ const createDefaultActionConfig = () => ({
   type: 'none',
   targetSlideId: '',
   targetElementId: '',
+  targetTriggerId: '',
   ruleGroup: '',
   requireAllButtonsInGroup: false,
   text: 'Novo texto',
@@ -5668,6 +5678,7 @@ const createInteractionTrigger = (elementType = 'floatingButton', source = {}) =
     time: Math.max(0, Number(source.time ?? source.triggerTime) || 0),
     keys: normalizeKeyBindingList(source.keys ?? source.keyBindings ?? source.keyBinding ?? source.key ?? []),
     visibleKey: elementType === 'key' ? Boolean(source.visibleKey ?? source.showKey ?? source.keyVisible) : false,
+    ...(elementType === 'quiz' ? { quizResult: source.quizResult === 'wrong' ? 'wrong' : 'correct' } : {}),
     actionConfig: normalizeRuntimeActionConfig(config)
   };
 };
@@ -5718,6 +5729,7 @@ const normalizeQuizElement = (element) => {
   const rawQuizWidth = Number(element.width);
   element.width = (!Number.isNaN(rawQuizWidth) && rawQuizWidth > 0) ? rawQuizWidth : 420;
   element.height = Math.max(getQuizMinimumHeight(element.options), Number(element.height) || 0);
+  normalizeFloatingActionConfig(element);
 };
 
 const normalizeFloatingActionConfig = (element) => {
@@ -5726,7 +5738,20 @@ const normalizeFloatingActionConfig = (element) => {
   }
   const legacyConfig = element.actionConfig && typeof element.actionConfig === 'object' ? element.actionConfig : {};
   const sourceTriggers = Array.isArray(element.interactionTriggers) ? element.interactionTriggers : [];
-  const normalizedTriggers = (sourceTriggers.length ? sourceTriggers : [{ actionConfig: legacyConfig }])
+  const triggerSources = element.type === 'quiz'
+    ? QUIZ_RESULT_TRIGGERS.map((definition, index) => {
+      const matchingTrigger = sourceTriggers.find((trigger) => trigger?.quizResult === definition.result);
+      const fallbackTrigger = sourceTriggers[index];
+      const source = matchingTrigger || fallbackTrigger || {};
+      return {
+        ...source,
+        name: definition.name,
+        quizResult: definition.result,
+        actionConfig: source.actionConfig || (index === 0 ? legacyConfig : {})
+      };
+    })
+    : (sourceTriggers.length ? sourceTriggers : [{ actionConfig: legacyConfig }]);
+  const normalizedTriggers = triggerSources
     .slice(0, MAX_ELEMENT_TRIGGER_COUNT)
     .map((trigger, index) => {
       const normalized = createInteractionTrigger(element.type, trigger);
@@ -5782,7 +5807,9 @@ const normalizeFloatingActionConfig = (element) => {
       normalized.keys = getTriggerKeyBindings(normalized);
       normalized.visibleKey = element.type === 'key' ? isKeyTriggerVisible(normalized) : false;
       normalized.name =
-        normalized.name || `${element.type === 'detector' ? 'Gatilho' : element.type === 'timedTrigger' ? 'Tempo' : element.type === 'input' ? 'Envio' : 'Ação'} ${index + 1}`;
+        element.type === 'quiz'
+          ? (normalized.quizResult === 'wrong' ? 'Ao errar' : 'Ao acertar')
+          : normalized.name || `${element.type === 'detector' ? 'Gatilho' : element.type === 'timedTrigger' ? 'Tempo' : element.type === 'input' ? 'Envio' : 'Ação'} ${index + 1}`;
       normalized.actionConfig = config;
       return normalized;
     });
@@ -5852,6 +5879,7 @@ const VIDEO_TRIGGER_ACTIONS = new Set([
   'seekVideo',
   'showElement',
   'hideElement',
+  'toggleTrigger',
   'moveElement',
   'playAnimation'
 ]);
@@ -6290,7 +6318,7 @@ const resolveVideoTriggerActionTargetElementId = (element, trigger) => {
 
 const addFloatingTrigger = () => {
   const element = getSelectedActionTriggerElement();
-  if (!element) {
+  if (!element || element.type === 'quiz') {
     return;
   }
   normalizeFloatingActionConfig(element);
@@ -6323,7 +6351,7 @@ const addFloatingTrigger = () => {
 const duplicateFloatingTrigger = () => {
   const element = getSelectedActionTriggerElement();
   const trigger = getSelectedFloatingTrigger(element);
-  if (!element || !trigger) {
+  if (!element || !trigger || element.type === 'quiz') {
     return;
   }
   if ((element.interactionTriggers || []).length >= MAX_ELEMENT_TRIGGER_COUNT) {
@@ -6347,7 +6375,7 @@ const duplicateFloatingTrigger = () => {
 const removeFloatingTrigger = () => {
   const element = getSelectedActionTriggerElement();
   const trigger = getSelectedFloatingTrigger(element);
-  if (!element || !trigger) {
+  if (!element || !trigger || element.type === 'quiz') {
     return;
   }
   normalizeFloatingActionConfig(element);
@@ -6499,19 +6527,10 @@ const getFloatingInsertPreviewRect = (config) => {
 
 const getFloatingTargetCandidateIds = (actionType = 'none', sourceElement = null) => {
   const slide = getActiveSlide();
-  const allowedTypes = ['playVideo', 'pauseVideo', 'seekVideo'].includes(actionType)
-    ? ['video']
-    : actionType === 'playAudio'
-      ? ['audio']
-      : ['showElement', 'hideElement'].includes(actionType)
-        ? ['text', 'block', 'image', 'audio', 'video', 'quiz', 'floatingButton', 'input', 'detector', 'animatedArrow', 'camera', 'key']
-        : actionType === 'moveElement'
-          ? ['text', 'block', 'image', 'input', 'camera']
-          : actionType === 'replaceText'
-            ? Array.from(REPLACEABLE_TEXT_TYPES)
-            : actionType === 'playAnimation'
-              ? Array.from(ANIMATABLE_ELEMENT_TYPES)
-              : [];
+  const allowedTypes = getTriggerTargetAllowedTypes(actionType, {
+    replaceableTextTypes: REPLACEABLE_TEXT_TYPES,
+    animatableElementTypes: ANIMATABLE_ELEMENT_TYPES
+  });
   const allowSourceElementAsTarget = canActionTargetSourceElement(actionType, sourceElement);
   return new Set(
     (slide?.elements || [])
@@ -7117,6 +7136,14 @@ const executePreviewActionConfig = (element, config, slide) => {
       return setPreviewElementVisibilityFromAction(slide, safeConfig.targetElementId, false);
     case 'hideElement':
       return setPreviewElementVisibilityFromAction(slide, safeConfig.targetElementId, true);
+    case 'toggleTrigger': {
+      const toggled = toggleSlideTrigger(slide, safeConfig.targetTriggerId);
+      if (toggled?.element?.type === 'timedTrigger') {
+        clearPreviewTimedSlideTriggerTimers();
+        schedulePreviewTimedSlideTriggers(slide);
+      }
+      return Boolean(toggled);
+    }
     case 'replaceText':
       return executePreviewReplaceTextAction(element, safeConfig, slide);
     case 'addText':
@@ -8317,6 +8344,11 @@ const updateVideoEditorVisibility = (element, options = {}) => {
     videoTriggerTargetElementSelect.value =
       nextValue && videoTriggerTargetElementSelect.querySelector(`option[value="${nextValue}"]`) ? nextValue : '';
   }
+  populateTriggerTargetSelect(
+    videoTriggerTargetTriggerSelect,
+    selectedTrigger?.actionConfig?.targetTriggerId || '',
+    selectedTrigger?.id || ''
+  );
   if (videoTriggerSeekTimeInput) {
     videoTriggerSeekTimeInput.value = String(selectedTrigger?.actionConfig?.videoTime || 0);
   }
@@ -8403,6 +8435,7 @@ const updateVideoEditorVisibility = (element, options = {}) => {
   const actionType = selectedTrigger?.actionConfig?.type || 'none';
   document.getElementById('videoTriggerSeekTimeField')?.classList.toggle('hidden', actionType !== 'seekVideo');
   document.getElementById('videoTriggerTargetElementField')?.classList.toggle('hidden', !VIDEO_TRIGGER_TARGET_ACTIONS.has(actionType));
+  document.getElementById('videoTriggerTargetTriggerField')?.classList.toggle('hidden', actionType !== 'toggleTrigger');
   document.getElementById('videoTriggerTargetSlideField')?.classList.toggle('hidden', actionType !== 'jumpSlide');
   document.getElementById('videoTriggerUrlField')?.classList.toggle('hidden', !['redirect', 'addImage', 'addAudio', 'addVideo'].includes(actionType));
   document.getElementById('videoTriggerActionTextField')?.classList.toggle('hidden', !['addText', 'replaceText'].includes(actionType));
@@ -8479,6 +8512,7 @@ const syncVideoEditor = () => {
     : 'none';
   selectedTrigger.actionConfig.videoTime = Math.max(0, Number(videoTriggerSeekTimeInput?.value) || 0);
   selectedTrigger.actionConfig.targetElementId = videoTriggerTargetElementSelect?.value || '';
+  selectedTrigger.actionConfig.targetTriggerId = videoTriggerTargetTriggerSelect?.value || '';
   selectedTrigger.actionConfig.targetSlideId = videoTriggerTargetSlideSelect?.value || '';
   selectedTrigger.actionConfig.url = videoTriggerUrlInput?.value?.trim() || '';
   const actionTextValue = videoTriggerActionTextInput?.value ?? '';
@@ -10530,6 +10564,19 @@ const updateQuizEditorVisibility = (element, options = {}) => {
   updateStageEditorState();
 };
 
+const openQuizResultTriggerEditor = (result) => {
+  const element = getActiveSlide()?.elements.find((child) => child.id === selectedElementId && child.type === 'quiz');
+  if (!element) {
+    return;
+  }
+  normalizeQuizElement(element);
+  const trigger = (element.interactionTriggers || []).find((item) => item.quizResult === result);
+  selectedFloatingTriggerId = trigger?.id || element.interactionTriggers?.[0]?.id || null;
+  quizEditorCard?.classList.add('hidden');
+  currentStageEditor = 'floating';
+  updateFloatingButtonEditorVisibility(element, { forceOpen: true });
+};
+
 const populateFloatingTargetSlides = (selectedId = '') => {
   if (!floatingTargetSlideSelect) return;
   floatingTargetSlideSelect.innerHTML = builderState.slides
@@ -10553,7 +10600,7 @@ const ELEMENT_TYPE_DISPLAY = {
   quiz: { label: 'Quiz', icon: 'QZ' },
   video: { label: 'Vídeo', icon: 'VD' },
   audio: { label: 'Áudio', icon: 'AU' },
-  pen: { label: 'Desenho', icon: 'PN' },
+  pen: { label: 'Lápis', icon: 'PN' },
   animatedArrow: { label: 'Seta', icon: 'ST' }
 };
 
@@ -10592,19 +10639,10 @@ const getFloatingTargetElementLabel = (element) => {
 const populateFloatingTargetElements = (selectedId = '', actionType = 'none', sourceElement = null) => {
   if (!floatingTargetElementSelect) return;
   const slide = getActiveSlide();
-  const allowedTypes = ['playVideo', 'pauseVideo', 'seekVideo'].includes(actionType)
-    ? ['video']
-    : actionType === 'playAudio'
-      ? ['audio']
-      : ['showElement', 'hideElement'].includes(actionType)
-        ? ['text', 'block', 'image', 'audio', 'video', 'quiz', 'floatingButton', 'input', 'detector', 'animatedArrow', 'camera', 'key']
-        : actionType === 'moveElement'
-          ? ['text', 'block', 'image', 'input', 'camera']
-          : actionType === 'replaceText'
-            ? Array.from(REPLACEABLE_TEXT_TYPES)
-            : actionType === 'playAnimation'
-              ? Array.from(ANIMATABLE_ELEMENT_TYPES)
-              : [];
+  const allowedTypes = getTriggerTargetAllowedTypes(actionType, {
+    replaceableTextTypes: REPLACEABLE_TEXT_TYPES,
+    animatableElementTypes: ANIMATABLE_ELEMENT_TYPES
+  });
   const options = (slide?.elements || [])
     .filter((item) => {
       if (!item?.id || !allowedTypes.includes(item.type)) {
@@ -10622,6 +10660,28 @@ const populateFloatingTargetElements = (selectedId = '', actionType = 'none', so
     .join('');
   floatingTargetElementSelect.innerHTML = options || '<option value="">Nenhum elemento compatível</option>';
   floatingTargetElementSelect.value = selectedId && floatingTargetElementSelect.querySelector(`option[value="${selectedId}"]`) ? selectedId : '';
+};
+
+const populateTriggerTargetSelect = (select, selectedId = '', sourceTriggerId = '') => {
+  if (!select) return;
+  const slide = getActiveSlide();
+  (slide?.elements || []).forEach((element) => {
+    if (element?.type === 'video') {
+      normalizeVideoTriggerConfig(element);
+    } else if (ACTION_TRIGGER_ELEMENT_TYPES.includes(element?.type)) {
+      normalizeFloatingActionConfig(element);
+    }
+  });
+  const options = getSlideTriggerTargets(slide, { excludeTriggerId: sourceTriggerId })
+    .map(({ element, trigger }) => {
+      const elementLabel = getElementLayerDisplayName(element);
+      const triggerLabel = trigger.name || (element.type === 'video' ? `Tempo ${Number(trigger.time || 0).toFixed(1)}s` : 'Gatilho');
+      const status = trigger.enabled === false ? 'desativado' : 'ativo';
+      return `<option value="${escapeAttribute(trigger.id)}">${escapeHtml(`${elementLabel} → ${triggerLabel} (${status})`)}</option>`;
+    })
+    .join('');
+  select.innerHTML = options || '<option value="">Nenhum outro gatilho disponível</option>';
+  select.value = selectedId && select.querySelector(`option[value="${selectedId}"]`) ? selectedId : '';
 };
 
 const populateDetectorAcceptedElements = (selectedValue = DETECTOR_ACCEPT_ANY) => {
@@ -10679,6 +10739,7 @@ const updateFloatingButtonEditorVisibility = (element, options = {}) => {
   normalizeFloatingActionConfig(element);
   const selectedTrigger = getSelectedFloatingTrigger(element);
   const config = selectedTrigger?.actionConfig || element.actionConfig;
+  const isQuizTrigger = element.type === 'quiz';
   const shouldShowFloatingKeyboardConfig =
     element.type === 'floatingButton' && (floatingKeyboardConfigOpen || getTriggerKeyBindings(selectedTrigger).length > 0);
   floatingKeyboardConfigOpen = shouldShowFloatingKeyboardConfig;
@@ -10705,13 +10766,16 @@ const updateFloatingButtonEditorVisibility = (element, options = {}) => {
   if (floatingRemoveTriggerBtn) {
     floatingRemoveTriggerBtn.disabled = (element.interactionTriggers || []).length <= 1;
   }
+  document.getElementById('floatingTriggerCollectionActions')?.classList.toggle('hidden', isQuizTrigger);
   if (floatingEditorBadge) {
     floatingEditorBadge.textContent =
-      element.type === 'detector' ? 'Detector' : element.type === 'timedTrigger' ? 'Gatilho por tempo' : element.type === 'input' ? 'Input' : 'Botão flutuante';
+      element.type === 'quiz' ? 'Quiz' : element.type === 'detector' ? 'Detector' : element.type === 'timedTrigger' ? 'Gatilho por tempo' : element.type === 'input' ? 'Input' : 'Botão flutuante';
   }
   if (floatingEditorTitle) {
     floatingEditorTitle.textContent =
-      element.type === 'detector'
+      element.type === 'quiz'
+        ? 'Configure as ações por resultado'
+        : element.type === 'detector'
         ? 'Configure o gatilho invisível'
         : element.type === 'timedTrigger'
           ? 'Configure o disparo por tempo'
@@ -10830,7 +10894,9 @@ const updateFloatingButtonEditorVisibility = (element, options = {}) => {
     floatingTriggerTimeInput.value = String(selectedTrigger?.time || 0);
   }
   if (floatingActionTypeLabel) {
-    floatingActionTypeLabel.textContent = element.type === 'timedTrigger' ? 'Ação ao atingir o tempo' : 'Ação ao clicar';
+    floatingActionTypeLabel.textContent = element.type === 'quiz'
+      ? `Ação ${selectedTrigger?.quizResult === 'wrong' ? 'ao errar' : 'ao acertar'}`
+      : element.type === 'timedTrigger' ? 'Ação ao atingir o tempo' : 'Ação ao clicar';
   }
   if (floatingActionTypeLabel && element.type === 'key') {
     floatingActionTypeLabel.textContent = 'Ação ao pressionar a tecla';
@@ -10838,6 +10904,7 @@ const updateFloatingButtonEditorVisibility = (element, options = {}) => {
   floatingActionTypeSelect.value = config.type;
   populateFloatingTargetSlides(config.targetSlideId);
   populateFloatingTargetElements(config.targetElementId, config.type, element);
+  populateTriggerTargetSelect(floatingTargetTriggerSelect, config.targetTriggerId, selectedTrigger?.id || '');
   if (floatingRequireAllToggle) {
     floatingRequireAllToggle.checked = Boolean(config.requireAllButtonsInGroup);
   }
@@ -10916,7 +10983,9 @@ const updateFloatingButtonEditorVisibility = (element, options = {}) => {
   const actionType = config.type;
   document.getElementById('floatingTargetSlideField')?.classList.toggle('hidden', actionType !== 'jumpSlide');
   document.getElementById('floatingTargetElementField')?.classList.toggle('hidden', !FLOATING_TARGET_ACTIONS.includes(actionType));
-  document.getElementById('floatingRuleGroupField')?.classList.toggle('hidden', element.type === 'detector' || element.type === 'timedTrigger' || element.type === 'input' || !config.requireAllButtonsInGroup);
+  document.getElementById('floatingTargetTriggerField')?.classList.toggle('hidden', actionType !== 'toggleTrigger');
+  document.getElementById('floatingRequireAllField')?.classList.toggle('hidden', isQuizTrigger);
+  document.getElementById('floatingRuleGroupField')?.classList.toggle('hidden', isQuizTrigger || element.type === 'detector' || element.type === 'timedTrigger' || element.type === 'input' || !config.requireAllButtonsInGroup);
   document.getElementById('floatingDetectorAcceptedField')?.classList.toggle('hidden', element.type !== 'detector');
   document.getElementById('floatingDetectorMinCountField')?.classList.toggle('hidden', element.type !== 'detector');
   document.getElementById('floatingDetectorTriggerOnceField')?.classList.toggle('hidden', element.type !== 'detector');
@@ -10959,7 +11028,7 @@ const updateFloatingButtonEditorVisibility = (element, options = {}) => {
   document.getElementById('floatingQuizPointsField')?.classList.toggle('hidden', !quizMode);
   document.getElementById('floatingQuizLockOnWrongField')?.classList.toggle('hidden', !quizMode);
   if (floatingRequireAllToggle) {
-    floatingRequireAllToggle.disabled = element.type === 'detector' || element.type === 'timedTrigger' || element.type === 'input';
+    floatingRequireAllToggle.disabled = isQuizTrigger || element.type === 'detector' || element.type === 'timedTrigger' || element.type === 'input';
   }
   if (!insertMode) {
     isPickingFloatingInsertPosition = false;
@@ -10993,8 +11062,9 @@ const syncFloatingButtonEditor = (event = null) => {
   config.type = floatingActionTypeSelect?.value || 'none';
   config.targetSlideId = floatingTargetSlideSelect?.value || '';
   config.targetElementId = floatingTargetElementSelect?.value || '';
+  config.targetTriggerId = floatingTargetTriggerSelect?.value || '';
   config.requireAllButtonsInGroup =
-    element.type === 'detector' || element.type === 'timedTrigger' || element.type === 'input' ? false : Boolean(floatingRequireAllToggle?.checked);
+    element.type === 'quiz' || element.type === 'detector' || element.type === 'timedTrigger' || element.type === 'input' ? false : Boolean(floatingRequireAllToggle?.checked);
   config.ruleGroup = config.requireAllButtonsInGroup ? (floatingRuleGroupInput?.value?.trim() || '') : '';
   config.detectorAcceptedDrag =
     element.type === 'detector'
@@ -16573,6 +16643,23 @@ const playWrongAnswerSound = () => {
   });
 };
 
+const executePreviewQuizResultTrigger = (element, isCorrect) => {
+  if (!previewState.active || !element) {
+    return;
+  }
+  normalizeFloatingActionConfig(element);
+  const slide = getPreviewActiveSlide();
+  const trigger = (element.interactionTriggers || []).find(
+    (item) => item?.enabled !== false && item.quizResult === (isCorrect ? 'correct' : 'wrong')
+  );
+  if (!slide || !trigger || !executePreviewActionConfig(element, trigger.actionConfig || {}, slide)) {
+    return;
+  }
+  if (!['moveElement', 'playAnimation', 'playAudio', 'playVideo', 'pauseVideo', 'seekVideo'].includes(trigger.actionConfig?.type || 'none')) {
+    renderSlide();
+  }
+};
+
 const createQuizNode = (element) => {
   normalizeQuizElement(element);
   const node = document.createElement('div');
@@ -16637,6 +16724,7 @@ const createQuizNode = (element) => {
         }, 140);
       }
     }
+    executePreviewQuizResultTrigger(element, isCorrect);
   });
   return node;
 };
@@ -18066,6 +18154,7 @@ document.addEventListener('DOMContentLoaded', () => {
   floatingActionTypeSelect = document.getElementById('floatingActionTypeSelect');
   floatingTargetSlideSelect = document.getElementById('floatingTargetSlideSelect');
   floatingTargetElementSelect = document.getElementById('floatingTargetElementSelect');
+  floatingTargetTriggerSelect = document.getElementById('floatingTargetTriggerSelect');
   floatingPickTargetElementBtn = document.getElementById('floatingPickTargetElementBtn');
   floatingRequireAllToggle = document.getElementById('floatingRequireAllToggle');
   floatingRuleGroupInput = document.getElementById('floatingRuleGroupInput');
@@ -18118,6 +18207,7 @@ document.addEventListener('DOMContentLoaded', () => {
   videoTriggerActionSelect = document.getElementById('videoTriggerActionSelect');
   videoTriggerSeekTimeInput = document.getElementById('videoTriggerSeekTimeInput');
   videoTriggerTargetElementSelect = document.getElementById('videoTriggerTargetElementSelect');
+  videoTriggerTargetTriggerSelect = document.getElementById('videoTriggerTargetTriggerSelect');
   videoTriggerTargetSlideSelect = document.getElementById('videoTriggerTargetSlideSelect');
   videoTriggerUrlInput = document.getElementById('videoTriggerUrlInput');
   videoTriggerActionTextLabel = document.getElementById('videoTriggerActionTextLabel');
@@ -18874,6 +18964,8 @@ document.addEventListener('DOMContentLoaded', () => {
     control?.addEventListener('change', syncQuizEditor);
   });
   quizCorrectAnswerSelect?.addEventListener('change', syncQuizEditor);
+  document.getElementById('quizCorrectTriggerBtn')?.addEventListener('click', () => openQuizResultTriggerEditor('correct'));
+  document.getElementById('quizWrongTriggerBtn')?.addEventListener('click', () => openQuizResultTriggerEditor('wrong'));
   const syncEraserSizeInputs = (source = 'range') => {
     const nextValue = clamp(
       Number(source === 'range' ? eraserSizeInput?.value : eraserSizeNumberInput?.value) || 42,
@@ -18957,6 +19049,7 @@ document.addEventListener('DOMContentLoaded', () => {
     floatingActionTypeSelect,
     floatingTargetSlideSelect,
     floatingTargetElementSelect,
+    floatingTargetTriggerSelect,
     floatingRequireAllToggle,
     floatingRuleGroupInput,
     floatingDetectorAcceptedSelect,
@@ -19050,7 +19143,7 @@ document.addEventListener('DOMContentLoaded', () => {
     control?.addEventListener('input', syncVideoEditor);
     control?.addEventListener('change', syncVideoEditor);
   });
-  [videoTriggerTargetElementSelect].forEach((control) => {
+  [videoTriggerTargetElementSelect, videoTriggerTargetTriggerSelect].forEach((control) => {
     control?.addEventListener('change', syncVideoEditor);
   });
   [videoTriggerTargetSlideSelect, videoTriggerUrlInput].forEach((control) => {

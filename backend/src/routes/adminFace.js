@@ -1,6 +1,7 @@
 const express = require('express');
 const db = require('../db');
 const { isUuid, sanitizeText } = require('../security');
+const { ensureStudentProfessorLinksSchema } = require('../studentProfessorLinks');
 const {
   audit,
   decryptBuffer,
@@ -167,6 +168,7 @@ router.post('/face-reviews/:reviewId/decision', asyncHandler(async (req, res) =>
 
 router.post('/face-manual-grants', asyncHandler(async (req, res) => {
   await ensureFaceVerificationSchema();
+  await ensureStudentProfessorLinksSchema();
   const studentId = sanitizeText(req.body?.studentId || '', 80);
   const moduleId = sanitizeText(req.body?.moduleId || '', 80);
   const note = sanitizeText(req.body?.note || '', 500);
@@ -177,7 +179,10 @@ router.post('/face-manual-grants', asyncHandler(async (req, res) => {
   let ownerScope = '';
   if (req.user.role !== 'admin') {
     values.push(req.user.id);
-    ownerScope = `AND u.owner_user_id = $3 AND c.owner_user_id = $3`;
+    ownerScope = `AND c.owner_user_id = $3 AND EXISTS (
+      SELECT 1 FROM professor_students relation
+       WHERE relation.student_user_id = u.id AND relation.professor_user_id = $3
+    )`;
   }
   const { rows } = await db.query(
     `SELECT u.id AS student_id, m.id AS module_id, m.builder_data

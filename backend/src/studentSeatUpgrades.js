@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const db = require('./db');
 const { sanitizeText } = require('./security');
+const { ensureStudentProfessorLinksSchema } = require('./studentProfessorLinks');
 
 const ASAAS_ENV = String(process.env.ASAAS_ENV || 'sandbox').toLowerCase() === 'production'
   ? 'production'
@@ -48,6 +49,7 @@ const calculateSeatUpgrade = ({ currentLimit, quantity }) => {
 };
 
 const ensureStudentSeatUpgradeTables = async () => {
+  await ensureStudentProfessorLinksSchema();
   if (tablesEnsured) return;
   await db.query(`
     CREATE TABLE IF NOT EXISTS student_seat_upgrade_orders (
@@ -250,7 +252,12 @@ const processStudentSeatUpgradeWebhook = async (eventPayload, fetchVerifiedPayme
       await client.query('UPDATE users SET student_limit=GREATEST(COALESCE(student_limit,0),$2) WHERE id=$1 AND role=\'professor\'', [locked.user_id, locked.target_student_limit]);
       await client.query(`UPDATE student_seat_upgrade_orders SET status='PAID',provider_payment_id=$2,paid_at=COALESCE(paid_at,NOW()),raw_payload=$3,updated_at=NOW() WHERE id=$1`, [locked.id, verified.id, eventPayload]);
     } else {
-      const { rows: countRows } = await client.query(`SELECT COUNT(*)::int AS total FROM users WHERE owner_user_id=$1 AND role='student' AND is_active=TRUE`, [locked.user_id]);
+      const { rows: countRows } = await client.query(
+        `SELECT COUNT(*)::int AS total
+           FROM professor_students
+          WHERE professor_user_id = $1 AND active = TRUE`,
+        [locked.user_id]
+      );
       const safeLimit = Math.max(Number(locked.previous_student_limit), Number(countRows[0]?.total || 0));
       await client.query('UPDATE users SET student_limit=$2 WHERE id=$1 AND role=\'professor\'', [locked.user_id, safeLimit]);
       await client.query(`UPDATE student_seat_upgrade_orders SET status=$2,reversed_at=COALESCE(reversed_at,NOW()),raw_payload=$3,updated_at=NOW() WHERE id=$1`, [locked.id, eventType === 'PAYMENT_CHARGEBACK_REQUESTED' ? 'CHARGEBACK' : 'REFUNDED', eventPayload]);

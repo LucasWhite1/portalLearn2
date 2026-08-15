@@ -20,6 +20,8 @@ const {
   isFaceProtectedBuilderData,
   normalizeFaceSettings
 } = require('../faceVerification');
+const { ensureStudentProfessorLinksSchema } = require('../studentProfessorLinks');
+const { getStudentPaymentStatuses } = require('../studentPayments');
 
 const router = express.Router();
 const NOTIFICATION_FILE_DATA_URL_REGEX = /^data:(application\/pdf|application\/msword|application\/vnd\.ms-(powerpoint|excel)|application\/vnd\.openxmlformats-officedocument\.(wordprocessingml\.document|presentationml\.presentation|spreadsheetml\.sheet)|text\/plain|application\/zip|image\/[a-z0-9.+-]+);base64,[a-z0-9+/=\s]+$/i;
@@ -1083,7 +1085,7 @@ router.get('/courses', async (req, res) => {
   await ensureInputResponsesColumn();
   const ensuredAt = Date.now();
   const { rows } = await db.query(
-    `SELECT c.id, c.title, c.description, c.slug, c.cover_image, c.show_in_store,
+    `SELECT c.id, c.title, c.description, c.slug, c.cover_image, c.show_in_store, c.owner_user_id,
             e.video_position, e.interactive_step, e.current_module, e.grade, e.updated_at, e.quiz_attempts, e.interactive_progress, e.video_progress, e.progress_events, e.input_responses
      FROM enrollments e
      JOIN courses c ON c.id = e.course_id
@@ -1100,6 +1102,10 @@ router.get('/courses', async (req, res) => {
     return res.json([]);
   }
   const courseIds = rows.map((course) => course.id);
+  const paymentStatuses = await getStudentPaymentStatuses(req.user.id);
+  const paymentByProfessorId = new Map(
+    paymentStatuses.map((payment) => [String(payment.professorId || ''), payment])
+  );
   const modulesResult = isLite
     ? await db.query(
       `SELECT id, course_id, title, slug, description, position, created_at,
@@ -1165,6 +1171,9 @@ router.get('/courses', async (req, res) => {
     slug: course.slug,
     cover_image: course.cover_image || '',
     show_in_store: course.show_in_store === true,
+    professor_id: course.owner_user_id || null,
+    payment: paymentByProfessorId.get(String(course.owner_user_id || '')) || null,
+    payment_blocked: paymentByProfessorId.get(String(course.owner_user_id || ''))?.blocked === true,
     progress: {
       video_position: course.video_position || 0,
       interactive_step: course.interactive_step || '0',
@@ -1176,7 +1185,9 @@ router.get('/courses', async (req, res) => {
       progress_events: Array.isArray(course.progress_events) ? course.progress_events : [],
       input_responses: course.input_responses || {}
     },
-    modules: modulesByCourse[course.id] || []
+    modules: paymentByProfessorId.get(String(course.owner_user_id || ''))?.blocked === true
+      ? []
+      : (modulesByCourse[course.id] || [])
   }));
   const finishedAt = Date.now();
   res.setHeader('X-Courses-Endpoint-Ms', String(finishedAt - startedAt));
@@ -1196,21 +1207,22 @@ router.get('/store-courses', async (req, res) => {
   await ensureCourseStoreColumn();
   await ensureCourseAccessRequestsTable();
   await ensureOwnershipColumns();
+  await ensureStudentProfessorLinksSchema();
   const { rows } = await db.query(
     `SELECT c.id, c.title, c.description, c.slug, c.cover_image, c.show_in_store,
+            c.owner_user_id AS professor_id, professor.full_name AS professor_name,
             COALESCE(COUNT(m.id), 0) AS module_count,
             car.status AS access_request_status
       FROM courses c
+      LEFT JOIN users professor ON professor.id = c.owner_user_id
       LEFT JOIN modules m ON m.course_id = c.id
       LEFT JOIN enrollments e ON e.course_id = c.id AND e.user_id = $1
       LEFT JOIN course_access_requests car ON car.course_id = c.id AND car.user_id = $1
       WHERE c.show_in_store = TRUE
         AND e.course_id IS NULL
-        AND (
-          (SELECT owner_user_id FROM users WHERE id = $1) IS NOT DISTINCT FROM c.owner_user_id
-        )
-      GROUP BY c.id, c.title, c.description, c.slug, c.cover_image, c.show_in_store, car.status
-      ORDER BY c.title`,
+      GROUP BY c.id, c.title, c.description, c.slug, c.cover_image, c.show_in_store,
+               c.owner_user_id, professor.full_name, car.status
+      ORDER BY professor.full_name NULLS LAST, c.title`,
     [req.user.id]
   );
   res.json(rows);
@@ -1261,16 +1273,16 @@ router.post('/store-courses/:courseId/request-access', async (req, res) => {
   await ensureCourseStoreColumn();
   await ensureCourseAccessRequestsTable();
   await ensureOwnershipColumns();
+  await ensureStudentProfessorLinksSchema();
   const { courseId } = req.params;
   if (!isUuid(courseId)) {
     return res.status(400).json({ message: 'Curso inválido.' });
   }
   const { rows: courseRows } = await db.query(
-    `SELECT id, show_in_store
+    `SELECT id, show_in_store, owner_user_id
      FROM courses
-     WHERE id = $1
-       AND owner_user_id IS NOT DISTINCT FROM (SELECT owner_user_id FROM users WHERE id = $2)`,
-    [courseId, req.user.id]
+     WHERE id = $1`,
+    [courseId]
   );
   const course = courseRows[0];
   if (!course || course.show_in_store !== true) {
@@ -1295,40 +1307,71 @@ router.post('/store-courses/:courseId/request-access', async (req, res) => {
 
 router.get('/notifications', async (req, res) => {
   await ensureOwnershipColumns();
-  const params = [req.user.className, req.user.id, req.user.ownerUserId || null];
+  await ensureStudentProfessorLinksSchema();
   const { rows } = await db.query(
     `SELECT id, message, target_type, target_value, attachments, created_at
-     FROM notifications
+     FROM notifications notification
      WHERE (
-       target_type = 'all'
-       OR (target_type = 'class' AND target_value = $1)
-       OR (target_type = 'student' AND target_value = $2)
+       (
+         notification.owner_user_id IS NULL
+         AND (
+           notification.target_type = 'all'
+           OR (notification.target_type = 'class' AND notification.target_value = $2)
+           OR (notification.target_type = 'student' AND notification.target_value = $1::text)
+         )
+       )
+       OR EXISTS (
+         SELECT 1 FROM professor_students relation
+          WHERE relation.student_user_id = $1::uuid
+            AND relation.professor_user_id = notification.owner_user_id
+            AND relation.active = TRUE
+            AND (
+              notification.target_type = 'all'
+              OR (notification.target_type = 'class' AND notification.target_value = relation.class_name)
+              OR (notification.target_type = 'student' AND notification.target_value = $1::text)
+            )
+       )
      )
-       AND (owner_user_id IS NOT DISTINCT FROM $3)
      ORDER BY created_at DESC
       LIMIT 25`,
-     params
+     [req.user.id, req.user.className]
   );
   res.json(rows);
 });
 
 router.get('/notifications/:notificationId/attachments/:attachmentIndex', async (req, res) => {
   await ensureOwnershipColumns();
+  await ensureStudentProfessorLinksSchema();
   const { notificationId, attachmentIndex } = req.params;
   if (!isUuid(notificationId)) {
     return res.status(400).json({ message: 'Notificacao invalida' });
   }
   const { rows } = await db.query(
     `SELECT attachments
-     FROM notifications
-     WHERE id = $1
+     FROM notifications notification
+     WHERE notification.id = $1
        AND (
-         target_type = 'all'
-         OR (target_type = 'class' AND target_value = $2)
-         OR (target_type = 'student' AND target_value = $3)
-       )
-       AND (owner_user_id IS NOT DISTINCT FROM $4)`,
-    [notificationId, req.user.className, req.user.id, req.user.ownerUserId || null]
+         (
+           notification.owner_user_id IS NULL
+           AND (
+             notification.target_type = 'all'
+             OR (notification.target_type = 'class' AND notification.target_value = $3)
+             OR (notification.target_type = 'student' AND notification.target_value = $2::text)
+           )
+         )
+         OR EXISTS (
+           SELECT 1 FROM professor_students relation
+            WHERE relation.student_user_id = $2::uuid
+              AND relation.professor_user_id = notification.owner_user_id
+              AND relation.active = TRUE
+              AND (
+                notification.target_type = 'all'
+                OR (notification.target_type = 'class' AND notification.target_value = relation.class_name)
+                OR (notification.target_type = 'student' AND notification.target_value = $2::text)
+              )
+         )
+       )`,
+    [notificationId, req.user.id, req.user.className]
   );
   const attachment = getNotificationDataAttachment(rows[0]?.attachments, attachmentIndex);
   if (!attachment) {

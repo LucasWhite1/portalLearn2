@@ -62,6 +62,21 @@ CREATE TABLE IF NOT EXISTS student_signup_requests (
 CREATE INDEX IF NOT EXISTS idx_student_signup_requests_professor
 ON student_signup_requests(professor_user_id, status, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS professor_students (
+  professor_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  student_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  class_name TEXT,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  source TEXT NOT NULL DEFAULT 'legacy',
+  approved_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (professor_user_id, student_user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_professor_students_student
+ON professor_students(student_user_id, active, professor_user_id);
+
 CREATE TABLE IF NOT EXISTS courses (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   title TEXT NOT NULL,

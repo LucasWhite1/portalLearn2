@@ -745,7 +745,7 @@ export const attachPreviewVideoTimedTrigger = (videoNode, element, options = {})
   if (!slideId || !elementId) return;
 
   const triggers = (element.videoTriggers || []).filter(
-    (trigger) => trigger?.enabled !== false && (trigger.actionConfig?.type || 'none') !== 'none' && Number(trigger.time) > 0
+    (trigger) => (trigger.actionConfig?.type || 'none') !== 'none' && Number(trigger.time) > 0
   );
   if (!triggers.length) return;
 
@@ -770,7 +770,7 @@ export const attachPreviewVideoTimedTrigger = (videoNode, element, options = {})
     const currentTime = Number(videoNode.currentTime) || 0;
     let shouldRerender = false;
     triggers.forEach((trigger) => {
-      if (firedIds.has(trigger.id) || currentTime < Math.max(0, Number(trigger.time) || 0)) {
+      if (trigger?.enabled === false || firedIds.has(trigger.id) || currentTime < Math.max(0, Number(trigger.time) || 0)) {
         return;
       }
       firedIds.add(trigger.id);

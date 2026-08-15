@@ -21,6 +21,7 @@ const ADMIN_JSON_BODY_LIMIT = process.env.ADMIN_JSON_BODY_LIMIT || process.env.J
 const STUDENT_JSON_BODY_LIMIT = process.env.STUDENT_JSON_BODY_LIMIT || process.env.JSON_BODY_LIMIT || '50mb';
 const studentJsonParser = express.json({ limit: STUDENT_JSON_BODY_LIMIT });
 const frontendDir = path.resolve(__dirname, '../../frontend');
+const templateStoreDir = path.resolve(__dirname, '../../template-store');
 const threeVendorDir = path.resolve(__dirname, '../node_modules/three');
 const isProductionEnvironment = ['production', 'prod'].includes(
   String(process.env.NODE_ENV || process.env.APP_ENV || '').toLowerCase()
@@ -83,6 +84,10 @@ app.use('/vendor/three', express.static(threeVendorDir, {
   fallthrough: false,
   immutable: true,
   maxAge: '30d'
+}));
+app.use('/template-store', express.static(templateStoreDir, {
+  dotfiles: 'deny',
+  fallthrough: false
 }));
 app.use(express.static(frontendDir, { dotfiles: 'deny', index: false }));
 

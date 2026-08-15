@@ -16,7 +16,7 @@ import { getFaceStatus, revokeFaceProfile, runFaceVerification } from './modules
 const API_BASE = resolveApiBase();
 const STORAGE_KEY = 'curso-platform-token';
 const USER_ROLE_KEY = 'curso-platform-role';
-const WHATSAPP_SUPPORT_PHONE = '5599999999999';
+const WHATSAPP_SUPPORT_PHONE = '5571993615509';
 const WHATSAPP_SUPPORT_MESSAGE = 'Ola, quero falar com o suporte da Criatyve.';
 let cachedCourses = [];
 let cachedStoreCourses = [];
@@ -44,6 +44,7 @@ let adminReplyTarget = null;
 let adminCurrentChatMessages = [];
 let currentStudentSignupLink = '';
 let pendingSeatUpgradeStudentId = '';
+let pendingSeatUpgradeAccessRequestId = '';
 let studentSeatUpgradeUnitPrice = 9.70;
 let studentSeatUpgradeCurrentLimit = 0;
 let liveStagePollTimer = null;
@@ -1584,6 +1585,7 @@ const getLockedCourseModuleReason = (course, targetModule) => {
 const createCourseCard = (course) => {
   const card = document.createElement('article');
   card.className = 'course-card';
+  const paymentBlocked = course.payment_blocked === true;
   const position = Number(course.progress?.video_position) || 0;
   const videoProgressMap =
     course.progress?.video_progress && typeof course.progress.video_progress === 'object'
@@ -1653,6 +1655,7 @@ const createCourseCard = (course) => {
           : ''
       }
       ${coverStripMarkup}
+      ${paymentBlocked ? `<p class="student-payment-instructions">Mensalidade pendente com ${escapeHtml(course.payment?.professorName || 'este professor')}. Regularize para acessar os módulos.</p>` : ''}
     </div>
     <div class="course-card-meta">
       <span class="badge">${interactiveLabel}</span>
@@ -1679,9 +1682,16 @@ const createCourseCard = (course) => {
   const actionButton = document.createElement('button');
   actionButton.type = 'button';
   actionButton.className = recommendedModule ? 'primary-btn course-card-btn' : 'secondary-btn course-card-btn';
-  actionButton.textContent = recommendedModule ? 'Continuar módulo' : 'Aguardando módulo';
-  actionButton.disabled = !recommendedModule;
-  if (recommendedModule) {
+  actionButton.textContent = paymentBlocked
+    ? 'Regularizar pagamento'
+    : (recommendedModule ? 'Continuar módulo' : 'Aguardando módulo');
+  actionButton.disabled = !recommendedModule && !paymentBlocked;
+  if (paymentBlocked) {
+    actionButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      document.querySelector('[data-target="studentPaymentSection"]')?.click();
+    });
+  } else if (recommendedModule) {
     actionButton.addEventListener('click', (event) => {
       event.stopPropagation();
       openCourseModule(course.id, recommendedModule.id);
@@ -1732,12 +1742,13 @@ const createStoreCourseCard = (course) => {
       </div>
       <div class="course-card-headline">
         <strong>${escapeHtml(course.title)}</strong>
+        <small>${escapeHtml(course.professor_name || 'Criatyve')}</small>
         <span class="store-course-description">${escapeHtml(course.description || 'Sem descri\u00e7\u00e3o cadastrada para este curso.')}</span>
       </div>
     </div>
     <div class="course-card-meta">
       <span class="badge">${moduleCount ? `${moduleCount} m\u00f3dulo(s)` : 'Em apresenta\u00e7\u00e3o'}</span>
-      <p class="store-course-status">${requestPending ? 'Solicita\u00e7\u00e3o enviada ao admin.' : 'Dispon\u00edvel para solicitar acesso.'}</p>
+      <p class="store-course-status">${requestPending ? 'Solicita\u00e7\u00e3o enviada ao professor.' : 'Dispon\u00edvel para solicitar acesso.'}</p>
     </div>
     <button type="button" class="${requestPending ? 'secondary-btn' : 'primary-btn'} course-card-btn" data-store-course-id="${course.id}" ${requestPending ? 'disabled' : ''}>
       ${requestPending ? 'Aguardando libera\u00e7\u00e3o' : 'Solicitar acesso'}
@@ -2793,13 +2804,14 @@ const syncStudentSeatUpgradePrice = () => {
   total.textContent = formatBrl(quantity * studentSeatUpgradeUnitPrice);
 };
 
-const openStudentSeatUpgradeModal = (studentId, payload = {}) => {
+const openStudentSeatUpgradeModal = (studentId, payload = {}, options = {}) => {
   const modal = document.getElementById('studentSeatUpgradeModal');
   if (!modal || getCurrentUserRole() !== 'professor') {
     alert(payload?.message || 'O limite de alunos foi atingido.');
     return;
   }
   pendingSeatUpgradeStudentId = studentId || '';
+  pendingSeatUpgradeAccessRequestId = options.accessRequestId || '';
   studentSeatUpgradeUnitPrice = Number(payload?.seatUpgrade?.unitPrice) || 9.70;
   studentSeatUpgradeCurrentLimit = Number(payload?.quotaStatus?.studentLimit) || 0;
   const summary = document.getElementById('studentSeatUpgradeSummary');
@@ -2822,6 +2834,23 @@ const closeStudentSeatUpgradeModal = () => {
 };
 
 const approveStudentAfterSeatUpgrade = async () => {
+  const accessRequestId = localStorage.getItem('curso-platform-pending-seat-access-request') || '';
+  if (accessRequestId) {
+    const response = await authorizedFetch(
+      `/api/admin/course-access-requests/${encodeURIComponent(accessRequestId)}/decision`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ decision: 'approved' })
+      }
+    );
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.message || 'As vagas foram liberadas, mas não foi possível aprovar o acesso automaticamente.');
+    }
+    localStorage.removeItem('curso-platform-pending-seat-access-request');
+    if (payload?.paymentWarning) alert(payload.paymentWarning);
+    return true;
+  }
   const studentId = localStorage.getItem('curso-platform-pending-seat-approval') || '';
   if (!studentId) return false;
   const response = await authorizedFetch(`/api/admin/students/${encodeURIComponent(studentId)}/signup-approval`, {
@@ -2839,10 +2868,11 @@ const resumeStudentSeatUpgrade = async () => {
   const callbackStatus = params.get('seatUpgrade');
   const orderId = params.get('order');
   if (!callbackStatus || !orderId || getCurrentUserRole() !== 'professor') return;
+  pendingSeatUpgradeAccessRequestId = localStorage.getItem('curso-platform-pending-seat-access-request') || '';
   openStudentSeatUpgradeModal(localStorage.getItem('curso-platform-pending-seat-approval') || '', {
     quotaStatus: { studentLimit: Number(getCurrentUserData().studentLimit) || 0 },
     seatUpgrade: { unitPrice: 9.70 }
-  });
+  }, { accessRequestId: pendingSeatUpgradeAccessRequestId });
   const status = document.getElementById('studentSeatUpgradeStatus');
   if (callbackStatus !== 'success') {
     if (status) status.textContent = callbackStatus === 'expired'
@@ -2865,12 +2895,14 @@ const resumeStudentSeatUpgrade = async () => {
         return;
       }
       if (status) status.textContent = approved
-        ? `Novo limite: ${order.targetStudentLimit} alunos. O cadastro pendente foi aprovado.`
+        ? `Novo limite: ${order.targetStudentLimit} alunos. A solicitação pendente foi aprovada.`
         : `Novo limite liberado: ${order.targetStudentLimit} alunos.`;
       params.delete('seatUpgrade');
       params.delete('order');
       history.replaceState({}, '', `${location.pathname}${params.size ? `?${params}` : ''}${location.hash}`);
       await loadAdminStudents();
+      await loadAdminAccessRequests();
+      await loadAdminCourses();
       return;
     }
     if (['CANCELED', 'EXPIRED', 'REFUNDED', 'CHARGEBACK'].includes(order.status)) {
@@ -2912,6 +2944,11 @@ const initStudentSeatUpgrade = () => {
       if (!response.ok || !payload?.order?.checkoutUrl) throw new Error(payload.message || 'Não foi possível criar o checkout.');
       if (pendingSeatUpgradeStudentId) {
         localStorage.setItem('curso-platform-pending-seat-approval', pendingSeatUpgradeStudentId);
+        localStorage.removeItem('curso-platform-pending-seat-access-request');
+      }
+      if (pendingSeatUpgradeAccessRequestId) {
+        localStorage.setItem('curso-platform-pending-seat-access-request', pendingSeatUpgradeAccessRequestId);
+        localStorage.removeItem('curso-platform-pending-seat-approval');
       }
       window.location.assign(payload.order.checkoutUrl);
     } catch (error) {
@@ -3715,7 +3752,7 @@ const loadAdminAccessRequests = async () => {
               </div>
             </div>
             <div class="access-request-actions">
-              <button class="primary-btn" type="button" data-access-request-id="${request.id}" data-access-decision="approved" ${request.status === 'pending' ? '' : 'disabled'}>Aceitar acesso</button>
+              <button class="primary-btn" type="button" data-access-request-id="${request.id}" data-access-decision="approved" ${request.status === 'approved' ? 'disabled' : ''}>${request.status === 'rejected' ? 'Reconsiderar e aceitar' : 'Aceitar acesso'}</button>
               <button class="secondary-btn" type="button" data-access-request-id="${request.id}" data-access-decision="rejected" ${request.status === 'pending' ? '' : 'disabled'}>Rejeitar acesso</button>
             </div>
           </article>`;
@@ -4699,6 +4736,8 @@ const renderStudentPaymentStatus = (payment = {}) => {
   const instructions = document.getElementById('studentPaymentInstructions');
   const payButton = document.getElementById('studentPaymentPayBtn');
   const history = document.getElementById('studentPaymentHistory');
+  const plans = Array.isArray(payment.plans) ? payment.plans : [];
+  section.dataset.professorId = payment.professorId || '';
   section.dataset.paymentState = state;
   if (status) {
     status.className = `student-payment-status ${stateConfig.tone}`;
@@ -4737,16 +4776,27 @@ const renderStudentPaymentStatus = (payment = {}) => {
     payButton.href = canPay ? payment.paymentUrl : '#';
   }
   if (history) {
-    const rows = Array.isArray(payment.history) ? payment.history : [];
-    history.innerHTML = rows.length ? `
-      <h3>Histórico</h3>
-      ${rows.map((item) => `
-        <div><span>${formatPaymentDate(item.dueDate)} · ${escapeHtml(item.billingType)}</span><strong>${formatBrl(item.amount)} · ${escapeHtml(STUDENT_PAYMENT_STATES[String(item.status || '').toLowerCase()]?.label || item.status)}</strong></div>
+    history.innerHTML = plans.length > 1 ? `
+      <h3>Mensalidades por professor</h3>
+      ${plans.map((plan) => `
+        <div>
+          <span>${escapeHtml(plan.professorName || 'Professor')} · ${formatPaymentDate(plan.dueDate)}</span>
+          <strong>${formatBrl(plan.amount)} · ${escapeHtml(STUDENT_PAYMENT_STATES[plan.state]?.label || plan.state)}</strong>
+          ${plan.paymentUrl && plan.state !== 'paid' ? `<a class="secondary-btn small" href="${escapeHtml(plan.paymentUrl)}" target="_blank" rel="noopener noreferrer">Pagar</a>` : ''}
+        </div>
       `).join('')}
-    ` : '';
+    ` : (() => {
+      const rows = Array.isArray(payment.history) ? payment.history : [];
+      return rows.length ? `
+        <h3>Histórico</h3>
+        ${rows.map((item) => `
+          <div><span>${formatPaymentDate(item.dueDate)} · ${escapeHtml(item.billingType)}</span><strong>${formatBrl(item.amount)} · ${escapeHtml(STUDENT_PAYMENT_STATES[String(item.status || '').toLowerCase()]?.label || item.status)}</strong></div>
+        `).join('')}
+      ` : '';
+    })();
   }
-  document.body.classList.toggle('student-payment-blocked', payment.blocked === true);
-  return payment.blocked === true;
+  document.body.classList.remove('student-payment-blocked');
+  return false;
 };
 
 const loadStudentPaymentStatus = async () => {
@@ -4761,7 +4811,11 @@ const initStudentPayments = async () => {
     const button = event.currentTarget;
     button.disabled = true;
     try {
-      const response = await authorizedFetch('/api/student/payments/refresh', { method: 'POST' });
+      const professorId = document.getElementById('studentPaymentSection')?.dataset.professorId || '';
+      const response = await authorizedFetch('/api/student/payments/refresh', {
+        method: 'POST',
+        body: JSON.stringify({ professorId: professorId || null })
+      });
       const payload = await parseJsonSafely(response);
       if (!response.ok) throw new Error(payload?.message || 'Não foi possível verificar o pagamento.');
       const result = await loadStudentPaymentStatus();
@@ -5302,17 +5356,35 @@ const initAdminFeatures = () => {
   document.getElementById('adminAccessRequestList')?.addEventListener('click', async (event) => {
     const button = event.target.closest('button[data-access-request-id]');
     if (!button) return;
+    button.disabled = true;
     try {
-      await authorizedFetch('/api/admin/course-access-requests/' + button.dataset.accessRequestId + '/decision', {
+      const response = await authorizedFetch('/api/admin/course-access-requests/' + button.dataset.accessRequestId + '/decision', {
         method: 'POST',
         body: JSON.stringify({ decision: button.dataset.accessDecision })
       });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (
+          button.dataset.accessDecision === 'approved'
+          && payload?.code === 'PROFESSOR_STUDENT_LIMIT_REACHED'
+          && payload?.seatUpgrade?.available
+        ) {
+          openStudentSeatUpgradeModal('', payload, {
+            accessRequestId: button.dataset.accessRequestId
+          });
+          return;
+        }
+        throw new Error(payload?.message || 'Não foi possível analisar a solicitação.');
+      }
+      if (payload?.paymentWarning) alert(payload.paymentWarning);
       await loadAdminAccessRequests();
       await loadAdminCourses();
       await loadAdminStudents();
       await loadReports();
     } catch (error) {
       alert(error.message || 'N\u00e3o foi poss\u00edvel analisar a solicita\u00e7\u00e3o.');
+    } finally {
+      button.disabled = false;
     }
   });
 

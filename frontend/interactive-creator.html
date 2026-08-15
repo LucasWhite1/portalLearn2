@@ -965,6 +965,14 @@
                   Bloquear nova tentativa quando errar
                 </label>
               </div>
+              <div class="builder-field builder-field-span">
+                <label>Ações por resultado</label>
+                <div class="trigger-collection-actions">
+                  <button id="quizCorrectTriggerBtn" class="secondary-btn small" type="button">Ao acertar</button>
+                  <button id="quizWrongTriggerBtn" class="secondary-btn small" type="button">Ao errar</button>
+                </div>
+                <small class="muted">Configure somente o resultado desejado; os demais campos continuam recolhidos.</small>
+              </div>
             </div>
           </section>
           <section id="imageEditorCard" class="quiz-editor-card hidden" data-stage-editor="image"
@@ -1098,7 +1106,7 @@
               <div class="builder-field builder-field-span">
                 <label>Gatilhos deste elemento</label>
                 <div class="trigger-collection-card">
-                  <div class="trigger-collection-actions">
+                  <div id="floatingTriggerCollectionActions" class="trigger-collection-actions">
                     <button id="floatingAddTriggerBtn" class="secondary-btn small" type="button">Adicionar
                       gatilho</button>
                     <button id="floatingDuplicateTriggerBtn" class="secondary-btn small" type="button">Duplicar</button>
@@ -1207,7 +1215,7 @@
                 <label for="floatingTriggerTimeInput">Disparar no tempo (s)</label>
                 <input id="floatingTriggerTimeInput" type="number" min="0" step="0.1" value="0" />
               </div>
-              <div class="builder-field">
+              <div id="floatingActionTypeField" class="builder-field">
                 <label id="floatingActionTypeLabel" for="floatingActionTypeSelect">Ação ao clicar</label>
                 <select id="floatingActionTypeSelect">
                   <option value="none">Sem ação</option>
@@ -1226,6 +1234,7 @@
                   <option value="seekVideo">Ir para um tempo do vídeo</option>
                   <option value="showElement">Mostrar elemento</option>
                   <option value="hideElement">Esconder elemento</option>
+                  <option value="toggleTrigger">Desativar gatilho</option>
                   <option value="moveElement">Mover elemento</option>
                   <option value="playAnimation">Ativar animação</option>
                 </select>
@@ -1242,7 +1251,12 @@
                     palco</button>
                 </div>
               </div>
-              <div class="builder-field">
+              <div id="floatingTargetTriggerField" class="builder-field hidden">
+                <label for="floatingTargetTriggerSelect">Gatilho que será alternado</label>
+                <select id="floatingTargetTriggerSelect"></select>
+                <small class="muted">Ao executar, o gatilho ativo será desativado; ao executar novamente, será reativado.</small>
+              </div>
+              <div id="floatingRequireAllField" class="builder-field">
                 <label class="toggle-inline">
                   <input id="floatingRequireAllToggle" type="checkbox" />
                   Só executar depois de clicar em todos os botões da regra
@@ -1584,6 +1598,7 @@
                   <option value="seekVideo">Ir para um tempo do vídeo</option>
                   <option value="showElement">Mostrar elemento</option>
                   <option value="hideElement">Esconder elemento</option>
+                  <option value="toggleTrigger">Desativar gatilho</option>
                   <option value="moveElement">Mover elemento</option>
                   <option value="playAnimation">Ativar animação</option>
                 </select>
@@ -1615,6 +1630,11 @@
               <div id="videoTriggerTargetElementField" class="builder-field hidden">
                 <label for="videoTriggerTargetElementSelect">Elemento alvo</label>
                 <select id="videoTriggerTargetElementSelect"></select>
+              </div>
+              <div id="videoTriggerTargetTriggerField" class="builder-field hidden">
+                <label for="videoTriggerTargetTriggerSelect">Gatilho que será alternado</label>
+                <select id="videoTriggerTargetTriggerSelect"></select>
+                <small class="muted">Cada execução alterna entre desativado e ativo.</small>
               </div>
               <div id="videoTriggerSeekTimeField" class="builder-field hidden">
                 <label for="videoTriggerSeekTimeInput">Ir para o tempo (s)</label>

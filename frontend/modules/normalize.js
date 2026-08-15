@@ -195,6 +195,7 @@ export const normalizeFloatingActionConfig = (element) => {
     if (['showElement', 'hideElement', 'playVideo', 'pauseVideo', 'seekVideo'].includes(config.type)) {
       config.targetElementId = config.targetElementId || '';
     }
+    if (config.type === 'toggleTrigger') config.targetTriggerId = config.targetTriggerId || '';
   });
 };
 

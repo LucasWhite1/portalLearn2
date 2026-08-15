@@ -4,6 +4,9 @@ import {
   normalizeThreeDScene
 } from './modules/three-d-stage.js';
 import { runFaceVerification } from './modules/face-verification.js';
+import { toggleSlideTrigger } from './modules/trigger-toggle.mjs';
+import { calculateViewerStageLayout } from './modules/viewer-stage-layout.mjs';
+import { resolveTriggeredSlideNavigation } from './modules/viewer-trigger-navigation.mjs';
 
 const resolveApiBase = () => {
   if (window.__API_BASE__) {
@@ -22,6 +25,7 @@ const API_BASE = resolveApiBase();
 const STORAGE_KEY = 'curso-platform-token';
 const USER_ROLE_KEY = 'curso-platform-role';
 const DEFAULT_STAGE_SIZE = { width: 1280, height: 720 };
+const DEMO_TEMPLATE_KEY_REGEX = /^[a-z0-9._-]+$/i;
 const MIN_SLIDE_VIEW_SECONDS = 3;
 const MIN_VIDEO_COMPLETION_RATIO = 0.9;
 const VIEWER_PEN_MIN_BRUSH_SIZE = 2;
@@ -187,6 +191,30 @@ const fetchPublicModule = async (moduleId) => {
   return payload;
 };
 
+const fetchDemoTemplateModule = async (templateKey, position = 0) => {
+  const safeKey = String(templateKey || '').trim();
+  if (!DEMO_TEMPLATE_KEY_REGEX.test(safeKey)) {
+    throw new Error('Template de demonstracao invalido.');
+  }
+  const response = await fetch(`${API_BASE}/template-store/${encodeURIComponent(safeKey)}.json`);
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || !payload?.template) {
+    throw new Error(payload?.message || 'Nao foi possivel carregar o template de demonstracao.');
+  }
+  const template = payload.template;
+  const builderData = template.builderData || template.builder_data || {};
+  return {
+    id: `demo-${safeKey}`,
+    courseId: 'demo-showcase',
+    courseTitle: 'Demonstracao Criatyve',
+    title: template.title || safeKey,
+    description: template.description || '',
+    builder_data: builderData,
+    courseProgress: {},
+    position
+  };
+};
+
 const fetchLiveStageModule = async (shareId, faceRetried = false) => {
   const response = await authorizedFetch(`/api/student/live-stage/${encodeURIComponent(shareId)}`);
   const payload = await response.json().catch(() => null);
@@ -234,6 +262,7 @@ const viewerState = {
   courseId: null,
   slideIndex: 0,
   isPublic: false,
+  isDemo: false,
   isLiveShare: false,
   isReplay: false,
   liveShareId: null,
@@ -256,13 +285,19 @@ const viewerLiveCursorState = {
 };
 
 let viewerResizeSyncFrame = null;
+let viewerObservedShellSize = { width: 0, height: 0 };
 
 const params = new URLSearchParams(window.location.search);
+const demoTemplateKeys = (params.get('demoTemplates') || '')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean);
 viewerState.isLiveShare = Boolean(params.get('liveShareId'));
 viewerState.isPublic = Boolean(params.get('publicModuleId'));
+viewerState.isDemo = demoTemplateKeys.length > 0;
 viewerState.isReplay = params.get('adminReplay') === '1';
 viewerState.moduleId = params.get('moduleId') || params.get('publicModuleId');
-viewerState.courseId = params.get('courseId');
+viewerState.courseId = params.get('courseId') || (demoTemplateKeys.length ? 'demo-showcase' : null);
 viewerState.liveShareId = params.get('liveShareId');
 viewerState.replayUserId = params.get('userId');
 
@@ -365,6 +400,31 @@ let liveStagePollTimer = null;
 
 const isReplayMode = () => viewerState.isReplay;
 const isLiveShareMode = () => viewerState.isLiveShare;
+const isDemoMode = () => viewerState.isDemo;
+
+const getDemoTrackingContext = () => ({
+  demo_template_count: demoTemplateKeys.length,
+  demo_templates: demoTemplateKeys.join(',').slice(0, 500),
+  active_template: String(viewerState.moduleId || '').replace(/^demo-/, ''),
+  slide_number: Number(viewerState.slideIndex || 0) + 1
+});
+
+const trackDemoCustomEvent = (eventName, details = {}, options = {}) => {
+  if (!isDemoMode()) return false;
+  return window.CriatyveMeta?.trackCustom(
+    eventName,
+    { ...getDemoTrackingContext(), ...details },
+    options
+  ) || false;
+};
+
+const trackDemoInteraction = (interactionType, details = {}) => {
+  if (!isDemoMode()) return;
+  trackDemoCustomEvent('DemoInteraction', {
+    interaction_type: interactionType,
+    ...details
+  }, { onceKey: 'demo-first-interaction' });
+};
 
 const formatReplayDate = (value) => {
   if (!value) return 'Sem data';
@@ -748,7 +808,7 @@ const getViewerPenAvailabilityReason = (module, slide) => {
   if (!slideAllowsViewerPen(module, slide)) {
     return '';
   }
-  if (viewerState.isPublic && !isLiveShareMode()) {
+  if ((viewerState.isPublic || isDemoMode()) && !isLiveShareMode()) {
     return 'A caneta fica disponível apenas no acesso autenticado do aluno.';
   }
   if (isReplayMode()) {
@@ -794,7 +854,7 @@ const updateViewerPenToolState = (slide = null) => {
   const currentModule = getCurrentModule();
   const availabilityReason = getViewerPenAvailabilityReason(currentModule, currentSlide);
   // Em live share, se o módulo liberar caneta, permite independente de ser público
-  const canShowTool = !isReplayMode() && (isLiveShareMode() ? true : !viewerState.isPublic) && slideAllowsViewerPen(currentModule, currentSlide);
+  const canShowTool = !isReplayMode() && (isLiveShareMode() ? true : (!viewerState.isPublic && !isDemoMode())) && slideAllowsViewerPen(currentModule, currentSlide);
   const referencePen = getFirstStudentPaintablePen(currentSlide);
   if (referencePen && !viewerState.penSettingsTouched) {
     viewerState.penColor = referencePen.strokeColor || viewerState.penColor;
@@ -840,7 +900,7 @@ const toggleViewerPenTool = () => {
   const slide = getCurrentSlide();
   const allowed = slideAllowsViewerPen(getCurrentModule(), slide);
   // Em live share, a caneta é permitida independente de isPublic
-  if (!allowed || isReplayMode() || (viewerState.isPublic && !isLiveShareMode())) {
+  if (!allowed || isReplayMode() || ((viewerState.isPublic || isDemoMode()) && !isLiveShareMode())) {
     return;
   }
   viewerState.penToolActive = !viewerState.penToolActive;
@@ -1136,7 +1196,7 @@ const ensureViewerPenOverlay = (slide) => {
     wrapper &&
     slide &&
     !isReplayMode() &&
-    (isLiveShareMode() || !viewerState.isPublic) &&
+    (isLiveShareMode() || (!viewerState.isPublic && !isDemoMode())) &&
     slideAllowsViewerPen(currentModule, slide);
   if (!canDrawOnSlide) {
     destroyViewerPenOverlay();
@@ -2548,6 +2608,7 @@ const renderViewerBackgroundMedia = (stageNode, slide) => {
 
 const normalizeRuntimeActionConfig = (config = {}) => ({
   ...config,
+  targetTriggerId: typeof config.targetTriggerId === 'string' ? config.targetTriggerId : '',
   url: typeof config.url === 'string' ? config.url : '',
   text: typeof config.text === 'string' && config.text ? config.text : 'Novo texto',
   replaceMode:
@@ -2613,6 +2674,7 @@ const createDefaultActionConfig = () => ({
   type: 'none',
   targetSlideId: '',
   targetElementId: '',
+  targetTriggerId: '',
   ruleGroup: '',
   requireAllButtonsInGroup: false,
   text: 'Novo texto',
@@ -2754,12 +2816,28 @@ const triggerMatchesKeyboardBinding = (trigger, binding) =>
   Boolean(binding) && getTriggerKeyBindings(trigger).includes(binding);
 
 const normalizeInteractionTriggers = (element) => {
-  if (!element || !['floatingButton', 'detector', 'timedTrigger', 'input', 'key'].includes(element.type)) {
+  if (!element || !['floatingButton', 'detector', 'timedTrigger', 'input', 'key', 'quiz'].includes(element.type)) {
     return [];
   }
   const sourceTriggers = Array.isArray(element.interactionTriggers) ? element.interactionTriggers : [];
   const legacyConfig = element.actionConfig && typeof element.actionConfig === 'object' ? element.actionConfig : {};
-  element.interactionTriggers = (sourceTriggers.length ? sourceTriggers : [{ actionConfig: legacyConfig }]).map((trigger, index) => ({
+  const triggerSources = element.type === 'quiz'
+    ? [
+      { result: 'correct', name: 'Ao acertar' },
+      { result: 'wrong', name: 'Ao errar' }
+    ].map((definition, index) => {
+      const matchingTrigger = sourceTriggers.find((trigger) => trigger?.quizResult === definition.result);
+      const fallbackTrigger = sourceTriggers[index] || {};
+      const source = matchingTrigger || fallbackTrigger;
+      return {
+        ...source,
+        name: definition.name,
+        quizResult: definition.result,
+        actionConfig: source.actionConfig || (index === 0 ? legacyConfig : {})
+      };
+    })
+    : (sourceTriggers.length ? sourceTriggers : [{ actionConfig: legacyConfig }]);
+  element.interactionTriggers = triggerSources.map((trigger, index) => ({
     id: typeof trigger?.id === 'string' && trigger.id.trim() ? trigger.id.trim() : `${element.id || element.type}-trigger-${index + 1}`,
     name:
       typeof trigger?.name === 'string' && trigger.name.trim()
@@ -2769,6 +2847,7 @@ const normalizeInteractionTriggers = (element) => {
     time: Math.max(0, Number(trigger?.time ?? trigger?.triggerTime) || 0),
     keys: getTriggerKeyBindings(trigger),
     visibleKey: element.type === 'key' ? isKeyTriggerVisible(trigger) : false,
+    ...(element.type === 'quiz' ? { quizResult: trigger.quizResult === 'wrong' ? 'wrong' : 'correct' } : {}),
     actionConfig: normalizeRuntimeActionConfig((() => {
       const rawConfig = trigger?.actionConfig && typeof trigger.actionConfig === 'object' ? trigger.actionConfig : trigger || {};
       const preferredQuizOptions = getMeaningfulQuizOptionsSource(rawConfig, index === 0 ? legacyConfig : {});
@@ -2934,6 +3013,7 @@ const VIDEO_TRIGGER_ACTIONS = new Set([
   'seekVideo',
   'showElement',
   'hideElement',
+  'toggleTrigger',
   'playAnimation'
 ]);
 
@@ -3208,7 +3288,7 @@ const isModuleCompleted = (module) => {
 const shouldLockNextModule = (module) => Boolean(module?.builder_data?.moduleSettings?.lockNextModuleUntilCompleted);
 
 const getUnlockedModuleIds = (modules = viewerModules) => {
-  if (isReplayMode()) {
+  if (isReplayMode() || isDemoMode()) {
     return new Set((modules || []).map((module) => module.id));
   }
   const sortedModules = sortModulesForPhase(modules);
@@ -3422,7 +3502,7 @@ const getInputResponseState = (moduleId, slideKey, elementId, module = getCurren
 };
 
 const persistCameraCaptureToBackend = async ({ module, slide, element, image = '', video = '' }) => {
-  if (viewerState.isPublic || isReplayMode() || !module?.courseId || !slide || !element?.id) {
+  if (viewerState.isPublic || isDemoMode() || isReplayMode() || !module?.courseId || !slide || !element?.id) {
     return { ok: false };
   }
   const slideKey = getStableSlideKey(slide, viewerState.slideIndex);
@@ -3861,7 +3941,7 @@ const persistCurrentSlideProgress = async ({ completed = false, force = false } 
     return;
   }
   setSlideProgressState(module.id, slideKey, nextState);
-  if (viewerState.isPublic || isReplayMode() || !module.courseId) {
+  if (viewerState.isPublic || isDemoMode() || isReplayMode() || !module.courseId) {
     return;
   }
   const interactiveProgress = getModuleInteractiveProgress(module);
@@ -3906,7 +3986,7 @@ const scheduleCurrentSlideProgressTimer = () => {
 
 const persistModuleQuizMetrics = async () => {
   const module = getCurrentModule();
-  if (viewerState.isPublic || isReplayMode() || !module?.courseId) return;
+  if (viewerState.isPublic || isDemoMode() || isReplayMode() || !module?.courseId) return;
   const metrics = getModuleQuizMetrics(module);
   try {
     await authorizedFetch('/api/student/progress', {
@@ -3930,7 +4010,7 @@ const persistVideoProgress = async (position, { force = false, videoProgress = n
   if (!module?.id) {
     return;
   }
-  if (viewerState.isPublic || isReplayMode()) {
+  if (viewerState.isPublic || isDemoMode() || isReplayMode()) {
     lastSavedVideoPosition = safePosition;
     return;
   }
@@ -4069,7 +4149,7 @@ const buildVideoProgressPayload = (element, slide, videoNode) => {
 };
 
 const persistQuizAttemptToBackend = async ({ module, slideKey, quizKey, attempt }) => {
-  if (viewerState.isPublic || isReplayMode() || !module?.courseId || !quizKey || !slideKey || !attempt) {
+  if (viewerState.isPublic || isDemoMode() || isReplayMode() || !module?.courseId || !quizKey || !slideKey || !attempt) {
     return;
   }
   try {
@@ -4111,7 +4191,7 @@ const persistQuizAttemptToBackend = async ({ module, slideKey, quizKey, attempt 
 };
 
 const persistInputResponseToBackendLegacy = async ({ module, slide, element, response, matched }) => {
-  if (viewerState.isPublic || isReplayMode() || !module?.courseId || !element?.id || !slide || !response) {
+  if (viewerState.isPublic || isDemoMode() || isReplayMode() || !module?.courseId || !element?.id || !slide || !response) {
     return { ok: false };
   }
   const inputKey = getInputResponseKey(module.id, getStableSlideKey(slide, viewerState.slideIndex), element.id);
@@ -4175,7 +4255,7 @@ const persistInputResponseToBackendLegacy = async ({ module, slide, element, res
 };
 
 const persistInputResponseToBackend = async ({ module, slide, element, response, matched }) => {
-  if (viewerState.isPublic || isReplayMode() || !module?.courseId || !element?.id || !slide || !response) {
+  if (viewerState.isPublic || isDemoMode() || isReplayMode() || !module?.courseId || !element?.id || !slide || !response) {
     return { ok: false };
   }
   const inputKey = getInputResponseKey(module.id, getStableSlideKey(slide, viewerState.slideIndex), element.id);
@@ -4768,7 +4848,7 @@ const createInputElementNode = (element, slide, { runActions = null } = {}) => {
 
 const persistProgressEventToBackend = async (event) => {
   const module = getCurrentModule();
-  if (viewerState.isPublic || isReplayMode() || !module?.courseId || !event || typeof event !== 'object') {
+  if (viewerState.isPublic || isDemoMode() || isReplayMode() || !module?.courseId || !event || typeof event !== 'object') {
     return;
   }
   try {
@@ -4856,7 +4936,7 @@ const canAdvanceFromCurrentSlide = (targetIndex) => {
 };
 
 const fitStageToViewport = (size) => {
-  if (!moduleStage) return;
+  if (!moduleStage) return null;
   const safeSize = size?.width && size?.height ? size : DEFAULT_STAGE_SIZE;
   const stageShell = moduleStage.closest('.stage-shell');
   const stageHeader = stageShell?.querySelector('.stage-header');
@@ -4867,31 +4947,34 @@ const fitStageToViewport = (size) => {
   const isMobilePortraitLayout = Boolean(stageShell?.classList.contains('mobile-portrait-layout'));
   const headerHeight = (isFullscreen && !isMobilePortraitLayout) ? 0 : (stageHeader?.offsetHeight || 0);
   const promptHeight = isMobilePortraitLayout ? (stageOrientationPrompt?.offsetHeight || 0) : 0;
-  const horizontalPadding = isFullscreen ? 8 : 0;
   const verticalGap = isFullscreen ? (isMobilePortraitLayout ? 16 : 8) : 36;
-  const availableWidth = Math.max(320, shellWidth - horizontalPadding);
-  const viewportLimit = Math.max(
-    320,
-    isFullscreen
-      ? shellHeight - headerHeight - promptHeight - verticalGap
-      : Math.min(shellHeight - headerHeight - promptHeight - 24, window.innerHeight - 260)
-  );
-  const aspectRatio = safeSize.width / safeSize.height;
+  const shellStyle = stageShell ? window.getComputedStyle(stageShell) : null;
+  const layout = calculateViewerStageLayout({
+    stageWidth: safeSize.width,
+    stageHeight: safeSize.height,
+    shellWidth,
+    shellHeight,
+    paddingLeft: Number.parseFloat(shellStyle?.paddingLeft) || 0,
+    paddingRight: Number.parseFloat(shellStyle?.paddingRight) || 0,
+    paddingTop: Number.parseFloat(shellStyle?.paddingTop) || 0,
+    paddingBottom: Number.parseFloat(shellStyle?.paddingBottom) || 0,
+    headerHeight,
+    promptHeight,
+    verticalGap,
+    fullscreen: isFullscreen,
+    windowHeight: window.innerHeight,
+    pageReservedHeight: 260
+  });
 
-  let nextWidth = availableWidth;
-  let nextHeight = nextWidth / aspectRatio;
-
-  if (nextHeight > viewportLimit) {
-    nextHeight = viewportLimit;
-    nextWidth = nextHeight * aspectRatio;
-  }
-
-  moduleStage.style.width = `${Math.min(nextWidth, availableWidth)}px`;
-  moduleStage.style.height = `${nextHeight}px`;
+  const nextWidth = `${layout.width}px`;
+  const nextHeight = `${layout.height}px`;
+  if (moduleStage.style.width !== nextWidth) moduleStage.style.width = nextWidth;
+  if (moduleStage.style.height !== nextHeight) moduleStage.style.height = nextHeight;
   moduleStage.style.maxWidth = '100%';
   moduleStage.style.minHeight = '0';
   moduleStage.style.maxHeight = 'none';
   moduleStage.style.margin = '0 auto';
+  return layout;
 };
 
 const disableNavigation = () => {
@@ -4929,14 +5012,10 @@ const ensureStageContentWrapper = () => {
 };
 
 const updateStageScale = () => {
-  if (viewerResizeSyncFrame != null) {
-    cancelAnimationFrame(viewerResizeSyncFrame);
-  }
+  if (viewerResizeSyncFrame != null) return;
   viewerResizeSyncFrame = requestAnimationFrame(() => {
-    viewerResizeSyncFrame = requestAnimationFrame(() => {
-      viewerResizeSyncFrame = null;
-      performStageScaleUpdate();
-    });
+    viewerResizeSyncFrame = null;
+    performStageScaleUpdate();
   });
 };
 
@@ -4944,24 +5023,18 @@ const performStageScaleUpdate = () => {
   const wrapper = ensureStageContentWrapper();
   if (!wrapper || !moduleStage) return;
   const size = getStageSize();
-  fitStageToViewport(size);
-  wrapper.style.width = `${size.width}px`;
-  wrapper.style.height = `${size.height}px`;
-  const availableWidth = moduleStage.clientWidth || size.width;
-  const availableHeight = moduleStage.clientHeight || size.height;
-  const widthScale = size.width ? availableWidth / size.width : 1;
-  const heightScale = size.height ? availableHeight / size.height : 1;
-  const scale = Math.min(widthScale, heightScale);
-  
-  // Evita loops infinitos se a mudanca for insignificante (menos de 0.1%)
-  if (viewerStageZoomState.baseScale && Math.abs(viewerStageZoomState.baseScale - scale) < 0.001) {
-    return;
-  }
-
-  viewerStageZoomState.baseScale = scale;
+  const layout = fitStageToViewport(size);
+  if (!layout) return;
+  const wrapperWidth = `${size.width}px`;
+  const wrapperHeight = `${size.height}px`;
+  if (wrapper.style.width !== wrapperWidth) wrapper.style.width = wrapperWidth;
+  if (wrapper.style.height !== wrapperHeight) wrapper.style.height = wrapperHeight;
+  viewerStageZoomState.baseScale = layout.scale;
   const baseOffset = getViewerStageBaseOffset();
-  wrapper.style.left = `${baseOffset.left}px`;
-  wrapper.style.top = `${baseOffset.top}px`;
+  const wrapperLeft = `${baseOffset.left}px`;
+  const wrapperTop = `${baseOffset.top}px`;
+  if (wrapper.style.left !== wrapperLeft) wrapper.style.left = wrapperLeft;
+  if (wrapper.style.top !== wrapperTop) wrapper.style.top = wrapperTop;
   moduleStage.style.setProperty('--module-stage-aspect', `${size.width} / ${size.height}`);
   applyViewerStageZoomTransform();
 };
@@ -5093,6 +5166,7 @@ const normalizeQuizElement = (element) => {
   element.points = Math.max(1, Number(element.points) || 1);
   element.lockOnWrong = Boolean(element.lockOnWrong);
   element.hideOnCorrect = Boolean(element.hideOnCorrect);
+  normalizeInteractionTriggers(element);
 };
 
 const createQuizNode = (element, slide) => {
@@ -5231,6 +5305,12 @@ const createQuizNode = (element, slide) => {
     updateNavigationState();
     if (isCorrect && element.hideOnCorrect && setViewerElementHidden(currentSlide, element.id, true)) {
       syncViewerElementVisibilityInDom(currentSlide, element.id, true);
+    }
+    const resultTrigger = (element.interactionTriggers || []).find(
+      (trigger) => trigger?.enabled !== false && trigger.quizResult === (isCorrect ? 'correct' : 'wrong')
+    );
+    if (resultTrigger) {
+      executeActionConfig(element, resultTrigger.actionConfig || {}, currentSlide, module, module?.builder_data?.slides || []);
     }
   });
   return node;
@@ -5602,7 +5682,7 @@ const attachTimedVideoTrigger = (videoNode, element) => {
     return;
   }
   const triggers = (element.videoTriggers || []).filter(
-    (trigger) => trigger?.enabled !== false && (trigger.actionConfig?.type || 'none') !== 'none' && Number(trigger.time) > 0
+    (trigger) => (trigger.actionConfig?.type || 'none') !== 'none' && Number(trigger.time) > 0
   );
   if (!triggers.length) {
     return;
@@ -5623,7 +5703,7 @@ const attachTimedVideoTrigger = (videoNode, element) => {
   videoNode.addEventListener('timeupdate', () => {
     const currentTime = Number(videoNode.currentTime) || 0;
     triggers.forEach((trigger) => {
-      if (firedIds.has(trigger.id) || currentTime < Math.max(0, Number(trigger.time) || 0)) {
+      if (trigger?.enabled === false || firedIds.has(trigger.id) || currentTime < Math.max(0, Number(trigger.time) || 0)) {
         return;
       }
       firedIds.add(trigger.id);
@@ -5762,14 +5842,14 @@ const executeActionConfig = (sourceElement, config, currentSlide, module, slides
       changeSlide(1, { ignoreRestrictions: true });
       return true;
     case 'jumpSlide': {
-      const nextIndex = slides.findIndex((slide) => slide.id === safeConfig.targetSlideId);
-      if (nextIndex >= 0) {
-        const isImmediateNext = nextIndex === viewerState.slideIndex + 1;
-        if (!isImmediateNext && !canAdvanceFromCurrentSlide(nextIndex)) {
-          return false;
-        }
+      const navigation = resolveTriggeredSlideNavigation({
+        slides,
+        targetSlideId: safeConfig.targetSlideId,
+        currentIndex: viewerState.slideIndex
+      });
+      if (navigation?.bypassSequentialRestriction) {
         persistCurrentSlideProgress({ force: true });
-        viewerState.slideIndex = nextIndex;
+        viewerState.slideIndex = navigation.targetIndex;
         renderSlide(slides[viewerState.slideIndex]);
         return true;
       }
@@ -5806,6 +5886,14 @@ const executeActionConfig = (sourceElement, config, currentSlide, module, slides
         return true;
       }
       return false;
+    case 'toggleTrigger': {
+      const toggled = toggleSlideTrigger(currentSlide, safeConfig.targetTriggerId);
+      if (toggled?.element?.type === 'timedTrigger') {
+        clearTimedViewerSlideTriggerTimers();
+        scheduleTimedViewerSlideTriggers(currentSlide);
+      }
+      return Boolean(toggled);
+    }
     case 'replaceText': {
       const replaced = executeReplaceTextAction(sourceElement, safeConfig, currentSlide, moduleId, slideKey);
       if (replaced) {
@@ -7057,7 +7145,7 @@ const verifyModuleFace = async (module, purpose) => {
 };
 
 const prepareModuleFaceAccess = async (module) => {
-  if (!module || viewerState.isPublic || isReplayMode() || isLiveShareMode()) return module;
+  if (!module || viewerState.isPublic || isDemoMode() || isReplayMode() || isLiveShareMode()) return module;
   const settings = getViewerFaceSettings(module);
   if (!settings.enabled) return module;
   if (settings.verifyOnEntry && module.faceContentProtected) {
@@ -7077,7 +7165,7 @@ const schedulePeriodicFaceVerification = (module) => {
     facePeriodicTimer = null;
   }
   const settings = getViewerFaceSettings(module);
-  if (!settings.verifyDuringModule || viewerState.isPublic || isReplayMode() || isLiveShareMode()) return;
+  if (!settings.verifyDuringModule || viewerState.isPublic || isDemoMode() || isReplayMode() || isLiveShareMode()) return;
   const delay = (15 + Math.random() * 15) * 60 * 1000;
   facePeriodicTimer = setTimeout(async () => {
     if (getCurrentModule()?.id !== module.id || document.hidden) {
@@ -7849,6 +7937,12 @@ const renderModuleList = () => {
         alert(getLockedModuleReason(targetModule, viewerModules));
         return;
       }
+      trackDemoInteraction('template_select', {
+        selected_template: String(moduleId).replace(/^demo-/, '')
+      });
+      trackDemoCustomEvent('DemoTemplateSelect', {
+        selected_template: String(moduleId).replace(/^demo-/, '')
+      });
       if (lastTrackedVideoPosition > 0) {
         persistVideoProgress(lastTrackedVideoPosition, { force: true });
       }
@@ -7878,7 +7972,17 @@ const initModuleViewerPage = async () => {
   moduleStage = document.getElementById('moduleStage');
   moduleStageShell = document.getElementById('moduleStageShell');
   if (typeof ResizeObserver === 'function' && moduleStageShell) {
-    const stageObserver = new ResizeObserver(() => {
+    const stageObserver = new ResizeObserver((entries) => {
+      const bounds = entries[0]?.contentRect;
+      const nextWidth = Math.round(Number(bounds?.width) || 0);
+      const nextHeight = Math.round(Number(bounds?.height) || 0);
+      if (
+        Math.abs(viewerObservedShellSize.width - nextWidth) < 1
+        && Math.abs(viewerObservedShellSize.height - nextHeight) < 1
+      ) {
+        return;
+      }
+      viewerObservedShellSize = { width: nextWidth, height: nextHeight };
       updateStageScale();
     });
     stageObserver.observe(moduleStageShell);
@@ -7906,9 +8010,21 @@ const initModuleViewerPage = async () => {
   replayTimelineCard = document.getElementById('replayTimelineCard');
   replayTimelineList = document.getElementById('replayTimelineList');
   document.querySelectorAll('.logout-btn').forEach((btn) => btn.addEventListener('click', handleLogout));
-  prevBtn?.addEventListener('click', () => changeSlide(-1));
-  nextBtn?.addEventListener('click', () => changeSlide(1));
-  viewerFullscreenBtn?.addEventListener('click', toggleStageFullscreen);
+  prevBtn?.addEventListener('click', () => {
+    trackDemoInteraction('slide_navigation', { direction: 'previous' });
+    trackDemoCustomEvent('DemoSlideNavigation', { direction: 'previous' });
+    changeSlide(-1);
+  });
+  nextBtn?.addEventListener('click', () => {
+    trackDemoInteraction('slide_navigation', { direction: 'next' });
+    trackDemoCustomEvent('DemoSlideNavigation', { direction: 'next' });
+    changeSlide(1);
+  });
+  viewerFullscreenBtn?.addEventListener('click', () => {
+    trackDemoInteraction('fullscreen');
+    trackDemoCustomEvent('DemoFullscreen', {}, { onceKey: 'demo-fullscreen' });
+    toggleStageFullscreen();
+  });
   viewerFullscreenNavToggleBtn?.addEventListener('click', toggleFullscreenNavExpanded);
   viewerPenToolBtn?.addEventListener('click', toggleViewerPenTool);
   viewerPenColorInput?.addEventListener('input', () => {
@@ -7969,6 +8085,19 @@ const initModuleViewerPage = async () => {
     }
   });
 
+  moduleStage?.addEventListener('pointerdown', (event) => {
+    const elementNode = event.target instanceof Element
+      ? event.target.closest('[data-element-id]')
+      : null;
+    trackDemoInteraction('stage_pointer', {
+      element_id: elementNode?.getAttribute('data-element-id') || undefined,
+      target_tag: String(event.target?.tagName || '').toLowerCase() || undefined
+    });
+    trackDemoCustomEvent('DemoStageInteraction', {
+      element_id: elementNode?.getAttribute('data-element-id') || undefined
+    }, { onceKey: 'demo-stage-interaction' });
+  }, { passive: true });
+
   moduleStage?.addEventListener('pointerleave', () => {
     if (!isLiveShareMode()) {
       return;
@@ -8014,6 +8143,14 @@ const initModuleViewerPage = async () => {
       viewerBackLink.textContent = 'Voltar ao admin';
       viewerBackLink.href = 'admin.html';
     }
+  } else if (isDemoMode()) {
+    if (viewerLogoutBtn) {
+      viewerLogoutBtn.style.display = 'none';
+    }
+    if (viewerBackLink) {
+      viewerBackLink.textContent = 'Voltar ao site';
+      viewerBackLink.href = 'create-account.html';
+    }
   } else {
     const token = getToken();
     const role = localStorage.getItem(USER_ROLE_KEY);
@@ -8040,7 +8177,22 @@ const initModuleViewerPage = async () => {
       }
       return;
     }
-    if (viewerState.isPublic) {
+    if (isDemoMode()) {
+      viewerModules = await Promise.all(demoTemplateKeys.map((templateKey, index) => fetchDemoTemplateModule(templateKey, index)));
+      if (!viewerState.moduleId && viewerModules.length) {
+        viewerState.moduleId = viewerModules[0].id;
+      }
+      viewerState.courseId = 'demo-showcase';
+      window.CriatyveMeta?.track('ViewContent', {
+        content_name: 'Galeria de demonstracoes Criatyve',
+        content_category: 'Interactive Demo',
+        content_ids: demoTemplateKeys,
+        content_type: 'product_group'
+      }, { onceKey: 'demo-gallery-view-content' });
+      trackDemoCustomEvent('DemoGalleryView', {
+        funnel_step: 'demo_view'
+      }, { onceKey: 'demo-gallery-view' });
+    } else if (viewerState.isPublic) {
       const publicModule = await fetchPublicModule(viewerState.moduleId);
       viewerModules = [publicModule];
       viewerState.moduleId = publicModule.id;

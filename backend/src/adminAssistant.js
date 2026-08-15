@@ -3,6 +3,11 @@ const crypto = require('crypto');
 const db = require('./db');
 const { ensureStudentPaymentSchema } = require('./studentPayments');
 const {
+  countProfessorStudents,
+  ensureStudentProfessorLinksSchema,
+  linkStudentToProfessor
+} = require('./studentProfessorLinks');
+const {
   sanitizeEmail,
   sanitizePhone,
   sanitizeSlug,
@@ -135,6 +140,7 @@ const ensureAssistantTables = async () => {
 };
 
 const ensureAssistantDataTables = async () => {
+  await ensureStudentProfessorLinksSchema();
   await db.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL");
   await db.query("ALTER TABLE courses ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL");
   await db.query("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL");
@@ -250,8 +256,11 @@ const loadAssistantContext = async (user) => {
                 FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS enrollments
        FROM users u
        LEFT JOIN enrollments e ON e.user_id = u.id
-       LEFT JOIN courses c ON c.id = e.course_id
-       WHERE u.role = 'student'${scopeSql(user.role, 'u')}
+       LEFT JOIN courses c ON c.id = e.course_id${user.role === 'professor' ? ' AND c.owner_user_id = $1' : ''}
+       WHERE u.role = 'student'${user.role === 'professor' ? ` AND EXISTS (
+         SELECT 1 FROM professor_students relation
+          WHERE relation.student_user_id = u.id AND relation.professor_user_id = $1
+       )` : ''}
        GROUP BY u.id
        ORDER BY u.full_name
        LIMIT 250`,
@@ -287,7 +296,10 @@ const loadAssistantContext = async (user) => {
        FROM enrollments e
        JOIN users u ON u.id = e.user_id
        JOIN courses c ON c.id = e.course_id
-       WHERE TRUE${user.role === 'professor' ? ' AND u.owner_user_id = $1 AND c.owner_user_id = $1' : ''}
+       WHERE TRUE${user.role === 'professor' ? ` AND c.owner_user_id = $1 AND EXISTS (
+         SELECT 1 FROM professor_students relation
+          WHERE relation.student_user_id = u.id AND relation.professor_user_id = $1
+       )` : ''}
        ORDER BY e.updated_at DESC
        LIMIT 300`,
       params
@@ -324,7 +336,7 @@ const loadAssistantContext = async (user) => {
       params
     ),
     db.query(
-      `SELECT student.id AS student_id, student.owner_user_id AS professor_id,
+      `SELECT student.id AS student_id, relation.professor_user_id AS professor_id,
               professor.full_name AS professor_name,
               p.id AS plan_id, p.amount, p.due_day, p.billing_type, p.grace_days,
               p.auto_block, p.status AS plan_status, p.description, p.payment_instructions,
@@ -332,8 +344,10 @@ const loadAssistantContext = async (user) => {
               period.due_date, period.amount AS period_amount, period.status AS payment_status,
               period.failure_reason, period.paid_at
          FROM users student
-         LEFT JOIN users professor ON professor.id = student.owner_user_id
-         LEFT JOIN student_payment_plans p ON p.student_user_id = student.id
+         JOIN professor_students relation ON relation.student_user_id = student.id
+         LEFT JOIN users professor ON professor.id = relation.professor_user_id
+         LEFT JOIN student_payment_plans p
+           ON p.student_user_id = student.id AND p.professor_user_id = relation.professor_user_id
          LEFT JOIN LATERAL (
            SELECT due_date, amount, status, failure_reason, paid_at
              FROM student_payment_periods
@@ -341,7 +355,7 @@ const loadAssistantContext = async (user) => {
             ORDER BY due_date DESC
             LIMIT 1
          ) period ON TRUE
-        WHERE student.role = 'student'${user.role === 'professor' ? ' AND student.owner_user_id = $1' : ''}
+        WHERE student.role = 'student'${user.role === 'professor' ? ' AND relation.professor_user_id = $1' : ''}
         ORDER BY student.full_name
         LIMIT 250`,
       params
@@ -595,7 +609,10 @@ const storeProposal = async ({ userId, requestText, response }) => {
 
 const assertOwnedStudent = async (client, user, studentId) => {
   const { rows } = await client.query(
-    `SELECT id FROM users WHERE id = $1 AND role = 'student'${user.role === 'professor' ? ' AND owner_user_id = $2' : ''}`,
+    `SELECT id FROM users WHERE id = $1 AND role = 'student'${user.role === 'professor' ? ` AND EXISTS (
+      SELECT 1 FROM professor_students relation
+       WHERE relation.student_user_id = users.id AND relation.professor_user_id = $2
+    )` : ''}`,
     user.role === 'professor' ? [studentId, user.id] : [studentId]
   );
   if (!rows.length) throw new Error('Aluno não encontrado ou fora da sua conta.');
@@ -695,9 +712,10 @@ const executeAction = async (client, user, action) => {
     if (duplicate.rows.length) throw new Error(`Já existe uma conta com o email ${action.email}.`);
     if (user.role === 'professor') {
       const quota = await client.query(
-        `SELECT u.student_limit, COUNT(s.id)::int AS student_count
+        `SELECT u.student_limit, COUNT(relation.student_user_id)::int AS student_count
          FROM users u
-         LEFT JOIN users s ON s.owner_user_id = u.id AND s.role = 'student' AND s.is_active = TRUE
+         LEFT JOIN professor_students relation
+           ON relation.professor_user_id = u.id AND relation.active = TRUE
          WHERE u.id = $1 AND u.role = 'professor' AND u.is_active = TRUE
          GROUP BY u.id`,
         [user.id]
@@ -711,11 +729,20 @@ const executeAction = async (client, user, action) => {
     const temporarySecret = crypto.randomBytes(32).toString('base64url');
     const passwordHash = await bcrypt.hash(temporarySecret, 10);
     const className = await ensureOwnedClassName(client, user, action.className);
+    const studentId = crypto.randomUUID();
     await client.query(
       `INSERT INTO users (id, full_name, email, phone, password_hash, role, class_name, is_active, owner_user_id)
        VALUES ($1, $2, $3, $4, $5, 'student', $6, TRUE, $7)`,
-      [crypto.randomUUID(), action.fullName, action.email, action.phone || null, passwordHash, className, user.id]
+      [studentId, action.fullName, action.email, action.phone || null, passwordHash, className, user.id]
     );
+    if (user.role === 'professor') {
+      await linkStudentToProfessor(client, {
+        professorId: user.id,
+        studentId,
+        className,
+        source: 'assistant-created'
+      });
+    }
     return 'Aluno criado. Por segurança, nenhuma senha foi exibida; o aluno deve usar "Esqueci minha senha" no primeiro acesso.';
   }
 
@@ -737,7 +764,11 @@ const executeAction = async (client, user, action) => {
     const updateResult = await client.query(
       `UPDATE users SET ${updates.join(', ')}
        WHERE id = $${studentIdIndex} AND role = 'student'
-       ${user.role === 'professor' ? `AND owner_user_id = $${values.length}` : ''}`,
+       ${user.role === 'professor' ? `AND EXISTS (
+         SELECT 1 FROM professor_students relation
+          WHERE relation.student_user_id = users.id
+            AND relation.professor_user_id = $${values.length}
+       )` : ''}`,
       values
     );
     if (!updateResult.rowCount) throw new Error('Aluno não encontrado ou fora da sua conta.');
@@ -746,6 +777,24 @@ const executeAction = async (client, user, action) => {
 
   if (action.type === 'delete_student') {
     await assertOwnedStudent(client, user, action.studentId);
+    if (user.role === 'professor') {
+      await client.query(
+        `DELETE FROM enrollments enrollment USING courses course
+          WHERE enrollment.user_id = $1
+            AND enrollment.course_id = course.id
+            AND course.owner_user_id = $2`,
+        [action.studentId, user.id]
+      );
+      await client.query(
+        'DELETE FROM student_payment_plans WHERE student_user_id = $1 AND professor_user_id = $2',
+        [action.studentId, user.id]
+      );
+      await client.query(
+        'DELETE FROM professor_students WHERE student_user_id = $1 AND professor_user_id = $2',
+        [action.studentId, user.id]
+      );
+      return 'Aluno removido deste professor.';
+    }
     const deleteResult = await client.query(
       `DELETE FROM users
        WHERE id = $1 AND role = 'student'${user.role === 'professor' ? ' AND owner_user_id = $2' : ''}`,
@@ -966,21 +1015,47 @@ const executeAction = async (client, user, action) => {
 
   if (action.type === 'decide_access_request') {
     const request = await client.query(
-      `SELECT car.user_id, car.course_id, car.status
+      `SELECT car.user_id, car.course_id, car.status,
+              c.owner_user_id AS professor_user_id,
+              professor.role AS professor_role, professor.student_limit,
+              relation.active AS professor_link_active
        FROM course_access_requests car
        JOIN courses c ON c.id = car.course_id
+       LEFT JOIN users professor ON professor.id = c.owner_user_id
+       LEFT JOIN professor_students relation
+         ON relation.professor_user_id = c.owner_user_id
+        AND relation.student_user_id = car.user_id
        WHERE car.id = $1${user.role === 'professor' ? ' AND c.owner_user_id = $2' : ''}
-       FOR UPDATE`,
+       FOR UPDATE OF car`,
       user.role === 'professor' ? [action.requestId, user.id] : [action.requestId]
     );
     if (!request.rows.length || request.rows[0].status !== 'pending') throw new Error('Solicitação indisponível.');
+    const accessRequest = request.rows[0];
+    if (
+      action.decision === 'approved'
+      && accessRequest.professor_role === 'professor'
+      && accessRequest.professor_link_active !== true
+    ) {
+      const activeStudents = await countProfessorStudents(accessRequest.professor_user_id, client);
+      const limit = Number(accessRequest.student_limit || 0);
+      if (limit > 0 && activeStudents >= limit) {
+        throw new Error(`Limite de alunos atingido (${limit}). Adicione vagas ao plano antes de aprovar.`);
+      }
+    }
     await client.query('UPDATE course_access_requests SET status = $1, updated_at = NOW() WHERE id = $2', [action.decision, action.requestId]);
     if (action.decision === 'approved') {
+      if (accessRequest.professor_user_id) {
+        await linkStudentToProfessor(client, {
+          professorId: accessRequest.professor_user_id,
+          studentId: accessRequest.user_id,
+          source: 'course-store-assistant'
+        });
+      }
       await client.query(
         `INSERT INTO enrollments (user_id, course_id, video_position, interactive_step, current_module, grade, updated_at)
          VALUES ($1, $2, 0, '0', 'Módulo 1', 0, NOW())
          ON CONFLICT (user_id, course_id) DO NOTHING`,
-        [request.rows[0].user_id, request.rows[0].course_id]
+        [accessRequest.user_id, accessRequest.course_id]
       );
     }
     return action.decision === 'approved' ? 'Solicitação aprovada.' : 'Solicitação recusada.';

@@ -20,6 +20,7 @@
   <meta name="twitter:title" content="Criatyve | Aulas interativas com IA">
   <meta name="twitter:description" content="Canvas criativo, IA, portal do aluno opcional, quizzes, notas, facecam e vídeos interativos em uma só plataforma.">
   <meta name="twitter:image" content="https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=1200&q=80">
+  <script src="meta-pixel.js?v=20260815-2"></script>
 
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <link rel="preconnect" href="https://images.unsplash.com" crossorigin>
@@ -213,6 +214,24 @@
       font-weight: 800;
     }
     .btn-glass:hover { color: #fff; border-color: rgba(255,255,255,.28); background: rgba(255,255,255,.1); }
+    .btn-glass.hero-demo-pulse {
+      animation: heroDemoPulse 2.8s ease-in-out infinite;
+      box-shadow: 0 0 0 0 rgba(103, 232, 249, .18);
+    }
+    .btn-glass.hero-demo-pulse:hover,
+    .btn-glass.hero-demo-pulse:focus-visible {
+      animation-play-state: paused;
+    }
+    @keyframes heroDemoPulse {
+      0%, 100% {
+        transform: translateY(0);
+        box-shadow: 0 0 0 0 rgba(103, 232, 249, .14);
+      }
+      50% {
+        transform: translateY(-1px);
+        box-shadow: 0 0 0 12px rgba(103, 232, 249, 0);
+      }
+    }
     .btn-sm { padding: .58rem .9rem; }
 
     .section-padding { padding: 6rem 0; }
@@ -787,6 +806,8 @@
   </style>
 </head>
 <body>
+  <noscript><img height="1" width="1" style="display:none" alt=""
+    src="https://www.facebook.com/tr?id=1067171249057361&amp;ev=PageView&amp;noscript=1"></noscript>
   <nav class="navbar navbar-expand-lg fixed-top" aria-label="Navegação principal">
     <div class="container">
       <a class="navbar-brand" href="#topo" aria-label="Criatyve início">
@@ -1293,7 +1314,7 @@
     }
 
     const API_ORIGIN = resolveApiOrigin();
-    const WHATSAPP_SUPPORT_PHONE = '5599999999999';
+    const WHATSAPP_SUPPORT_PHONE = '5571993615509';
     const WHATSAPP_SUPPORT_MESSAGE = 'Ola, quero falar com o suporte da Criatyve.';
     const CHECKOUT_URLS = {
       pro: 'checkout.html?plan=pro',
@@ -1306,12 +1327,49 @@
       whatsappSupportLink.href = cleanPhone
         ? `https://wa.me/${cleanPhone}?text=${encodeURIComponent(WHATSAPP_SUPPORT_MESSAGE)}`
         : `https://wa.me/?text=${encodeURIComponent(WHATSAPP_SUPPORT_MESSAGE)}`;
+      whatsappSupportLink.addEventListener('click', () => {
+        window.CriatyveMeta?.track('Contact', {
+          content_name: 'Suporte Criatyve',
+          contact_method: 'whatsapp',
+          button_text: 'Falar com suporte'
+        }, { onceKey: 'create-account-whatsapp-contact' });
+      });
     }
+
+    window.CriatyveMeta?.track('ViewContent', {
+      content_name: 'Criatyve - Criacao de conta',
+      content_category: 'Landing Page'
+    }, { onceKey: 'create-account-view-content' });
+    window.CriatyveMeta?.trackCustom('CreateAccountLandingView', {
+      funnel_step: 'landing_view'
+    }, { onceKey: 'create-account-landing-view' });
 
     const navbar = document.querySelector('.navbar');
     const onScroll = () => navbar.classList.toggle('nav-scrolled', window.scrollY > 28);
     onScroll();
     window.addEventListener('scroll', onScroll, { passive: true });
+
+    const heroTutorialButton = document.querySelector('.hero .btn-glass[href="#video"]');
+    if (heroTutorialButton) {
+      const demoUrl = new URL('module-viewer.html', window.location.href);
+      demoUrl.searchParams.set('demoTemplates', '1tutorial-completo-do-interactive-creator,cidade-em-jogo-tabuleiro-imobiliario,learnspace-runner-demo-comercial');
+      const landingParams = new URLSearchParams(window.location.search);
+      ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'fbclid'].forEach((key) => {
+        const value = landingParams.get(key);
+        if (value) demoUrl.searchParams.set(key, value);
+      });
+      heroTutorialButton.setAttribute('href', `${demoUrl.pathname.split('/').pop()}${demoUrl.search}`);
+      heroTutorialButton.innerHTML = '<i class="bi bi-easel2 me-2"></i>Ver exemplos feitos';
+      heroTutorialButton.classList.add('hero-demo-pulse');
+      heroTutorialButton.addEventListener('click', () => {
+        window.CriatyveMeta?.trackCustom('ViewExamplesClick', {
+          button_text: 'Ver exemplos feitos',
+          destination: 'demo_showcase',
+          template_count: 3,
+          funnel_step: 'demo_click'
+        }, { onceKey: 'create-account-view-examples-click' });
+      });
+    }
 
     document.querySelectorAll('.navbar-nav .nav-link, .navbar-nav .btn').forEach((link) => {
       link.addEventListener('click', () => {
@@ -1354,6 +1412,25 @@
         link.setAttribute('href', `${url.pathname.split('/').pop()}${url.search}`);
       });
     }
+    document.querySelectorAll('[data-checkout-target]').forEach((link) => {
+      link.addEventListener('click', () => {
+        const checkoutTarget = link.getAttribute('data-checkout-target') || 'pro';
+        const studentCount = getCheckoutStudentCount();
+        const extraStudents = Math.max(0, studentCount - includedStudents);
+        const total = basePrice + (extraStudents * extraPrice);
+        window.CriatyveMeta?.track('InitiateCheckout', {
+          content_name: checkoutTarget === 'trial' ? 'Criatyve - Teste 30 dias' : 'Criatyve Pro',
+          content_category: 'Assinatura SaaS',
+          content_ids: [checkoutTarget],
+          content_type: 'product',
+          currency: 'BRL',
+          value: Number(total.toFixed(2)),
+          num_items: 1,
+          student_count: studentCount,
+          checkout_variant: checkoutTarget
+        });
+      });
+    });
     if (studentInput) {
       studentInput.addEventListener('input', syncCheckoutLinks);
     }

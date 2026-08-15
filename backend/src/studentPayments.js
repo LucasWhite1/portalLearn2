@@ -3,6 +3,7 @@ const express = require('express');
 const db = require('./db');
 const { encryptSecret, decryptStoredSecret } = require('./aiConfigCrypto');
 const { sanitizeText, isUuid } = require('./security');
+const { ensureStudentProfessorLinksSchema } = require('./studentProfessorLinks');
 
 const adminRouter = express.Router();
 const studentRouter = express.Router();
@@ -79,6 +80,7 @@ const safeEqual = (left, right) => {
 };
 
 const ensureStudentPaymentSchema = async () => {
+  await ensureStudentProfessorLinksSchema();
   if (schemaReady) return;
   if (!schemaPromise) {
     schemaPromise = db.query(`
@@ -286,6 +288,56 @@ const loadPlanWithCurrentPeriod = async (studentId, professorId = null) => {
   return { plan, period };
 };
 
+const PAYMENT_STATE_PRIORITY = new Map([
+  ['blocked', 0], ['chargeback', 1], ['refunded', 2], ['failed', 3],
+  ['overdue', 4], ['due_soon', 5], ['pending', 6], ['paid', 7], ['paused', 8]
+]);
+
+const getStudentPaymentStatuses = async (studentId, { includeHistory = false } = {}) => {
+  await ensureStudentPaymentSchema();
+  const { rows } = await db.query(
+    `SELECT p.*, professor.full_name AS professor_name
+       FROM student_payment_plans p
+       JOIN users professor ON professor.id = p.professor_user_id
+       JOIN professor_students relation
+         ON relation.professor_user_id = p.professor_user_id
+        AND relation.student_user_id = p.student_user_id
+        AND relation.active = TRUE
+      WHERE p.student_user_id = $1
+      ORDER BY professor.full_name`,
+    [studentId]
+  );
+  const plans = [];
+  for (const plan of rows) {
+    const period = await ensureCurrentPeriod(plan);
+    const serialized = {
+      professorId: plan.professor_user_id,
+      professorName: plan.professor_name,
+      ...serializePayment(plan, period)
+    };
+    if (includeHistory) {
+      const history = await db.query(
+        `SELECT due_date, amount, status, billing_type, payment_url, failure_reason, paid_at
+           FROM student_payment_periods
+          WHERE plan_id = $1
+          ORDER BY due_date DESC
+          LIMIT 12`,
+        [plan.id]
+      );
+      serialized.history = history.rows.map((item) => ({
+        dueDate: dateOnly(item.due_date), amount: Number(item.amount), status: item.status,
+        billingType: item.billing_type, paymentUrl: item.payment_url,
+        failureReason: item.failure_reason, paidAt: item.paid_at
+      }));
+    }
+    plans.push(serialized);
+  }
+  plans.sort((left, right) =>
+    (PAYMENT_STATE_PRIORITY.get(left.state) ?? 99) - (PAYMENT_STATE_PRIORITY.get(right.state) ?? 99)
+  );
+  return plans;
+};
+
 const ensureAsaasCustomer = async (plan, apiKey) => {
   if (plan.provider_customer_id) return plan.provider_customer_id;
   const customer = await asaasRequest(apiKey, '/customers', {
@@ -412,7 +464,13 @@ const configureSignupPaymentPlan = async ({
   const studentResult = await db.query(
     `SELECT id, full_name, email, phone
        FROM users
-      WHERE id = $1 AND role = 'student' AND owner_user_id = $2`,
+      WHERE id = $1 AND role = 'student'
+        AND EXISTS (
+          SELECT 1 FROM professor_students relation
+           WHERE relation.student_user_id = users.id
+             AND relation.professor_user_id = $2
+             AND relation.active = TRUE
+        )`,
     [studentId, professorId]
   );
   if (!studentResult.rows.length) return null;
@@ -502,7 +560,9 @@ const buildGlobalStudentPaymentOverview = async () => {
             p.provider_subscription_id, p.created_at AS plan_created_at
        FROM users professor
        LEFT JOIN professor_payment_settings settings ON settings.professor_user_id = professor.id
-       LEFT JOIN users student ON student.owner_user_id = professor.id AND student.role = 'student'
+       LEFT JOIN professor_students relation
+         ON relation.professor_user_id = professor.id AND relation.active = TRUE
+       LEFT JOIN users student ON student.id = relation.student_user_id AND student.role = 'student'
        LEFT JOIN student_payment_plans p
          ON p.student_user_id = student.id AND p.professor_user_id = professor.id
       WHERE professor.role = 'professor'
@@ -600,10 +660,13 @@ adminRouter.get('/student-payments/overview', async (req, res) => {
             p.id AS plan_id, p.amount, p.due_day, p.billing_type, p.grace_days,
             p.auto_block, p.status AS plan_status, p.description, p.payment_instructions,
             p.provider_customer_id, p.provider_subscription_id, p.created_at AS plan_created_at
-       FROM users u
+       FROM professor_students relation
+       JOIN users u ON u.id = relation.student_user_id
        LEFT JOIN student_payment_plans p
          ON p.student_user_id = u.id AND p.professor_user_id = $1
-      WHERE u.role = 'student' AND u.owner_user_id = $1
+      WHERE relation.professor_user_id = $1
+        AND relation.active = TRUE
+        AND u.role = 'student'
       ORDER BY u.full_name`,
     [req.user.id]
   );
@@ -910,7 +973,15 @@ adminRouter.put('/student-payments/plans/:studentId', async (req, res) => {
   const studentId = req.params.studentId;
   if (!isUuid(studentId)) return res.status(400).json({ message: 'Aluno inválido.' });
   const owned = await db.query(
-    `SELECT id, full_name, email, phone FROM users WHERE id = $1 AND role = 'student' AND owner_user_id = $2`,
+    `SELECT id, full_name, email, phone
+       FROM users
+      WHERE id = $1 AND role = 'student'
+        AND EXISTS (
+          SELECT 1 FROM professor_students relation
+           WHERE relation.student_user_id = users.id
+             AND relation.professor_user_id = $2
+             AND relation.active = TRUE
+        )`,
     [studentId, req.user.id]
   );
   if (!owned.rows.length) return res.status(404).json({ message: 'Aluno não encontrado.' });
@@ -1008,37 +1079,34 @@ adminRouter.post('/student-payments/plans/:planId/sync', async (req, res) => {
 
 studentRouter.get('/payments/status', async (req, res) => {
   if (req.user?.role !== 'student') return res.status(403).json({ message: 'Área exclusiva do aluno.' });
-  const { plan, period } = await loadPlanWithCurrentPeriod(req.user.id, req.user.ownerUserId || null);
-  if (!plan) return res.json({ configured: false, blocked: false, history: [] });
-  const history = await db.query(
-    `SELECT due_date, amount, status, billing_type, payment_url, failure_reason, paid_at
-       FROM student_payment_periods WHERE plan_id = $1 ORDER BY due_date DESC LIMIT 12`,
-    [plan.id]
-  );
+  const plans = await getStudentPaymentStatuses(req.user.id, { includeHistory: true });
+  if (!plans.length) return res.json({ configured: false, blocked: false, history: [], plans: [] });
   res.json({
     configured: true,
-    professorName: req.user.ownerName || null,
-    ...serializePayment(plan, period),
-    history: history.rows.map((item) => ({
-      dueDate: dateOnly(item.due_date), amount: Number(item.amount), status: item.status,
-      billingType: item.billing_type, paymentUrl: item.payment_url,
-      failureReason: item.failure_reason, paidAt: item.paid_at
-    }))
+    ...plans[0],
+    blocked: plans.some((plan) => plan.blocked),
+    plans
   });
 });
 
 studentRouter.post('/payments/refresh', async (req, res) => {
   if (req.user?.role !== 'student') return res.status(403).json({ message: 'Área exclusiva do aluno.' });
-  const { plan } = await loadPlanWithCurrentPeriod(req.user.id, req.user.ownerUserId || null);
+  const professorId = isUuid(req.body?.professorId) ? req.body.professorId : null;
+  const { plan } = await loadPlanWithCurrentPeriod(req.user.id, professorId);
   if (!plan) return res.status(404).json({ message: 'Mensalidade não configurada.' });
-  if (plan.billing_type !== 'MANUAL') await syncAsaasPlan({ ...plan, professor_user_id: req.user.ownerUserId });
-  const refreshed = await loadPlanWithCurrentPeriod(req.user.id, req.user.ownerUserId || null);
+  if (plan.billing_type !== 'MANUAL') await syncAsaasPlan(plan);
+  const refreshed = await loadPlanWithCurrentPeriod(req.user.id, plan.professor_user_id);
   res.json(serializePayment(refreshed.plan, refreshed.period));
 });
 
 const requireStudentPaymentAccess = async (req, res, next) => {
   if (req.user?.role !== 'student' || /^\/public\//.test(req.path)) return next();
-  const { plan, period } = await loadPlanWithCurrentPeriod(req.user.id, req.user.ownerUserId || null);
+  const courseId = isUuid(req.body?.courseId) ? req.body.courseId : null;
+  if (!courseId) return next();
+  const { rows } = await db.query('SELECT owner_user_id FROM courses WHERE id = $1', [courseId]);
+  const professorId = rows[0]?.owner_user_id || null;
+  if (!professorId) return next();
+  const { plan, period } = await loadPlanWithCurrentPeriod(req.user.id, professorId);
   if (!plan || !shouldBlockStudentPayment(period, plan)) return next();
   return res.status(402).json({
     message: 'Mensalidade vencida. Regularize o pagamento para continuar acessando os cursos.',
@@ -1116,6 +1184,7 @@ module.exports = {
   ensureStudentPaymentSchema,
   configureSignupPaymentPlan,
   buildGlobalStudentPaymentOverview,
+  getStudentPaymentStatuses,
   requireStudentPaymentAccess,
   __test: {
     dateOnly,

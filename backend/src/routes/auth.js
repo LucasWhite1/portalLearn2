@@ -11,6 +11,11 @@ const { ensurePlatformCreditTables } = require('../platformCredits');
 const { ensureBillingAccessSchema, getBillingAccessState } = require('../billingAccess');
 const { configureSignupPaymentPlan } = require('../studentPayments');
 const { shouldAutoApproveSignup } = require('../studentSignupPolicy');
+const {
+  countProfessorStudents,
+  ensureStudentProfessorLinksSchema,
+  linkStudentToProfessor
+} = require('../studentProfessorLinks');
 
 let resetTokenColumnsEnsured = false;
 let roleAndOwnershipEnsured = false;
@@ -267,6 +272,7 @@ const buildSessionPayload = (user, res) => {
 
 const getProfessorSignupAvailability = async (professorId, client = db) => {
   await ensureProfessorQuotaColumns();
+  await ensureStudentProfessorLinksSchema();
   const { rows } = await client.query(
     `SELECT id, full_name, role, is_active, student_limit
        FROM users
@@ -277,15 +283,7 @@ const getProfessorSignupAvailability = async (professorId, client = db) => {
   if (!professor || !['professor', 'admin'].includes(professor.role)) {
     return null;
   }
-  const countResult = await client.query(
-    `SELECT COUNT(*)::int AS total
-       FROM users
-      WHERE role = 'student'
-        AND owner_user_id = $1
-        AND is_active = TRUE`,
-    [professorId]
-  );
-  const studentCount = Number(countResult.rows[0]?.total || 0);
+  const studentCount = await countProfessorStudents(professorId, client);
   const studentLimit = Number.isFinite(Number(professor.student_limit)) ? Number(professor.student_limit) : null;
   const limitReached = Boolean(studentLimit && studentCount >= studentLimit);
   return {
@@ -669,6 +667,7 @@ router.post('/student-signup-link/:token/register', signupIpRateLimiter, signupL
   await ensureStudentSignupLinksTable();
   await ensureClassesTable();
   await ensureLegalConsentColumns();
+  await ensureStudentProfessorLinksSchema();
   const inviteToken = normalizeSignupLinkToken(req.params.token || '');
   const fullName = sanitizeText(req.body?.fullName || '', 160);
   const email = sanitizeEmail(req.body?.email || '');
@@ -740,7 +739,7 @@ router.post('/student-signup-link/:token/register', signupIpRateLimiter, signupL
         phone || null,
         passwordHash,
         'Turma A',
-        autoApproved,
+        true,
         invite.professor_user_id,
         LEGAL_TERMS_VERSION,
         req.body?.marketingConsent === false ? null : new Date()
@@ -767,6 +766,14 @@ router.post('/student-signup-link/:token/register', signupIpRateLimiter, signupL
         autoApproved ? new Date() : null
       ]
     );
+    if (autoApproved) {
+      await linkStudentToProfessor(client, {
+        professorId: invite.professor_user_id,
+        studentId: userId,
+        className: 'Turma A',
+        source: 'signup-link'
+      });
+    }
     const { rows: createdRows } = await client.query('SELECT * FROM users WHERE id = $1', [userId]);
     await client.query('COMMIT');
     if (!autoApproved) {
