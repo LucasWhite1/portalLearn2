@@ -12,6 +12,7 @@ const pixelSource = readFrontendFile('meta-pixel.js');
 const createAccountSource = readFrontendFile('create-account.html');
 const moduleViewerHtmlSource = readFrontendFile('module-viewer.html');
 const moduleViewerSource = readFrontendFile('module-viewer.js');
+const backendAppSource = fs.readFileSync(path.resolve(frontendDir, '../backend/src/app.js'), 'utf8');
 
 const insertedScripts = [];
 const windowObject = {
@@ -74,5 +75,9 @@ assert.match(moduleViewerSource, /DemoInteraction/);
 assert.match(moduleViewerSource, /DemoTemplateSelect/);
 assert.match(moduleViewerSource, /DemoSlideNavigation/);
 assert.match(moduleViewerSource, /DemoStageInteraction/);
+
+assert.match(backendAppSource, /script-src[^;]+https:\/\/connect\.facebook\.net/);
+assert.match(backendAppSource, /connect-src[^;]+https:\/\/connect\.facebook\.net/);
+assert.match(backendAppSource, /connect-src[^;]+https:\/\/www\.facebook\.com/);
 
 console.log('Meta Pixel tracking tests passed.');

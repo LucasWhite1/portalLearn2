@@ -56,11 +56,11 @@ app.use((req, res, next) => {
   res.setHeader(
     'Content-Security-Policy',
     "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; " +
-      "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://unpkg.com https://cdn.jsdelivr.net; " +
+      "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://unpkg.com https://cdn.jsdelivr.net https://connect.facebook.net; " +
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; " +
       "font-src 'self' data: https://fonts.gstatic.com https://cdn.jsdelivr.net; " +
       "img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; frame-src https:; " +
-      "connect-src 'self' http://localhost:* http://127.0.0.1:* https://0.peerjs.com wss://0.peerjs.com; worker-src 'self' blob:; form-action 'self'"
+      "connect-src 'self' http://localhost:* http://127.0.0.1:* https://0.peerjs.com wss://0.peerjs.com https://connect.facebook.net https://www.facebook.com; worker-src 'self' blob:; form-action 'self'"
   );
   res.setHeader('Cache-Control', 'no-store');
   if (isProductionEnvironment && req.secure) {
