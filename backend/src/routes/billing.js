@@ -7,6 +7,7 @@ const { decryptStoredSecret } = require('../aiConfigCrypto');
 const { processCreditTopupWebhook } = require('../creditTopups');
 const { processStudentSeatUpgradeWebhook } = require('../studentSeatUpgrades');
 const { applyCreditChange, ensurePlatformCreditTables } = require('../platformCredits');
+const { sendMetaPurchaseEvent } = require('../metaConversions');
 const { requireAuth } = require('../middleware/auth');
 const {
   PAYMENT_FAILURE_EVENTS,
@@ -160,6 +161,19 @@ const PLANS = {
     storageLimitBytes: 1024 * 1024 * 1024,
     platformCredits: Number.isFinite(PRO_PLATFORM_CREDITS) ? PRO_PLATFORM_CREDITS : 100
   },
+  'pro-unlimited': {
+    id: 'pro-unlimited',
+    label: 'Criatyve Pro Ilimitado',
+    price: Number.isFinite(PRO_MONTHLY_PRICE) ? PRO_MONTHLY_PRICE : 97.90,
+    description: 'Assinatura mensal Criatyve Pro com alunos ilimitados, 1 GB e 100 creditos de IA',
+    nextDueDate: () => formatDateOnly(new Date()),
+    trialDays: 0,
+    billingTypes: PRO_BILLING_TYPES,
+    studentLimit: 0,
+    unlimitedStudents: true,
+    storageLimitBytes: 1024 * 1024 * 1024,
+    platformCredits: Number.isFinite(PRO_PLATFORM_CREDITS) ? PRO_PLATFORM_CREDITS : 100
+  },
   'trial-30-dias': {
     id: 'trial-30-dias',
     label: 'Criatyve Trial 30 dias',
@@ -184,6 +198,7 @@ const getExtraStudentPrice = () =>
     : 9.70;
 
 const normalizeRequestedStudentLimit = (value, plan) => {
+  if (plan?.unlimitedStudents) return 0;
   const parsed = Number.parseInt(String(value ?? ''), 10);
   const baseLimit = Number(plan?.studentLimit) || INCLUDED_STUDENT_LIMIT;
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -193,6 +208,17 @@ const normalizeRequestedStudentLimit = (value, plan) => {
 };
 
 const buildPlanPurchase = ({ plan, requestedStudentLimit, existingStudentLimit = 0 } = {}) => {
+  if (plan?.unlimitedStudents) {
+    return {
+      amount: roundCurrency(Number(plan?.price) || 0),
+      baseLimit: 0,
+      studentLimit: 0,
+      unlimitedStudents: true,
+      extraStudents: 0,
+      extraAmount: 0,
+      extraStudentPrice: 0
+    };
+  }
   const baseLimit = Number(plan?.studentLimit) || INCLUDED_STUDENT_LIMIT;
   const resolvedStudentLimit = Math.max(
     baseLimit,
@@ -215,7 +241,7 @@ const buildPlanPurchase = ({ plan, requestedStudentLimit, existingStudentLimit =
 const resolveCheckoutPaymentMode = (plan, requestedBillingType) => {
   const requested = sanitizeText(requestedBillingType || '', 30).toUpperCase();
   const configuredBillingTypes = Array.isArray(plan?.billingTypes) ? plan.billingTypes : ['CREDIT_CARD'];
-  if (plan?.id === 'pro' && requested === 'PIX' && configuredBillingTypes.includes('PIX')) {
+  if (plan?.trialDays === 0 && requested === 'PIX' && configuredBillingTypes.includes('PIX')) {
     return {
       billingTypes: ['PIX'],
       chargeTypes: ['DETACHED'],
@@ -275,7 +301,7 @@ const buildCheckoutUrl = (checkoutResponse) => {
 
 const normalizePlanCodeFromExternalReference = (externalReference = '') => {
   const normalized = sanitizeText(externalReference, 160);
-  const match = normalized.match(/^checkout:(pro|trial-30-dias):/i);
+  const match = normalized.match(/^checkout:(pro|pro-unlimited|trial-30-dias):/i);
   return match ? match[1].toLowerCase() : '';
 };
 
@@ -657,9 +683,11 @@ const upsertBillingSubscriptionRecord = async (client, eventType, payment, custo
   if (Math.abs(amount - expectedAmount) > 0.009) {
     throw new Error('O valor confirmado pelo Asaas nao corresponde ao checkout contratado.');
   }
-  const expectedStudentLimit = Number.isFinite(Number(existingSubscription?.student_limit))
-    ? Math.max(plan.studentLimit, Math.round(Number(existingSubscription.student_limit)))
-    : plan.studentLimit;
+  const expectedStudentLimit = plan.unlimitedStudents
+    ? 0
+    : Number.isFinite(Number(existingSubscription?.student_limit))
+      ? Math.max(plan.studentLimit, Math.round(Number(existingSubscription.student_limit)))
+      : plan.studentLimit;
   const payerEmail = sanitizeEmail(
     customerDetails?.email ||
     payment?.customerEmail ||
@@ -686,7 +714,7 @@ const upsertBillingSubscriptionRecord = async (client, eventType, payment, custo
                payer_name = $7,
                payer_email = $8,
                amount = $9,
-               student_limit = GREATEST(COALESCE(student_limit, 0), $10),
+               student_limit = CASE WHEN $17::boolean THEN 0 ELSE GREATEST(COALESCE(student_limit, 0), $10) END,
                terms_accepted_at = COALESCE(terms_accepted_at, $14),
                terms_version = COALESCE(terms_version, $15),
                marketing_consent_at = COALESCE(marketing_consent_at, $16),
@@ -713,7 +741,8 @@ const upsertBillingSubscriptionRecord = async (client, eventType, payment, custo
         payment,
         existingSubscription.terms_accepted_at || null,
         existingSubscription.terms_version || null,
-        existingSubscription.marketing_consent_at || null
+        existingSubscription.marketing_consent_at || null,
+        Boolean(plan.unlimitedStudents)
       ]
     );
     return rows[0];
@@ -769,10 +798,12 @@ const activateProfessorFromSubscription = async (client, subscription) => {
   }
   const fullName = sanitizeText(subscription?.payer_name || 'Professor Criatyve', 160) || 'Professor Criatyve';
   const plan = getPlanConfig(subscription?.plan_code || 'pro');
-  const contractedStudentLimit = Math.max(
-    Number(plan.studentLimit) || INCLUDED_STUDENT_LIMIT,
-    Number.isFinite(Number(subscription?.student_limit)) ? Math.round(Number(subscription.student_limit)) : 0
-  );
+  const contractedStudentLimit = plan.unlimitedStudents
+    ? 0
+    : Math.max(
+      Number(plan.studentLimit) || INCLUDED_STUDENT_LIMIT,
+      Number.isFinite(Number(subscription?.student_limit)) ? Math.round(Number(subscription.student_limit)) : 0
+    );
   let temporaryPassword = null;
   temporaryPassword = buildRandomPassword();
   const passwordHash = await bcrypt.hash(temporaryPassword, 10);
@@ -821,7 +852,7 @@ const activateProfessorFromSubscription = async (client, subscription) => {
         UPDATE users
            SET full_name = COALESCE(NULLIF($1, ''), full_name),
                is_active = TRUE,
-               student_limit = GREATEST(COALESCE(student_limit, 0), $2),
+               student_limit = CASE WHEN $8::boolean THEN 0 ELSE GREATEST(COALESCE(student_limit, 0), $2) END,
                storage_limit_bytes = GREATEST(COALESCE(storage_limit_bytes, 0), $3),
                terms_accepted_at = COALESCE(terms_accepted_at, $4),
                terms_version = COALESCE(terms_version, $5),
@@ -835,7 +866,8 @@ const activateProfessorFromSubscription = async (client, subscription) => {
         subscription?.terms_accepted_at || null,
         subscription?.terms_version || null,
         subscription?.marketing_consent_at || null,
-        professor.id
+        professor.id,
+        Boolean(plan.unlimitedStudents)
       ]
     );
     const { rows: refreshedUsers } = await client.query('SELECT * FROM users WHERE id = $1', [professor.id]);
@@ -857,6 +889,7 @@ const activateProfessorFromSubscription = async (client, subscription) => {
     professor.platform_credits = grant.balance;
   }
 
+  let paymentPeriodCreated = false;
   if (professor.role === 'professor') {
     const providerPaymentId = sanitizeText(subscription?.provider_payment_id || '', 80);
     if (!providerPaymentId) {
@@ -885,6 +918,7 @@ const activateProfessorFromSubscription = async (client, subscription) => {
        RETURNING provider_payment_id`,
       [providerPaymentId, professor.id, subscription.id, accessStart, nextExpiration, subscription.last_event_type || 'PAYMENT_CONFIRMED']
     );
+    paymentPeriodCreated = periodResult.rows.length > 0;
     const payment = subscription.raw_payload || {};
     const billingType = sanitizeText(payment.billingType || '', 30).toUpperCase() || null;
     const paymentUrl = sanitizeText(payment.invoiceUrl || '', 500) || null;
@@ -932,7 +966,8 @@ const activateProfessorFromSubscription = async (client, subscription) => {
 
   return {
     professor,
-    temporaryPassword
+    temporaryPassword,
+    paymentPeriodCreated
   };
 };
 
@@ -1111,6 +1146,26 @@ const processAsaasWebhookEvent = async (eventPayload, requestMeta = {}) => {
       });
     }
 
+    if (activationResult?.paymentPeriodCreated) {
+      try {
+        const metaResult = await sendMetaPurchaseEvent({
+          payment: verifiedPayment,
+          subscription: {
+            ...subscription,
+            plan_label: getPlanConfig(subscription.plan_code).label
+          },
+          customer: customerDetails || {},
+          eventSourceUrl: PUBLIC_APP_URL
+        });
+        if (metaResult?.sent) {
+          console.info(`Meta Purchase enviado para o pagamento ${subscription.provider_payment_id}.`);
+        }
+      } catch (metaError) {
+        // A confirmacao do Asaas nao pode falhar por indisponibilidade temporaria da Meta.
+        console.error(`Erro ao enviar Purchase para a Meta: ${metaError.message}`);
+      }
+    }
+
     return {
       processed: true,
       eventType,
@@ -1173,7 +1228,9 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
 
   const publicBaseUrl = buildPublicBaseUrl(req);
   const externalReference = `checkout:${plan.id}:${crypto.randomUUID()}`;
-  const itemDescription = purchase.extraStudents > 0
+  const itemDescription = purchase.unlimitedStudents
+    ? `${plan.description}. Sem cobranca por aluno ou compra de vagas.`
+    : purchase.extraStudents > 0
     ? `${plan.description}. Inclui ${purchase.studentLimit} alunos no portal (${purchase.extraStudents} extras).`
     : plan.description;
   const paymentMode = resolveCheckoutPaymentMode(plan, source?.billingType || source?.paymentMethod);
@@ -1264,6 +1321,7 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
       payerEmail: email,
       amount: purchase.amount,
       studentLimit: purchase.studentLimit,
+      unlimitedStudents: Boolean(purchase.unlimitedStudents),
       termsAccepted: true,
       marketingConsent: source?.marketingConsent !== false,
       checkoutResponse: responseBody
@@ -1433,7 +1491,9 @@ router.post('/renewal-checkout', requireAuth, checkoutRateLimiter, async (req, r
     items: [{
       externalReference: plan.id,
       name: `${plan.label} - renovação`.slice(0, 30),
-      description: `Renovação mensal com acesso para ${purchase.studentLimit} alunos.`.slice(0, 150),
+      description: (purchase.unlimitedStudents
+        ? 'Renovação mensal com alunos ilimitados no portal.'
+        : `Renovação mensal com acesso para ${purchase.studentLimit} alunos.`).slice(0, 150),
       quantity: 1,
       value: purchase.amount
     }],

@@ -93,7 +93,7 @@
     <div class="note" id="statusNote"></div>
     <div class="actions">
       <a class="button button--primary" id="statusPrimaryAction" href="login.html">Ir para o login</a>
-      <a class="button" href="create-account.html">Voltar para a landing</a>
+      <a class="button" id="checkoutReturnLink" href="create-account.html">Voltar para a landing</a>
     </div>
   </main>
 
@@ -102,6 +102,10 @@
     const status = params.get('status') || 'success';
     const plan = params.get('plan') || 'pro';
     const renewal = params.get('renewal') === '1';
+    const returnLink = document.getElementById('checkoutReturnLink');
+    if (returnLink && plan === 'pro-unlimited') {
+      returnLink.href = 'aulas-interativas-ia.html';
+    }
 
     const messages = {
       success: {

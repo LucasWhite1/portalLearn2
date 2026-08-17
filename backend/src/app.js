@@ -48,18 +48,18 @@ if (Number.isInteger(trustProxyHops) && trustProxyHops > 0) {
 app.disable('x-powered-by');
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Permissions-Policy', 'camera=(self), microphone=(self), geolocation=()');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-site');
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
   res.setHeader(
     'Content-Security-Policy',
-    "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; " +
+    "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'self'; " +
       "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://unpkg.com https://cdn.jsdelivr.net https://connect.facebook.net; " +
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; " +
       "font-src 'self' data: https://fonts.gstatic.com https://cdn.jsdelivr.net; " +
-      "img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; frame-src https:; " +
+      "img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; frame-src 'self' https:; " +
       "connect-src 'self' http://localhost:* http://127.0.0.1:* https://0.peerjs.com wss://0.peerjs.com https://connect.facebook.net https://www.facebook.com; worker-src 'self' blob:; form-action 'self'"
   );
   res.setHeader('Cache-Control', 'no-store');
@@ -94,7 +94,8 @@ app.use(express.static(frontendDir, { dotfiles: 'deny', index: false }));
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 app.get('/', (req, res) => res.sendFile(path.join(frontendDir, 'login.html')));
 app.get('/checkout', (req, res) => {
-  const plan = String(req.query?.plan || 'pro') === 'trial-30-dias' ? 'trial-30-dias' : 'pro';
+  const requestedPlan = String(req.query?.plan || 'pro');
+  const plan = ['pro', 'pro-unlimited', 'trial-30-dias'].includes(requestedPlan) ? requestedPlan : 'pro';
   res.redirect(303, `/checkout.html?plan=${encodeURIComponent(plan)}`);
 });
 

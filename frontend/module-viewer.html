@@ -290,12 +290,55 @@
         background: rgba(255, 255, 255, 0.94);
       }
 
-      .stage-shell:fullscreen .orientation-prompt {
+    .stage-shell:fullscreen .orientation-prompt {
         background: rgba(15, 20, 44, 0.82);
         color: #fff;
         border-radius: 1rem;
         padding: 0.75rem 0.9rem;
       }
+    }
+
+    body.embedded-demo-viewer {
+      min-height: 100vh;
+      background: #0b0914;
+    }
+
+    body.embedded-demo-viewer .builder-header,
+    body.embedded-demo-viewer #moduleSelection,
+    body.embedded-demo-viewer .live-student-controls,
+    body.embedded-demo-viewer .viewer-pen-tool-btn,
+    body.embedded-demo-viewer .viewer-pen-controls,
+    body.embedded-demo-viewer .viewer-fullscreen-nav-toggle {
+      display: none !important;
+    }
+
+    body.embedded-demo-viewer .builder-page-shell,
+    body.embedded-demo-viewer .builder-main,
+    body.embedded-demo-viewer .builder-stage {
+      width: 100%;
+      max-width: none;
+      min-height: 100vh;
+      margin: 0;
+      padding: 0;
+    }
+
+    body.embedded-demo-viewer .stage-shell {
+      min-height: 100vh;
+      border: 0;
+      border-radius: 0;
+      box-shadow: none;
+    }
+
+    body.embedded-demo-viewer .stage-header {
+      padding: 0.65rem 0.85rem;
+    }
+
+    body.embedded-demo-viewer .stage-header > div:first-child {
+      display: none;
+    }
+
+    body.embedded-demo-viewer .stage-canvas {
+      margin: 0 auto;
     }
   </style>
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js" integrity="sha384-PMNj1TmCgXfW24/rfIyxYSAWwj2mffkMfguUWv08iNFcy0kTC0JN7E/tE+pJ7+fa" crossorigin="anonymous"></script>

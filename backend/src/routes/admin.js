@@ -1793,9 +1793,11 @@ router.get('/professors/financial-overview', async (req, res) => {
         planCode,
         planLabel: planCode === 'pro'
           ? 'Criatyve Pro'
+          : planCode === 'pro-unlimited'
+            ? 'Criatyve Pro Ilimitado'
           : planCode === 'trial-30-dias'
-            ? 'Trial 30 dias'
-            : 'Cadastro manual',
+              ? 'Trial 30 dias'
+              : 'Cadastro manual',
         amount: row.amount !== null && Number.isFinite(Number(row.amount)) ? Number(row.amount) : null,
         billingType: String(row.latest_billing_type || row.subscription_billing_type || '').toUpperCase() || null,
         paymentStatus: row.subscription_payment_status || row.billing_status || null,

@@ -295,6 +295,10 @@ const demoTemplateKeys = (params.get('demoTemplates') || '')
 viewerState.isLiveShare = Boolean(params.get('liveShareId'));
 viewerState.isPublic = Boolean(params.get('publicModuleId'));
 viewerState.isDemo = demoTemplateKeys.length > 0;
+viewerState.isEmbeddedDemo = viewerState.isDemo && params.get('embedded') === '1';
+if (viewerState.isEmbeddedDemo) {
+  document.body.classList.add('embedded-demo-viewer');
+}
 viewerState.isReplay = params.get('adminReplay') === '1';
 viewerState.moduleId = params.get('moduleId') || params.get('publicModuleId');
 viewerState.courseId = params.get('courseId') || (demoTemplateKeys.length ? 'demo-showcase' : null);

@@ -8,6 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <script src="meta-pixel.js?v=20260817-1"></script>
   <style>
     :root {
       color-scheme: dark;
@@ -336,7 +337,7 @@
             </div>
           </div>
 
-          <div class="field">
+          <div class="field" id="checkoutStudentCountField">
             <label for="checkoutCpfCnpj">CPF ou CNPJ</label>
             <input id="checkoutCpfCnpj" name="cpfCnpj" type="text" inputmode="numeric" required />
             <small>Os dados finais de pagamento serão preenchidos no checkout seguro do Asaas.</small>
@@ -446,6 +447,23 @@
         notice: 'Ao continuar, você será levado ao checkout do Asaas para escolher Pix ou cartão e concluir a assinatura.',
         footnote: 'Se o pagamento for concluído, o login e a senha temporária serão enviados para o e-mail informado aqui.'
       },
+      'pro-unlimited': {
+        kicker: 'Oferta Pro Ilimitado',
+        heading: 'Assine o Criatyve Pro Ilimitado',
+        description: 'Crie aulas com IA e mantenha todos os seus alunos no portal sem pagar por vaga adicional.',
+        planName: 'Criatyve Pro Ilimitado',
+        planSubtitle: 'Assinatura mensal, sem limite de alunos',
+        price: 'R$97,90 <small>/mês</small>',
+        unlimitedStudents: true,
+        bullets: [
+          'Alunos ilimitados no portal, sem cobrança por aluno ou compra de vagas.',
+          '1 GB de armazenamento e 100 créditos de IA por mês.',
+          'Editor completo, aulas interativas, quizzes, gatilhos e portal do aluno.',
+          'Cartão com renovação automática ou Pix para pagamento mensal avulso.'
+        ],
+        notice: 'Você verá o valor de R$97,90 no checkout seguro do Asaas. Não há acréscimo conforme a quantidade de alunos.',
+        footnote: 'Após a confirmação do pagamento, o login e a senha temporária serão enviados para o e-mail informado aqui.'
+      },
       'trial-30-dias': {
         kicker: 'Teste grátis',
         heading: 'Ative seus 30 dias grátis',
@@ -471,6 +489,7 @@
     const flash = document.getElementById('checkoutFlash');
     const configFlag = document.getElementById('checkoutConfigFlag');
     const studentCountInput = document.getElementById('checkoutStudentCount');
+    const studentCountField = document.getElementById('checkoutStudentCountField');
     const studentInfo = document.getElementById('checkoutStudentInfo');
     const paymentMethodField = document.getElementById('checkoutPaymentMethodField');
     const billingTypeSelect = document.getElementById('checkoutBillingType');
@@ -482,15 +501,22 @@
     const requestedStudentInitial = Math.max(includedStudents, Math.round(Number(params.get('students') || includedStudents) || includedStudents));
 
     function getStudentCount() {
+      if (plan.unlimitedStudents) return 0;
       return Math.max(includedStudents, Math.round(Number(studentCountInput?.value || requestedStudentInitial) || requestedStudentInitial));
     }
 
     function getCheckoutAmount() {
+      if (plan.unlimitedStudents) return basePrice;
       const extraStudents = Math.max(0, getStudentCount() - includedStudents);
       return basePrice + (extraStudents * extraStudentPrice);
     }
 
     function syncStudentPricing() {
+      if (plan.unlimitedStudents) {
+        document.getElementById('checkoutPrice').innerHTML = `${brl.format(basePrice)} <small>/mês</small>`;
+        if (studentInfo) studentInfo.textContent = 'Alunos ilimitados no portal, sem custo adicional por vaga.';
+        return;
+      }
       if (!studentCountInput) return;
       const count = getStudentCount();
       if (String(studentCountInput.value || '') !== String(count)) {
@@ -537,6 +563,9 @@
           billingTypeSelect.value = 'CREDIT_CARD';
         }
       }
+      if (studentCountField) {
+        studentCountField.hidden = Boolean(plan.unlimitedStudents);
+      }
       syncStudentPricing();
     }
 
@@ -570,6 +599,12 @@
         termsAccepted: formData.get('termsAccepted') === 'on',
         marketingConsent: formData.get('termsAccepted') === 'on'
       };
+      window.CriatyveMeta?.trackCustom('CheckoutFormSubmit', {
+        plan: planKey,
+        value: getCheckoutAmount(),
+        currency: 'BRL',
+        billing_type: payload.billingType
+      });
       if (!payload.termsAccepted) {
         submitButton.disabled = false;
         submitButton.textContent = 'Ir para o checkout seguro';
@@ -609,11 +644,18 @@
     });
 
     applyPlanData();
+    window.CriatyveMeta?.track('InitiateCheckout', {
+      content_name: plan.planName,
+      content_category: 'SaaS para professores',
+      content_ids: [planKey],
+      value: getCheckoutAmount(),
+      currency: 'BRL'
+    }, { onceKey: `checkout:${planKey}` });
     if (billingTypeSelect) {
       billingTypeSelect.addEventListener('change', syncPaymentHint);
       syncPaymentHint();
     }
-    if (studentCountInput) {
+    if (studentCountInput && !plan.unlimitedStudents) {
       studentCountInput.min = String(includedStudents);
       studentCountInput.value = String(requestedStudentInitial);
       studentCountInput.addEventListener('input', syncStudentPricing);
