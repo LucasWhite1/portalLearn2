@@ -341,10 +341,19 @@
       margin: 0 auto;
     }
   </style>
-  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js" integrity="sha384-PMNj1TmCgXfW24/rfIyxYSAWwj2mffkMfguUWv08iNFcy0kTC0JN7E/tE+pJ7+fa" crossorigin="anonymous"></script>
+  <script>
+    if (new URLSearchParams(window.location.search).get('embedded') !== '1') {
+      document.write('<script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js" integrity="sha384-PMNj1TmCgXfW24/rfIyxYSAWwj2mffkMfguUWv08iNFcy0kTC0JN7E/tE+pJ7+fa" crossorigin="anonymous"><\/script>');
+    }
+  </script>
 </head>
 
 <body>
+  <script>
+    if (new URLSearchParams(window.location.search).get('embedded') === '1') {
+      document.body.classList.add('embedded-demo-viewer');
+    }
+  </script>
   <noscript><img height="1" width="1" style="display:none" alt=""
     src="https://www.facebook.com/tr?id=1067171249057361&amp;ev=PageView&amp;noscript=1"></noscript>
   <div class="builder-page-shell">
@@ -430,7 +439,7 @@
       </section>
     </main>
   </div>
-  <script type="module" src="module-viewer.js?v=audio-recorder-20260709"></script>
+  <script type="module" src="module-viewer.js?v=embedded-cache-20260817"></script>
 
   <!-- Modal de Chat do Curso -->
   <div id="chatModal" class="chat-modal hidden" role="dialog" aria-modal="true" aria-label="Chat do curso">

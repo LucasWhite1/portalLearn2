@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
 const path = require('path');
 const authRoutes = require('./routes/auth');
 const adminRoutes = require('./routes/admin');
@@ -46,6 +47,7 @@ if (Number.isInteger(trustProxyHops) && trustProxyHops > 0) {
 }
 
 app.disable('x-powered-by');
+app.use(compression({ threshold: 1024 }));
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
@@ -83,13 +85,31 @@ app.use('/vendor/three', express.static(threeVendorDir, {
   dotfiles: 'deny',
   fallthrough: false,
   immutable: true,
-  maxAge: '30d'
+  maxAge: '30d',
+  setHeaders(res) {
+    res.setHeader('Cache-Control', 'public, max-age=2592000, immutable');
+  }
 }));
 app.use('/template-store', express.static(templateStoreDir, {
   dotfiles: 'deny',
-  fallthrough: false
+  fallthrough: false,
+  maxAge: '1h',
+  setHeaders(res) {
+    res.setHeader('Cache-Control', 'public, max-age=3600, stale-while-revalidate=86400');
+  }
 }));
-app.use(express.static(frontendDir, { dotfiles: 'deny', index: false }));
+app.use(express.static(frontendDir, {
+  dotfiles: 'deny',
+  index: false,
+  maxAge: '1h',
+  setHeaders(res, filePath) {
+    if (path.extname(filePath).toLowerCase() === '.html') {
+      res.setHeader('Cache-Control', 'no-store');
+      return;
+    }
+    res.setHeader('Cache-Control', 'public, max-age=3600, stale-while-revalidate=86400');
+  }
+}));
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 app.get('/', (req, res) => res.sendFile(path.join(frontendDir, 'login.html')));

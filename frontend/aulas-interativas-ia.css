@@ -124,7 +124,15 @@ h1 { max-width: 720px; margin: 0; font-size: clamp(2.7rem, 4.5vw, 4.5rem); line-
 .demo-frame-topbar { display: flex; align-items: center; gap: .55rem; height: 42px; padding: 0 .9rem; border-bottom: 1px solid var(--line); background: #181329; font-size: .75rem; }
 .demo-frame-topbar span:last-child { margin-left: auto; color: var(--muted); }
 .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px rgba(52,211,153,.13); }
-.demo-frame-shell iframe { display: block; width: 100%; height: calc(100% - 42px); border: 0; background: #0b0914; }
+.demo-viewport { position: relative; height: calc(100% - 42px); background: #0b0914; }
+.demo-frame-shell iframe { display: none; width: 100%; height: 100%; border: 0; background: #0b0914; }
+.demo-frame-shell iframe.active { display: block; }
+.demo-loading { position: absolute; z-index: 4; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: .55rem; padding: 1.5rem; color: #fff; background: #100d1c; text-align: center; }
+.demo-loading[hidden] { display: none; }
+.demo-loading strong { font-size: 1rem; }
+.demo-loading small { color: var(--muted); }
+.demo-spinner { width: 42px; height: 42px; border: 4px solid rgba(255,255,255,.16); border-top-color: var(--cyan); border-radius: 50%; animation: demo-spin .8s linear infinite; }
+@keyframes demo-spin { to { transform: rotate(360deg); } }
 .demo-note { display: flex; justify-content: center; gap: .5rem; color: var(--muted); font-size: .8rem; }
 .demo-note i { color: var(--cyan); }
 
@@ -157,6 +165,10 @@ h1 { max-width: 720px; margin: 0; font-size: clamp(2.7rem, 4.5vw, 4.5rem); line-
 .pricing-card ul { display: grid; gap: .85rem; margin: 0 0 1.8rem; padding: 1.5rem 0; border-block: 1px solid var(--line); list-style: none; }
 .pricing-card li { display: flex; gap: .6rem; color: #ded8e9; font-size: .9rem; }
 .pricing-card li i { color: var(--green); }
+.guarantee-box { display: flex; gap: .8rem; margin: 0 0 1.25rem; padding: 1rem; border: 1px solid rgba(52,211,153,.45); border-radius: 7px; background: rgba(52,211,153,.08); }
+.guarantee-box > i { flex: 0 0 auto; color: var(--green); font-size: 1.45rem; }
+.guarantee-box strong { color: #d1fae5; }
+.guarantee-box p { margin: .3rem 0 0; color: #c5bdd3; font-size: .78rem; }
 .secure-line { margin: 1rem 0 0; color: var(--muted); font-size: .72rem; text-align: center; }
 .secure-line i { color: var(--green); }
 
@@ -184,6 +196,11 @@ h1 { max-width: 720px; margin: 0; font-size: clamp(2.7rem, 4.5vw, 4.5rem); line-
 .whatsapp-float small { margin-top: .25rem; font-size: .66rem; font-weight: 600; }
 .whatsapp-float:hover { background: #86efac; }
 .mobile-offer-bar { display: none; }
+
+@media (max-width: 1400px) {
+  .whatsapp-float { right: 8px; width: 56px; height: 56px; min-height: 0; justify-content: center; padding: 0; border-radius: 50%; }
+  .whatsapp-float span { display: none; }
+}
 
 @media (max-width: 980px) {
   .desktop-nav { display: none; }

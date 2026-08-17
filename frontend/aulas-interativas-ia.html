@@ -11,7 +11,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet" />
-  <link rel="stylesheet" href="aulas-interativas-ia.css?v=20260817-1" />
+  <link rel="stylesheet" href="aulas-interativas-ia.css?v=20260817-2" />
   <script src="meta-pixel.js?v=20260817-1"></script>
 </head>
 <body>
@@ -47,6 +47,7 @@
         </div>
         <ul class="trust-row" aria-label="Destaques da oferta">
           <li><i class="bi bi-people-fill" aria-hidden="true"></i> Alunos ilimitados</li>
+          <li><i class="bi bi-arrow-counterclockwise" aria-hidden="true"></i> Garantia de 20 dias</li>
           <li><i class="bi bi-shield-check" aria-hidden="true"></i> Checkout seguro Asaas</li>
           <li><i class="bi bi-credit-card" aria-hidden="true"></i> Pix ou cartão</li>
         </ul>
@@ -90,7 +91,14 @@
           <strong id="activeDemoName">Tutorial interativo</strong>
           <span>Exemplo navegável</span>
         </div>
-        <iframe id="demoFrame" title="Exemplo interativo criado no Criatyve" loading="lazy" allow="fullscreen" src="module-viewer.html?embedded=1&amp;demoTemplates=1tutorial-completo-do-interactive-creator"></iframe>
+        <div class="demo-viewport" id="demoViewport">
+          <div class="demo-loading" id="demoLoading" role="status" aria-live="polite">
+            <span class="demo-spinner" aria-hidden="true"></span>
+            <strong>Preparando a aula interativa...</strong>
+            <small>Carregando slides, atividades e recursos do palco.</small>
+          </div>
+          <iframe id="demoFrame" class="demo-frame active" data-template="1tutorial-completo-do-interactive-creator" title="Tutorial interativo criado no Criatyve" loading="lazy" allow="fullscreen" src="module-viewer.html?embedded=1&amp;demoTemplates=1tutorial-completo-do-interactive-creator"></iframe>
+        </div>
       </div>
       <p class="demo-note"><i class="bi bi-hand-index-thumb" aria-hidden="true"></i> O exemplo é interativo: use os botões dentro do palco.</p>
     </section>
@@ -122,6 +130,7 @@
         <div class="clarity-list">
           <span><i class="bi bi-check-circle-fill" aria-hidden="true"></i> Preço claro antes do pagamento</span>
           <span><i class="bi bi-check-circle-fill" aria-hidden="true"></i> Sem taxa por aluno</span>
+          <span><i class="bi bi-check-circle-fill" aria-hidden="true"></i> Reembolso de 100% em até 20 dias</span>
           <span><i class="bi bi-check-circle-fill" aria-hidden="true"></i> Renovação mensal</span>
         </div>
       </div>
@@ -137,6 +146,13 @@
           <li><i class="bi bi-check2" aria-hidden="true"></i>Quizzes, gatilhos, jogos e aulas ao vivo</li>
           <li><i class="bi bi-check2" aria-hidden="true"></i>Portal para organizar cursos e turmas</li>
         </ul>
+        <div class="guarantee-box">
+          <i class="bi bi-shield-fill-check" aria-hidden="true"></i>
+          <div>
+            <strong>Use por 20 dias sem risco</strong>
+            <p>Você paga agora e pode testar tudo. Se não gostar, solicite o cancelamento dentro dos primeiros 20 dias e devolveremos 100% do valor da primeira mensalidade.</p>
+          </div>
+        </div>
         <a class="button button-full tracked-checkout" data-cta-location="pricing" href="checkout.html?plan=pro-unlimited">
           Assinar o Pro Ilimitado <i class="bi bi-arrow-right" aria-hidden="true"></i>
         </a>
@@ -154,6 +170,7 @@
         <details><summary>“Alunos ilimitados” significa que não pago por novas vagas?<i class="bi bi-plus-lg" aria-hidden="true"></i></summary><p>Sim. Nesta oferta não existe cobrança por aluno nem compra de vagas adicionais. Você pode aprovar novos alunos sem alterar o valor mensal do plano.</p></details>
         <details><summary>Quais limites continuam existindo?<i class="bi bi-plus-lg" aria-hidden="true"></i></summary><p>O plano inclui 1 GB de armazenamento e 100 créditos de IA por mês. Os alunos são ilimitados; os demais limites técnicos e de uso continuam os informados no plano.</p></details>
         <details><summary>Como funciona o pagamento?<i class="bi bi-plus-lg" aria-hidden="true"></i></summary><p>No cartão, a assinatura é renovada automaticamente todos os meses. No Pix, você faz o pagamento mensal e o acesso é liberado após a confirmação.</p></details>
+        <details><summary>Como funciona a garantia de 20 dias?<i class="bi bi-plus-lg" aria-hidden="true"></i></summary><p>A primeira mensalidade é cobrada normalmente para liberar o acesso. Você pode usar a plataforma por até 20 dias corridos e, se não gostar, pedir o cancelamento pelo suporte dentro desse prazo. Devolveremos 100% do valor pago na primeira mensalidade. Renovações não reiniciam o período de garantia.</p></details>
         <details><summary>O que acontece depois do pagamento?<i class="bi bi-plus-lg" aria-hidden="true"></i></summary><p>Após a confirmação do Asaas, você recebe no e-mail informado o login e uma senha temporária para acessar a plataforma.</p></details>
       </div>
     </section>
@@ -161,7 +178,7 @@
     <section class="final-cta">
       <p class="eyebrow">Sua próxima aula pode começar por uma frase</p>
       <h2>Troque horas de preparação por uma aula que convida o aluno a participar.</h2>
-      <p>Pro Ilimitado por R$97,90 por mês, com todos os seus alunos no portal.</p>
+      <p>Pro Ilimitado por R$97,90 por mês, com todos os seus alunos no portal e garantia total de 20 dias.</p>
       <a class="button tracked-checkout" data-cta-location="final" href="checkout.html?plan=pro-unlimited">Começar com o Criatyve <i class="bi bi-arrow-right" aria-hidden="true"></i></a>
     </section>
   </main>
@@ -181,6 +198,6 @@
     <a class="button button-small tracked-checkout" data-cta-location="mobile_sticky" href="checkout.html?plan=pro-unlimited">Assinar <i class="bi bi-arrow-right" aria-hidden="true"></i></a>
   </div>
 
-  <script src="aulas-interativas-ia.js?v=20260817-1"></script>
+  <script src="aulas-interativas-ia.js?v=20260817-2"></script>
 </body>
 </html>

@@ -215,6 +215,16 @@ const fetchDemoTemplateModule = async (templateKey, position = 0) => {
   };
 };
 
+const notifyEmbeddedDemoParent = (status, details = {}) => {
+  if (!viewerState.isEmbeddedDemo || window.parent === window) return;
+  window.parent.postMessage({
+    source: 'criatyve-module-viewer',
+    type: `demo-${status}`,
+    templateKey: demoTemplateKeys[0] || '',
+    ...details
+  }, window.location.origin);
+};
+
 const fetchLiveStageModule = async (shareId, faceRetried = false) => {
   const response = await authorizedFetch(`/api/student/live-stage/${encodeURIComponent(shareId)}`);
   const payload = await response.json().catch(() => null);
@@ -8252,11 +8262,16 @@ const initModuleViewerPage = async () => {
     }
     renderModuleList();
     loadModule(viewerModules);
+    notifyEmbeddedDemoParent('ready', {
+      moduleId: viewerState.moduleId || '',
+      slideCount: getCurrentModule()?.builder_data?.slides?.length || 0
+    });
   } catch (error) {
     console.error('Erro ao carregar módulos', error);
     const extra = error?.message ? ` ${error.message}` : '';
     clearStage(`Não foi possível carregar os módulos.${extra}`);
     disableNavigation();
+    notifyEmbeddedDemoParent('error', { message: error?.message || 'Falha ao carregar o exemplo.' });
   }
 };
 
