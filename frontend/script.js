@@ -57,6 +57,8 @@ let pendingProfileImage = '';
 let pendingPortalBackgroundImage = '';
 let pendingPortalLogoImage = '';
 let portalColorPalettes = [];
+let siteAnalyticsCache = null;
+let siteAnalyticsSearchTimer = null;
 
 const getCurrentUserRole = () => localStorage.getItem(USER_ROLE_KEY) || '';
 const getCurrentUserData = () => {
@@ -4108,10 +4110,13 @@ const renderAiSettingsStatus = (settings) => {
     imageProvider?.connected && imageProvider?.isEnabled
       ? ' • imagem ativa'
       : ' • imagem não configurada';
+  const visionLabel = settings?.visualReview?.isEnabled
+    ? ` • revisão visual: ${settings.visualReview.model || 'ativa'}`
+    : ' • revisão visual desativada';
   const textCost = settings.platformCreditCosts?.text || 0.5;
   const imageCost = settings.platformCreditCosts?.image || 1.0;
   const threeDCost = settings.platformCreditCosts?.threeDImport || 5;
-  statusNode.textContent = `Integração de IA ${statusLabel} • ${confirmationLabel}${imageLabel} • texto: ${formatCreditNumber(textCost)} • imagem: ${formatCreditNumber(imageCost)} • 3D: ${formatCreditNumber(threeDCost)}`;
+  statusNode.textContent = `Integração de IA ${statusLabel} • ${confirmationLabel}${imageLabel}${visionLabel} • texto: ${formatCreditNumber(textCost)} • imagem: ${formatCreditNumber(imageCost)} • 3D: ${formatCreditNumber(threeDCost)}`;
   statusNode.style.color = settings.isEnabled ? '#6d63ff' : '#8b92b1';
 };
 
@@ -4127,6 +4132,10 @@ const fillAiSettingsForm = (settings) => {
   document.getElementById('aiImageBaseUrl').value =
     settings?.imageProvider?.baseUrl || 'https://generativelanguage.googleapis.com/v1beta';
   document.getElementById('aiImageModel').value = settings?.imageProvider?.model || 'gemini-2.5-flash-image';
+  const visionModelInput = document.getElementById('aiVisionModel');
+  if (visionModelInput) visionModelInput.value = settings?.visualReview?.model || 'deepseek-v4-flash-vision-exp';
+  const visionMaxCorrectionsInput = document.getElementById('aiVisionMaxCorrections');
+  if (visionMaxCorrectionsInput) visionMaxCorrectionsInput.value = settings?.visualReview?.maxCorrections ?? 1;
   const aiTextCreditCostInput = document.getElementById('aiTextCreditCostPerCall');
   if (aiTextCreditCostInput) aiTextCreditCostInput.value = settings?.platformCreditCosts?.text || 0.5;
   const aiImageCreditCostInput = document.getElementById('aiImageCreditCostPerCall');
@@ -4137,6 +4146,8 @@ const fillAiSettingsForm = (settings) => {
   document.getElementById('aiRequireConfirmation').checked = settings?.requireConfirmation !== false;
   document.getElementById('aiEnabled').checked = settings?.isEnabled !== false;
   document.getElementById('aiImageEnabled').checked = settings?.imageProvider?.isEnabled !== false;
+  const visionEnabledInput = document.getElementById('aiVisionEnabled');
+  if (visionEnabledInput) visionEnabledInput.checked = settings?.visualReview?.isEnabled === true;
   document.getElementById('aiApiKey').value = '';
   document.getElementById('aiImageApiKey').value = '';
   renderAiSettingsStatus(settings);
@@ -4630,7 +4641,9 @@ const formatSubscriptionDate = (value) => {
 const renderSubscriptionAccess = (status = {}) => {
   const notice = document.getElementById('subscriptionAccessNotice');
   if (!notice) return false;
-  if (!status.managed || status.state === 'active' || status.state === 'not_applicable') {
+  const isTrialing = status.paymentStatus === 'TRIALING';
+  const isCanceled = status.paymentStatus === 'CANCELED';
+  if (!status.managed || ((status.state === 'active' || status.state === 'not_applicable') && !isTrialing && !isCanceled)) {
     notice.classList.add('hidden');
     document.body.classList.remove('subscription-blocked');
     return false;
@@ -4646,9 +4659,14 @@ const renderSubscriptionAccess = (status = {}) => {
   const label = document.getElementById('subscriptionAccessLabel');
   const pixButton = document.getElementById('subscriptionPayPix');
   const cardButton = document.getElementById('subscriptionPayCard');
+  const cancelButton = document.getElementById('subscriptionCancel');
 
   if (title) {
-    title.textContent = blocked
+    title.textContent = isTrialing
+      ? 'Seus 20 dias grátis estão ativos'
+      : isCanceled
+        ? 'Sua assinatura foi cancelada'
+        : blocked
       ? 'Seu acesso precisa ser renovado'
       : status.state === 'payment_failed'
         ? 'Não conseguimos renovar seu pagamento'
@@ -4656,8 +4674,14 @@ const renderSubscriptionAccess = (status = {}) => {
           ? 'Pagamento em processamento'
           : 'Sua assinatura vence em breve';
   }
-  if (label) label.textContent = blocked ? 'Acesso restrito' : 'Assinatura mensal';
-  if (message) message.textContent = status.message || 'Confira a situação da sua assinatura.';
+  if (label) label.textContent = isTrialing ? 'Período gratuito' : blocked ? 'Acesso restrito' : 'Assinatura mensal';
+  if (message) {
+    message.textContent = isTrialing
+      ? 'Nenhuma cobrança foi feita. Cancele antes da data abaixo para impedir a primeira mensalidade.'
+      : isCanceled
+        ? 'A renovação automática foi interrompida e nenhuma nova cobrança será feita.'
+        : status.message || 'Confira a situação da sua assinatura.';
+  }
   if (date) {
     const formatted = formatSubscriptionDate(status.accessExpiresAt);
     date.textContent = formatted ? `Acesso contratado até ${formatted}.` : '';
@@ -4666,11 +4690,11 @@ const renderSubscriptionAccess = (status = {}) => {
   const canTakePayment = ['due_soon', 'payment_failed', 'expired'].includes(status.state);
   const cardAutomaticAndHealthy = status.automaticRenewal && status.state === 'due_soon';
   if (pixButton) {
-    pixButton.classList.toggle('hidden', !canTakePayment || cardAutomaticAndHealthy);
+    pixButton.classList.toggle('hidden', isTrialing || isCanceled || !canTakePayment || cardAutomaticAndHealthy);
     pixButton.disabled = false;
   }
   if (cardButton) {
-    cardButton.classList.toggle('hidden', !canTakePayment);
+    cardButton.classList.toggle('hidden', isTrialing || isCanceled || !canTakePayment);
     cardButton.disabled = cardAutomaticAndHealthy;
     cardButton.textContent = cardAutomaticAndHealthy
       ? 'Renovação automática no cartão'
@@ -4678,7 +4702,29 @@ const renderSubscriptionAccess = (status = {}) => {
         ? 'Tentar cartão novamente'
         : 'Pagar com cartão';
   }
+  if (cancelButton) {
+    cancelButton.classList.toggle('hidden', !isTrialing);
+    cancelButton.disabled = false;
+  }
   return blocked;
+};
+
+const cancelPlatformSubscription = async () => {
+  const button = document.getElementById('subscriptionCancel');
+  const feedback = document.getElementById('subscriptionPaymentFeedback');
+  if (!window.confirm('Cancelar a assinatura e impedir a primeira cobrança após o período gratuito?')) return;
+  if (button) button.disabled = true;
+  if (feedback) feedback.textContent = 'Cancelando a assinatura no Asaas...';
+  try {
+    const response = await authorizedFetch('/api/billing/subscription/cancel', { method: 'POST' });
+    const payload = await parseJsonSafely(response);
+    if (!response.ok) throw new Error(payload?.message || 'Não foi possível cancelar a assinatura.');
+    if (feedback) feedback.textContent = payload.message || 'Assinatura cancelada.';
+    await initSubscriptionAccess();
+  } catch (error) {
+    if (feedback) feedback.textContent = error.message;
+    if (button) button.disabled = false;
+  }
 };
 
 const startSubscriptionRenewal = async (billingType) => {
@@ -4708,6 +4754,7 @@ const initSubscriptionAccess = async () => {
     notice.dataset.bound = 'true';
     document.getElementById('subscriptionPayPix')?.addEventListener('click', () => startSubscriptionRenewal('PIX'));
     document.getElementById('subscriptionPayCard')?.addEventListener('click', () => startSubscriptionRenewal('CREDIT_CARD'));
+    document.getElementById('subscriptionCancel')?.addEventListener('click', cancelPlatformSubscription);
     window.addEventListener('subscription-access-required', () => {
       initSubscriptionAccess().catch(console.error);
     });
@@ -4841,6 +4888,297 @@ const initStudentPayments = async () => {
   }
 };
 
+const formatAnalyticsDuration = (secondsValue) => {
+  const seconds = Math.max(0, Number(secondsValue) || 0);
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remaining = Math.round(seconds % 60);
+  return minutes < 60 ? `${minutes}min ${remaining}s` : `${Math.floor(minutes / 60)}h ${minutes % 60}min`;
+};
+
+const analyticsEventLabel = (name) => ({
+  page_view: 'Página acessada',
+  page_exit: 'Saiu da página',
+  heartbeat: 'Permaneceu ativo',
+  click: 'Clique',
+  form_start: 'Começou a preencher formulário',
+  form_submit: 'Enviou formulário',
+  scroll_depth: 'Rolagem',
+  video_play: 'Reproduziu vídeo',
+  video_impression: 'Viu o vídeo na tela',
+  video_start: 'Iniciou o vídeo',
+  video_resume: 'Retomou o vídeo',
+  video_pause: 'Pausou o vídeo',
+  video_seek: 'Avançou/retrocedeu o vídeo',
+  video_progress: 'Avançou no vídeo',
+  video_complete: 'Concluiu o vídeo',
+  video_exit: 'Saiu com o vídeo em andamento',
+  video_speed_change: 'Alterou a velocidade do vídeo',
+  video_volume_change: 'Alterou o volume do vídeo',
+  video_fullscreen: 'Alterou a tela cheia do vídeo',
+  demo_interaction: 'Interagiu com demonstração',
+  checkout_start: 'Iniciou checkout',
+  purchase: 'Compra detectada',
+  lead: 'Cadastro/lead',
+  contact: 'Entrou em contato',
+  custom: 'Interação personalizada'
+}[name] || name || 'Evento');
+
+const getAnalyticsFilters = () => ({
+  days: document.getElementById('analyticsDays')?.value || '30',
+  source: document.getElementById('analyticsSource')?.value || '',
+  device: document.getElementById('analyticsDevice')?.value || '',
+  page: document.getElementById('analyticsPage')?.value || '',
+  search: String(document.getElementById('analyticsSearch')?.value || '').trim()
+});
+
+const renderAnalyticsRanking = (containerId, rows, detailBuilder = null) => {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  const safeRows = Array.isArray(rows) ? rows : [];
+  if (!safeRows.length) {
+    container.innerHTML = '<p class="analytics-empty">Sem dados neste período.</p>';
+    return;
+  }
+  const max = Math.max(...safeRows.map((row) => Number(row.value) || 0), 1);
+  container.innerHTML = safeRows.map((row) => {
+    const value = Number(row.value) || 0;
+    const detail = detailBuilder ? detailBuilder(row) : '';
+    return `
+      <div class="analytics-rank-row">
+        <span title="${escapeAttribute(row.label || 'Não identificado')}">${escapeHtml(row.label || 'Não identificado')}</span>
+        <strong>${value.toLocaleString('pt-BR')}</strong>
+        <div class="analytics-rank-track" aria-hidden="true"><i style="width:${Math.max(2, (value / max) * 100)}%"></i></div>
+        ${detail ? `<small>${escapeHtml(detail)}</small>` : ''}
+      </div>
+    `;
+  }).join('');
+};
+
+const renderAnalyticsTrend = (rows) => {
+  const container = document.getElementById('analyticsTrend');
+  if (!container) return;
+  const safeRows = Array.isArray(rows) ? rows : [];
+  if (!safeRows.length) {
+    container.innerHTML = '<p class="analytics-empty">Ainda não há dados para este período.</p>';
+    return;
+  }
+  const max = Math.max(...safeRows.flatMap((row) => [Number(row.sessions), Number(row.visitors), Number(row.pageviews)]), 1);
+  container.innerHTML = safeRows.map((row) => {
+    const date = new Date(`${row.day}T12:00:00`);
+    const label = Number.isFinite(date.getTime())
+      ? date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })
+      : row.day;
+    const bar = (value, className) => `<i class="analytics-trend-bar ${className}" style="height:${Math.max(2, (Number(value || 0) / max) * 100)}%" title="${Number(value || 0)}"></i>`;
+    return `
+      <div class="analytics-trend-day">
+        <div class="analytics-trend-bars">${bar(row.sessions, 'sessions')}${bar(row.visitors, 'visitors')}${bar(row.pageviews, 'pageviews')}</div>
+        <small>${escapeHtml(label)}</small>
+      </div>
+    `;
+  }).join('');
+};
+
+const renderAnalyticsFunnel = (summary = {}) => {
+  const container = document.getElementById('analyticsFunnel');
+  if (!container) return;
+  const visitors = Number(summary.visitors || 0);
+  const engaged = Number(summary.engagedSessions || 0);
+  const checkouts = Number(summary.checkouts || 0);
+  const purchases = Number(summary.purchases || 0);
+  const steps = [
+    ['Visitantes', visitors, visitors ? 100 : 0],
+    ['Engajados', engaged, visitors ? (engaged / visitors) * 100 : 0],
+    ['Checkout', checkouts, visitors ? (checkouts / visitors) * 100 : 0],
+    ['Compras', purchases, visitors ? (purchases / visitors) * 100 : 0]
+  ];
+  container.innerHTML = steps.map(([label, value, rate]) => `
+    <div class="analytics-funnel-step">
+      <span>${escapeHtml(label)}</span>
+      <strong>${Number(value).toLocaleString('pt-BR')}</strong>
+      <small>${Number(rate).toLocaleString('pt-BR', { maximumFractionDigits: 1 })}% dos visitantes</small>
+    </div>
+  `).join('');
+};
+
+const renderAnalyticsSessions = (sessions) => {
+  const body = document.getElementById('analyticsSessionsBody');
+  const count = document.getElementById('analyticsSessionCount');
+  if (!body) return;
+  const rows = Array.isArray(sessions) ? sessions : [];
+  if (count) count.textContent = `${rows.length} ${rows.length === 1 ? 'jornada' : 'jornadas'}`;
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="7">Nenhuma jornada encontrada com esses filtros.</td></tr>';
+    return;
+  }
+  const deviceLabels = { desktop: 'Computador', mobile: 'Celular', tablet: 'Tablet' };
+  body.innerHTML = rows.map((session) => {
+    const visitor = String(session.visitor_id || 'desconhecido');
+    const source = session.utm_source || session.referrer_domain || 'Direto';
+    const campaign = session.utm_campaign || 'Sem campanha';
+    return `
+      <tr>
+        <td data-label="Visitante"><strong>#${escapeHtml(visitor.slice(0, 8))}</strong><small>${escapeHtml(session.country_code || session.language || 'Local não identificado')}</small></td>
+        <td data-label="Início"><strong>${escapeHtml(new Date(session.started_at).toLocaleDateString('pt-BR'))}</strong><small>${escapeHtml(new Date(session.started_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }))}</small></td>
+        <td data-label="Origem / campanha"><strong>${escapeHtml(source)}</strong><small>${escapeHtml(campaign)}</small></td>
+        <td data-label="Tecnologia"><strong>${escapeHtml(deviceLabels[session.device_type] || session.device_type || 'Outro')}</strong><small>${escapeHtml(`${session.browser_name || 'Outro'} · ${session.operating_system || 'Outro'}`)}</small></td>
+        <td data-label="Comportamento"><strong>${formatAnalyticsDuration(session.duration_seconds)}</strong><small>${Number(session.pageview_count || 0)} páginas · ${Number(session.max_scroll_depth || 0)}% de rolagem</small></td>
+        <td data-label="Resultado"><div class="analytics-result-pills"><span class="analytics-result-pill">${Number(session.event_count || 0)} eventos</span>${session.checkout_started ? '<span class="analytics-result-pill checkout">Checkout</span>' : ''}${session.purchased ? '<span class="analytics-result-pill purchase">Compra</span>' : ''}</div></td>
+        <td data-label="Ação"><button class="secondary-btn small" type="button" data-analytics-session="${escapeAttribute(session.id)}">Ver jornada</button></td>
+      </tr>
+    `;
+  }).join('');
+};
+
+const fillAnalyticsFilterOptions = (payload) => {
+  const sourceSelect = document.getElementById('analyticsSource');
+  const pageSelect = document.getElementById('analyticsPage');
+  const preserve = (select, rows, firstLabel) => {
+    if (!select) return;
+    const current = select.value;
+    const options = Array.from(new Set((rows || []).map((row) => row.label).filter(Boolean)));
+    if (current && !options.includes(current)) options.unshift(current);
+    select.innerHTML = `<option value="">${firstLabel}</option>${options.map((value) => `<option value="${escapeAttribute(value)}">${escapeHtml(value)}</option>`).join('')}`;
+    select.value = current;
+  };
+  preserve(sourceSelect, payload.sources, 'Todas as origens');
+  preserve(pageSelect, payload.pages, 'Todas as páginas');
+};
+
+const renderSiteAnalytics = (payload) => {
+  const summary = payload?.summary || {};
+  const setText = (id, value) => {
+    const element = document.getElementById(id);
+    if (element) element.textContent = value;
+  };
+  setText('analyticsVisitors', Number(summary.visitors || 0).toLocaleString('pt-BR'));
+  setText('analyticsSessions', Number(summary.sessions || 0).toLocaleString('pt-BR'));
+  setText('analyticsPageviews', Number(summary.pageviews || 0).toLocaleString('pt-BR'));
+  setText('analyticsAvgDuration', formatAnalyticsDuration(summary.avgDurationSeconds));
+  setText('analyticsEngagement', `${Number(summary.engagementRate || 0).toLocaleString('pt-BR')}%`);
+  setText('analyticsBounce', `${Number(summary.bounceRate || 0).toLocaleString('pt-BR')}%`);
+  setText('analyticsCheckouts', Number(summary.checkouts || 0).toLocaleString('pt-BR'));
+  setText('analyticsPurchases', Number(summary.purchases || 0).toLocaleString('pt-BR'));
+  const video = payload?.video || {};
+  setText('analyticsVideoImpressions', Number(video.impressions || 0).toLocaleString('pt-BR'));
+  setText('analyticsVideoStarts', Number(video.starts || 0).toLocaleString('pt-BR'));
+  setText('analyticsVideoAvgWatched', formatAnalyticsDuration(video.avgWatchedSeconds));
+  setText('analyticsVideoCompletionRate', String(Number(video.completionRate || 0).toLocaleString('pt-BR')) + '%');
+  setText('analyticsUpdatedAt', `Atualizado ${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`);
+  fillAnalyticsFilterOptions(payload);
+  renderAnalyticsTrend(payload.trend);
+  renderAnalyticsFunnel(summary);
+  renderAnalyticsRanking('analyticsPagesRanking', payload.pages, (row) => `${Number(row.sessions || 0)} sessões`);
+  renderAnalyticsRanking('analyticsSourcesRanking', payload.sources, (row) => `${Number(row.visitors || 0)} visitantes · ${Number(row.purchases || 0)} compras`);
+  renderAnalyticsRanking('analyticsCampaignsRanking', payload.campaigns, (row) => `${Number(row.checkouts || 0)} checkouts · ${Number(row.purchases || 0)} compras`);
+  renderAnalyticsRanking('analyticsDevicesRanking', payload.devices);
+  renderAnalyticsRanking('analyticsBrowsersRanking', payload.browsers);
+  renderAnalyticsSessions(payload.recentSessions);
+};
+
+const loadSiteAnalytics = async () => {
+  if (!isGlobalAdminUser() || !document.getElementById('siteAnalyticsSection')) return;
+  const refreshButton = document.getElementById('analyticsRefreshBtn');
+  if (refreshButton) {
+    refreshButton.disabled = true;
+    refreshButton.textContent = 'Atualizando...';
+  }
+  try {
+    const query = new URLSearchParams(getAnalyticsFilters());
+    Array.from(query.entries()).forEach(([key, value]) => { if (!value) query.delete(key); });
+    const response = await authorizedFetch(`/api/admin/analytics/overview?${query.toString()}`);
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(payload?.message || 'Não foi possível carregar o trackeamento.');
+    siteAnalyticsCache = payload;
+    renderSiteAnalytics(payload);
+  } catch (error) {
+    const body = document.getElementById('analyticsSessionsBody');
+    if (body) body.innerHTML = `<tr><td colspan="7">${escapeHtml(error.message || 'Falha ao carregar dados.')}</td></tr>`;
+  } finally {
+    if (refreshButton) {
+      refreshButton.disabled = false;
+      refreshButton.textContent = 'Atualizar';
+    }
+  }
+};
+
+const closeAnalyticsJourney = () => {
+  const modal = document.getElementById('analyticsJourneyModal');
+  modal?.classList.add('hidden');
+  modal?.setAttribute('aria-hidden', 'true');
+};
+
+const openAnalyticsJourney = async (sessionId) => {
+  const modal = document.getElementById('analyticsJourneyModal');
+  const timeline = document.getElementById('analyticsJourneyTimeline');
+  if (!modal || !timeline) return;
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+  timeline.innerHTML = '<p class="analytics-empty">Carregando eventos...</p>';
+  try {
+    const response = await authorizedFetch(`/api/admin/analytics/sessions/${encodeURIComponent(sessionId)}`);
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(payload?.message || 'Não foi possível abrir esta jornada.');
+    const session = payload.session || {};
+    const visitor = String(session.visitor_id || '');
+    document.getElementById('analyticsJourneyTitle').textContent = `Visitante #${visitor.slice(0, 8)}`;
+    document.getElementById('analyticsJourneySubtitle').textContent = `${new Date(session.started_at).toLocaleString('pt-BR')} · ${formatAnalyticsDuration(session.duration_seconds)}`;
+    document.getElementById('analyticsJourneySummary').innerHTML = `
+      <div><span>Origem</span><strong>${escapeHtml(session.utm_source || session.referrer_domain || 'Direto')}</strong></div>
+      <div><span>Campanha</span><strong>${escapeHtml(session.utm_campaign || 'Sem campanha')}</strong></div>
+      <div><span>Entrada</span><strong>${escapeHtml(session.landing_path || '/')}</strong></div>
+      <div><span>Saída</span><strong>${escapeHtml(session.exit_path || session.landing_path || '/')}</strong></div>
+      <div><span>Tecnologia</span><strong>${escapeHtml(`${session.browser_name || 'Outro'} · ${session.operating_system || 'Outro'}`)}</strong></div>
+      <div><span>Comportamento</span><strong>${Number(session.pageview_count || 0)} páginas · ${Number(session.max_scroll_depth || 0)}% rolagem</strong></div>
+    `;
+    const events = Array.isArray(payload.events) ? payload.events : [];
+    timeline.innerHTML = events.length ? events.map((event) => {
+      const details = [event.page_path];
+      if (event.element_text) details.push(`“${event.element_text}”`);
+      if (event.scroll_depth != null) details.push(`${event.scroll_depth}% da página`);
+      if (event.duration_ms != null && ['page_exit', 'heartbeat'].includes(event.event_name)) details.push(formatAnalyticsDuration(Number(event.duration_ms) / 1000));
+      const video = event.metadata && typeof event.metadata === 'object' ? event.metadata : {};
+      if (video.video_id) {
+        const position = Number(video.position_seconds);
+        const duration = Number(video.duration_seconds);
+        if (Number.isFinite(position) && Number.isFinite(duration) && duration > 0) details.push('Parou em ' + formatAnalyticsDuration(position) + ' de ' + formatAnalyticsDuration(duration));
+        if (Number.isFinite(Number(video.watched_seconds))) details.push(formatAnalyticsDuration(Number(video.watched_seconds)) + ' assistidos');
+        if (Number.isFinite(Number(video.playback_rate)) && Number(video.playback_rate) !== 1) details.push(String(video.playback_rate).replace('.', ',') + 'x');
+        if (video.milestone_percent != null) details.push(String(video.milestone_percent) + '% alcançado');
+        if (video.exit_reason) details.push(video.exit_reason === 'page_hidden' ? 'Aba ficou em segundo plano' : 'Saiu da página');
+      }
+      return `
+        <div class="analytics-journey-event">
+          <time>${escapeHtml(new Date(event.occurred_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }))}</time>
+          <span class="analytics-journey-event-marker" aria-hidden="true"></span>
+          <div class="analytics-journey-event-content"><strong>${escapeHtml(analyticsEventLabel(event.event_name))}</strong><span>${escapeHtml(details.filter(Boolean).join(' · '))}</span></div>
+        </div>
+      `;
+    }).join('') : '<p class="analytics-empty">Nenhum evento registrado nesta sessão.</p>';
+  } catch (error) {
+    timeline.innerHTML = `<p class="analytics-empty">${escapeHtml(error.message)}</p>`;
+  }
+};
+
+const initSiteAnalytics = () => {
+  document.getElementById('analyticsRefreshBtn')?.addEventListener('click', loadSiteAnalytics);
+  ['analyticsDays', 'analyticsSource', 'analyticsDevice', 'analyticsPage'].forEach((id) => {
+    document.getElementById(id)?.addEventListener('change', loadSiteAnalytics);
+  });
+  document.getElementById('analyticsSearch')?.addEventListener('input', () => {
+    window.clearTimeout(siteAnalyticsSearchTimer);
+    siteAnalyticsSearchTimer = window.setTimeout(loadSiteAnalytics, 450);
+  });
+  document.getElementById('analyticsSessionsBody')?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-analytics-session]');
+    if (button) openAnalyticsJourney(button.dataset.analyticsSession);
+  });
+  document.getElementById('analyticsJourneyModal')?.addEventListener('click', (event) => {
+    if (event.target.closest('[data-analytics-close]')) closeAnalyticsJourney();
+  });
+  loadSiteAnalytics();
+};
+
 const initAdminFeatures = () => {
   if (adminChatPollTimer) {
     clearInterval(adminChatPollTimer);
@@ -4851,6 +5189,9 @@ const initAdminFeatures = () => {
     document.getElementById('adminProfessorsSection')?.remove();
     document.getElementById('globalStudentFinanceNavItem')?.remove();
     document.getElementById('globalStudentFinanceSection')?.remove();
+    document.getElementById('siteAnalyticsNavItem')?.remove();
+    document.getElementById('siteAnalyticsSection')?.remove();
+    document.getElementById('analyticsJourneyModal')?.remove();
     document.querySelector('#adminSettingsSection h2')?.replaceChildren(document.createTextNode('Configuracoes'));
     document.getElementById('adminSmtpSettingsSection')?.remove();
     const aiTextCostField = document.getElementById('aiTextCreditCostPerCall')?.closest('.field-group');
@@ -4863,6 +5204,7 @@ const initAdminFeatures = () => {
     document.querySelector('[data-target="studentFinanceSection"]')?.closest('li')?.remove();
     document.getElementById('studentFinanceSection')?.remove();
     initGlobalStudentFinance();
+    initSiteAnalytics();
   }
   initPlatformCredits();
   initStudentSeatUpgrade();
@@ -5590,13 +5932,18 @@ const initAdminFeatures = () => {
       imageBaseUrl: document.getElementById('aiImageBaseUrl').value,
       imageModel: document.getElementById('aiImageModel').value,
       imageApiKey: document.getElementById('aiImageApiKey').value,
+      visionModel: document.getElementById('aiVisionModel')?.value,
+      visionMaxCorrections: Number.isFinite(Number(document.getElementById('aiVisionMaxCorrections')?.value))
+        ? Number(document.getElementById('aiVisionMaxCorrections')?.value)
+        : 1,
       aiTextCreditCostPerCall: Number(document.getElementById('aiTextCreditCostPerCall')?.value) || 0.5,
       aiImageCreditCostPerCall: Number(document.getElementById('aiImageCreditCostPerCall')?.value) || 1.0,
       threeDImportCreditCost: Number(document.getElementById('threeDImportCreditCost')?.value) || 5,
       systemPrompt: document.getElementById('aiSystemPrompt').value,
       requireConfirmation: document.getElementById('aiRequireConfirmation').checked,
       isEnabled: document.getElementById('aiEnabled').checked,
-      imageEnabled: document.getElementById('aiImageEnabled').checked
+      imageEnabled: document.getElementById('aiImageEnabled').checked,
+      visionEnabled: document.getElementById('aiVisionEnabled')?.checked === true
     };
     try {
       const response = await authorizedFetch('/api/admin/ai-settings', {

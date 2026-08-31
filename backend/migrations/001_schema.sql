@@ -159,6 +159,9 @@ CREATE TABLE IF NOT EXISTS admin_ai_settings (
   image_model TEXT NOT NULL DEFAULT 'gemini-2.5-flash-image',
   image_encrypted_api_key TEXT,
   image_is_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  vision_model TEXT NOT NULL DEFAULT 'deepseek-v4-flash-vision-exp',
+  vision_is_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  vision_max_corrections SMALLINT NOT NULL DEFAULT 1,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -405,6 +408,82 @@ CREATE TABLE IF NOT EXISTS face_review_requests (
 
 CREATE INDEX IF NOT EXISTS idx_face_reviews_owner
 ON face_review_requests(owner_user_id, status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS analytics_visitors (
+  id UUID PRIMARY KEY,
+  first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  sessions_count INT NOT NULL DEFAULT 0,
+  first_source TEXT,
+  first_campaign TEXT,
+  latest_source TEXT,
+  latest_campaign TEXT
+);
+
+CREATE TABLE IF NOT EXISTS analytics_sessions (
+  id UUID PRIMARY KEY,
+  visitor_id UUID NOT NULL REFERENCES analytics_visitors(id) ON DELETE CASCADE,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  ended_at TIMESTAMPTZ,
+  duration_seconds INT NOT NULL DEFAULT 0,
+  landing_path TEXT NOT NULL,
+  exit_path TEXT,
+  referrer_domain TEXT,
+  utm_source TEXT,
+  utm_medium TEXT,
+  utm_campaign TEXT,
+  utm_content TEXT,
+  utm_term TEXT,
+  click_id_kind TEXT,
+  device_type TEXT,
+  operating_system TEXT,
+  browser_name TEXT,
+  language TEXT,
+  timezone TEXT,
+  country_code TEXT,
+  screen_width INT,
+  screen_height INT,
+  network_hash TEXT,
+  event_count INT NOT NULL DEFAULT 0,
+  pageview_count INT NOT NULL DEFAULT 0,
+  max_scroll_depth SMALLINT NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_analytics_sessions_started
+ON analytics_sessions(started_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_analytics_sessions_visitor
+ON analytics_sessions(visitor_id, started_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_analytics_sessions_source
+ON analytics_sessions(utm_source, utm_campaign, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS analytics_events (
+  id UUID PRIMARY KEY,
+  session_id UUID NOT NULL REFERENCES analytics_sessions(id) ON DELETE CASCADE,
+  visitor_id UUID NOT NULL REFERENCES analytics_visitors(id) ON DELETE CASCADE,
+  event_name TEXT NOT NULL,
+  occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  page_path TEXT NOT NULL,
+  page_title TEXT,
+  duration_ms INT,
+  scroll_depth SMALLINT,
+  element_tag TEXT,
+  element_id TEXT,
+  element_text TEXT,
+  element_href TEXT,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_analytics_events_session
+ON analytics_events(session_id, occurred_at);
+
+CREATE INDEX IF NOT EXISTS idx_analytics_events_name_date
+ON analytics_events(event_name, occurred_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_analytics_events_page_date
+ON analytics_events(page_path, occurred_at DESC);
 
 CREATE TABLE IF NOT EXISTS biometric_audit_log (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

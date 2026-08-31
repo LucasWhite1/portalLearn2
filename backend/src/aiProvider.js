@@ -9,6 +9,8 @@ const allowHttpProviderUrls = !['production', 'prod'].includes(String(process.en
 const DEFAULT_SYSTEM_PROMPT =
   'Voce e um assistente especializado em montar slides interativos. Responda somente JSON valido.';
 const DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-pro';
+const DEFAULT_DEEPSEEK_VISION_MODEL = 'deepseek-v4-flash-vision-exp';
+const DEFAULT_GEMINI_TEXT_FALLBACK_MODEL = 'gemini-3.6-flash';
 const DEFAULT_IMAGE_PROVIDER = {
   providerKey: 'google-gemini-image',
   providerLabel: 'Nano Banana',
@@ -126,6 +128,24 @@ const DEFAULT_DECK_VISUAL_THEMES = [
       mutedText: '#475569',
       success: '#16a34a',
       danger: '#dc2626'
+    }
+  },
+  {
+    key: 'future-tech',
+    label: 'Tecnologia humana',
+    keywords: ['tecnologia', 'digital', 'inteligencia artificial', 'ia', 'inovacao', 'software', 'sistema', 'programacao'],
+    palette: {
+      background: '#eef4ff',
+      backgroundAlt: '#e9fbf8',
+      surface: '#ffffff',
+      surfaceAlt: '#e0ecff',
+      primary: '#3157c8',
+      secondary: '#087f73',
+      accent: '#b53f78',
+      text: '#15213d',
+      mutedText: '#44516d',
+      success: '#16803e',
+      danger: '#c5305f'
     }
   },
   {
@@ -641,15 +661,20 @@ function buildPublicAiSettings(row) {
       isEnabled: false,
       hasApiKey: false
       ,
-      imageProvider: {
+       imageProvider: {
         connected: false,
         providerKey: DEFAULT_IMAGE_PROVIDER.providerKey,
         providerLabel: DEFAULT_IMAGE_PROVIDER.providerLabel,
         baseUrl: DEFAULT_IMAGE_PROVIDER.baseUrl,
         model: DEFAULT_IMAGE_PROVIDER.model,
         isEnabled: false,
-        hasApiKey: false
-      }
+         hasApiKey: false
+       },
+       visualReview: {
+         isEnabled: false,
+         model: DEFAULT_DEEPSEEK_VISION_MODEL,
+         maxCorrections: 1
+       }
     };
     if (includeCreditCost) {
       payload.aiCreditCostPerCall = 0.5;
@@ -677,6 +702,15 @@ function buildPublicAiSettings(row) {
       model: row.image_model || DEFAULT_IMAGE_PROVIDER.model,
       isEnabled: row.image_is_enabled !== false,
       hasApiKey: Boolean(row.image_encrypted_api_key)
+    },
+    visualReview: {
+      // The vision model shares the text provider credential. Never expose it to the browser.
+      isEnabled: Boolean(row.vision_is_enabled),
+      model: row.vision_model || DEFAULT_DEEPSEEK_VISION_MODEL,
+      maxCorrections: Math.max(
+        0,
+        Math.min(2, Number.isFinite(Number(row.vision_max_corrections)) ? Number(row.vision_max_corrections) : 1)
+      )
     }
   };
   return payload;
@@ -1426,14 +1460,47 @@ function inferDeckVisualTheme(request, planPayload = null) {
   return cloneVisualTheme(selected);
 }
 
+function darkenColorUntilReadable(color, textColor = '#ffffff', minimumRatio = 4.8) {
+  const rgb = hexColorToRgb(color);
+  if (!rgb) return color;
+  let candidate = String(color).toLowerCase();
+  let factor = 0.88;
+  while ((getContrastRatio(candidate, textColor) || 0) < minimumRatio && factor >= 0.28) {
+    const toHex = (channel) => Math.max(0, Math.min(255, Math.round(channel * factor))).toString(16).padStart(2, '0');
+    candidate = `#${toHex(rgb.r)}${toHex(rgb.g)}${toHex(rgb.b)}`;
+    factor -= 0.08;
+  }
+  return candidate;
+}
+
+function blendHexColors(firstColor, secondColor, secondWeight = 0.25) {
+  const first = hexColorToRgb(firstColor);
+  const second = hexColorToRgb(secondColor);
+  if (!first || !second) return firstColor;
+  const weight = Math.max(0, Math.min(1, Number(secondWeight) || 0));
+  const toHex = (firstChannel, secondChannel) => Math.round(firstChannel * (1 - weight) + secondChannel * weight)
+    .toString(16)
+    .padStart(2, '0');
+  return `#${toHex(first.r, second.r)}${toHex(first.g, second.g)}${toHex(first.b, second.b)}`;
+}
+
 function getThemeSlideStyle(theme, index = 0) {
-  const background = getThemeColor(theme, index % 2 === 0 ? 'background' : 'backgroundAlt', '#f7f3ff');
-  const alternate = getThemeColor(theme, index % 3 === 2 ? 'surfaceAlt' : 'backgroundAlt', '#eff6ff');
+  const vividSources = [
+    getThemeColor(theme, 'primary', '#6d5dfc'),
+    getThemeColor(theme, 'secondary', '#0891b2'),
+    getThemeColor(theme, 'accent', '#f97316'),
+    getThemeColor(theme, 'success', '#16a34a')
+  ];
+  const anchor = vividSources[index % vividSources.length];
+  const companion = vividSources[(index + 1) % vividSources.length];
+  const background = darkenColorUntilReadable(anchor);
+  const alternate = darkenColorUntilReadable(blendHexColors(anchor, companion, 0.28));
   return {
     backgroundFillType: 'gradient',
     backgroundColor: background,
     backgroundGradientStart: background,
-    backgroundGradientEnd: alternate
+    backgroundGradientEnd: alternate,
+    backgroundGradientAngle: 135
   };
 }
 
@@ -2475,8 +2542,7 @@ function ensureImageSpacePlaceholder(actions = [], request = '', currentPlanItem
   if (policy !== 'none' || !requestAsksToPreserveImageSpace(request) || !Array.isArray(actions)) {
     return actions;
   }
-  const targetSlideId = currentPlanItem?.targetSlideId
-    || currentPlanItem?.id
+  const targetSlideId = resolveCurrentPlanActionSlideId(actions, currentPlanItem)
     || actions.find((action) => action?.slideId)?.slideId
     || actions.find((action) => action?.slide?.id)?.slide?.id
     || null;
@@ -2694,9 +2760,22 @@ function areTextsSubstantiallyDuplicate(first = '', second = '') {
   return longer.includes(shorter) && shorter.length / longer.length >= 0.82;
 }
 
+function resolveCurrentPlanActionSlideId(actions = [], currentPlanItem = null) {
+  const requestedTargetSlideId = currentPlanItem?.targetSlideId || currentPlanItem?.id || null;
+  const generatedSlideIds = [...new Set(
+    actions
+      .filter((action) => action?.type === 'add_element' && action.slideId)
+      .map((action) => action.slideId)
+  )];
+  if (requestedTargetSlideId && generatedSlideIds.includes(requestedTargetSlideId)) {
+    return requestedTargetSlideId;
+  }
+  return generatedSlideIds.length === 1 ? generatedSlideIds[0] : requestedTargetSlideId;
+}
+
 function dedupeGeneratedLessonContent(actions = [], currentPlanItem = null) {
   if (!currentPlanItem || !Array.isArray(actions)) return actions;
-  const targetSlideId = currentPlanItem.targetSlideId || currentPlanItem.id;
+  const targetSlideId = resolveCurrentPlanActionSlideId(actions, currentPlanItem);
   const candidates = getContentBriefCandidates(currentPlanItem);
   const usedTexts = [];
   const functionalTargetIds = new Set();
@@ -2777,7 +2856,7 @@ function ensureRequiredImageGeneration(actions, request, currentPlanItem = null,
   if (!currentPlanItem || currentPlanItem.imageIntent !== 'required' || actionListHasGeneratedImage(actions)) {
     return actions;
   }
-  const targetSlideId = currentPlanItem.targetSlideId || currentPlanItem.id;
+  const targetSlideId = resolveCurrentPlanActionSlideId(actions, currentPlanItem);
   if (!targetSlideId) {
     return actions;
   }
@@ -2809,7 +2888,7 @@ function repairDragDropDetectorConfiguration(actions = [], existingSlides = [], 
   if (!Array.isArray(actions) || !actions.length || currentPlanItem?.interactionType !== 'drag-drop') {
     return actions;
   }
-  const targetSlideId = currentPlanItem.targetSlideId || currentPlanItem.id || null;
+  const targetSlideId = resolveCurrentPlanActionSlideId(actions, currentPlanItem);
   if (!targetSlideId) {
     return actions;
   }
@@ -2922,7 +3001,7 @@ function addSupportCardsForReadableContent(actions = [], currentPlanItem = null)
   if (!Array.isArray(actions) || !actions.length || !currentPlanItem) {
     return actions;
   }
-  const targetSlideId = currentPlanItem.targetSlideId || currentPlanItem.id || null;
+  const targetSlideId = resolveCurrentPlanActionSlideId(actions, currentPlanItem);
   if (!targetSlideId) {
     return actions;
   }
@@ -3032,7 +3111,7 @@ function ensureNarrativeForLonelyBulletMarkers(actions = [], currentPlanItem = n
   if (!Array.isArray(actions) || !actions.length || !currentPlanItem) {
     return actions;
   }
-  const targetSlideId = currentPlanItem.targetSlideId || currentPlanItem.id || null;
+  const targetSlideId = resolveCurrentPlanActionSlideId(actions, currentPlanItem);
   if (!targetSlideId) {
     return actions;
   }
@@ -3241,6 +3320,14 @@ function applyDeckVisualThemeToActions(actions, request, currentPlanItem = null,
     }
     if ((action.type === 'add_element' || action.type === 'update_element') && action.element) {
       applyThemeToElement(action.element, theme, index);
+      if (
+        action.element.type === 'text'
+        && !action.element.hasTextBackground
+        && !action.element.hasTextBlock
+        && ['eyebrow', 'title', 'subtitle', 'instruction', 'score'].includes(action.element.layoutRole)
+      ) {
+        action.element.textColor = '#ffffff';
+      }
       if (explicitlyRequestedColor && ['text', 'block', 'floatingButton', 'key'].includes(action.element.type)) {
         if (explicitlyRequestedColor.target === 'text' || action.element.type === 'text') {
           action.element.textColor = explicitlyRequestedColor.color;
@@ -3380,7 +3467,7 @@ function applyIntentionalAnimation(element, role, currentPlanItem, index = 0) {
 
 function composeActionsWithDesignGrid(actions = [], currentPlanItem = null, stageSize = DEFAULT_STAGE_SIZE) {
   if (!currentPlanItem || !Array.isArray(actions)) return actions;
-  const targetSlideId = currentPlanItem.targetSlideId || currentPlanItem.id;
+  const targetSlideId = resolveCurrentPlanActionSlideId(actions, currentPlanItem);
   const archetype = SLIDE_ARCHETYPES.has(currentPlanItem.archetype) ? currentPlanItem.archetype : 'cards';
   const designSystem = currentPlanItem.designSystem || buildDeckDesignSystem(currentPlanItem.visualTheme);
   const typography = designSystem.typography || {};
@@ -3483,7 +3570,9 @@ function buildFallbackLessonText(currentPlanItem = null) {
 
 function ensurePlannedInteractionRecipe(actions = [], currentPlanItem = null, executionPlan = null) {
   if (!currentPlanItem || !Array.isArray(actions)) return actions;
-  const slideId = currentPlanItem.targetSlideId || currentPlanItem.id;
+  const slideId = resolveCurrentPlanActionSlideId(actions, currentPlanItem)
+    || currentPlanItem.targetSlideId
+    || currentPlanItem.id;
   const slideElements = () => actions
     .filter((action) => action?.type === 'add_element' && action.slideId === slideId)
     .map((action) => action.element)
@@ -4065,7 +4154,7 @@ function repairTextOverflowWithProgressiveDisclosure(
   if (!Array.isArray(actions) || !currentPlanItem) {
     return actions;
   }
-  const targetSlideId = currentPlanItem.targetSlideId || currentPlanItem.id;
+  const targetSlideId = resolveCurrentPlanActionSlideId(actions, currentPlanItem);
   const overflowSections = [];
   const eligibleActions = actions.filter((action) => (
     action?.type === 'add_element'
@@ -4153,12 +4242,20 @@ function repairTextOverflowWithProgressiveDisclosure(
         textColor: '#ffffff',
         zIndex: 1002,
         actionConfig: { type: 'hideElement', targetElementId: overlayId },
-        interactionTriggers: [{
-          id: createSafeId('trigger', `${closeId}-hide-self`, 0),
-          name: 'Ocultar botao de detalhes',
-          enabled: true,
-          actionConfig: { type: 'hideElement', targetElementId: closeId }
-        }]
+        interactionTriggers: [
+          {
+            id: createSafeId('trigger', `${closeId}-hide-details`, 0),
+            name: 'Ocultar painel de detalhes',
+            enabled: true,
+            actionConfig: { type: 'hideElement', targetElementId: overlayId }
+          },
+          {
+            id: createSafeId('trigger', `${closeId}-hide-self`, 1),
+            name: 'Ocultar botao de detalhes',
+            enabled: true,
+            actionConfig: { type: 'hideElement', targetElementId: closeId }
+          }
+        ]
       }
     },
     {
@@ -4179,12 +4276,20 @@ function repairTextOverflowWithProgressiveDisclosure(
         textColor: '#ffffff',
         zIndex: 50,
         actionConfig: { type: 'showElement', targetElementId: overlayId },
-        interactionTriggers: [{
-          id: createSafeId('trigger', `${openId}-show-close`, 0),
-          name: 'Mostrar fechamento dos detalhes',
-          enabled: true,
-          actionConfig: { type: 'showElement', targetElementId: closeId }
-        }]
+        interactionTriggers: [
+          {
+            id: createSafeId('trigger', `${openId}-show-details`, 0),
+            name: 'Mostrar painel de detalhes',
+            enabled: true,
+            actionConfig: { type: 'showElement', targetElementId: overlayId }
+          },
+          {
+            id: createSafeId('trigger', `${openId}-show-close`, 1),
+            name: 'Mostrar fechamento dos detalhes',
+            enabled: true,
+            actionConfig: { type: 'showElement', targetElementId: closeId }
+          }
+        ]
       }
     }
   );
@@ -4236,7 +4341,7 @@ function getActionSlideBackgrounds(actions = [], existingSlides = [], currentPla
       backgrounds.set(slideId, action.slide.backgroundColor || action.slide.backgroundGradientStart || '#ffffff');
     }
   });
-  const targetSlideId = currentPlanItem?.targetSlideId || currentPlanItem?.id;
+  const targetSlideId = resolveCurrentPlanActionSlideId(actions, currentPlanItem);
   if (targetSlideId && !backgrounds.has(targetSlideId)) {
     backgrounds.set(targetSlideId, currentPlanItem?.slideStyle?.backgroundColor || '#ffffff');
   }
@@ -4246,7 +4351,7 @@ function getActionSlideBackgrounds(actions = [], existingSlides = [], currentPla
 function collectFunctionalDesignIssues(actions = [], existingSlides = [], currentPlanItem = null) {
   if (!currentPlanItem) return [];
   const issues = [];
-  const targetSlideId = currentPlanItem.targetSlideId || currentPlanItem.id;
+  const targetSlideId = resolveCurrentPlanActionSlideId(actions, currentPlanItem);
   const existingElements = existingSlides.find((slide) => slide?.id === targetSlideId)?.elements || [];
   const generatedElements = actions
     .filter((action) => action?.type === 'add_element' && action.slideId === targetSlideId && action.element)
@@ -4404,10 +4509,12 @@ function collectActionQualityIssues(actions = [], existingSlides = [], stageSize
     }
   });
 
+  const targetSlideId = resolveCurrentPlanActionSlideId(actions, currentPlanItem);
+
   generatedTextsBySlide.forEach((texts, slideId) => {
     const isFunctionalDragDropSlide = (
       currentPlanItem?.interactionType === 'drag-drop'
-      && slideId === (currentPlanItem?.targetSlideId || currentPlanItem?.id)
+      && slideId === targetSlideId
     );
     if (isFunctionalDragDropSlide) return;
     for (let index = 0; index < texts.length; index += 1) {
@@ -4421,7 +4528,6 @@ function collectActionQualityIssues(actions = [], existingSlides = [], stageSize
     }
   });
 
-  const targetSlideId = currentPlanItem?.targetSlideId || currentPlanItem?.id;
   const supportingPoints = currentPlanItem?.contentBrief?.supportingPoints;
   if (
     targetSlideId
@@ -4446,6 +4552,14 @@ function collectActionQualityIssues(actions = [], existingSlides = [], stageSize
 
 function buildSafeArchetypeFallbackActions(actions = [], request = '', existingSlides = [], currentPlanItem = null, executionPlan = null, stageSize = DEFAULT_STAGE_SIZE) {
   if (!currentPlanItem) return actions;
+  const interactionOwnsVisualZone = ['quiz', 'drag-drop', 'reveal', 'timed-challenge'].includes(currentPlanItem.interactionType);
+  const archetypeHasImageZone = ['hero', 'split-visual'].includes(currentPlanItem.archetype);
+  if (
+    (interactionOwnsVisualZone || !archetypeHasImageZone)
+    && currentPlanItem.imageIntent === 'required'
+  ) {
+    currentPlanItem = { ...currentPlanItem, imageIntent: 'optional' };
+  }
   const slideId = currentPlanItem.targetSlideId || currentPlanItem.id;
   const preservedSlideActions = actions.filter((action) =>
     ['add_slide', 'update_slide'].includes(action?.type)
@@ -4453,6 +4567,31 @@ function buildSafeArchetypeFallbackActions(actions = [], request = '', existingS
     || !['add_element', 'update_element'].includes(action?.type)
   );
   const theme = currentPlanItem.visualTheme || executionPlan?.visualTheme || inferDeckVisualTheme(request);
+  const slideStyle = currentPlanItem.slideStyle
+    || getThemeSlideStyle(theme, Math.max(0, Number(currentPlanItem.order || 1) - 1));
+  const existingTargetSlide = existingSlides.find((slide) => slide?.id === slideId);
+  const hasSlideLifecycleAction = preservedSlideActions.some((action) => (
+    action?.type === 'update_slide' && action.slideId === slideId
+  ) || (
+    action?.type === 'add_slide' && action.slide?.id === slideId
+  ));
+  const slideLifecycleActions = hasSlideLifecycleAction
+    ? []
+    : [existingTargetSlide
+        ? {
+            type: 'update_slide',
+            slideId,
+            setActive: true,
+            reason: 'Aplicar ao slide reutilizado o fundo harmonico definido para esta etapa.',
+            slide: { title: currentPlanItem.title || existingTargetSlide.title || 'Slide', ...slideStyle }
+          }
+        : {
+            type: 'add_slide',
+            ...(currentPlanItem.afterSlideId ? { afterSlideId: currentPlanItem.afterSlideId } : {}),
+            setActive: true,
+            reason: 'Criar o slide com o fundo harmonico definido para esta etapa.',
+            slide: { id: slideId, title: currentPlanItem.title || 'Slide', ...slideStyle }
+          }];
   const contentBrief = currentPlanItem.contentBrief || {};
   const keyMessage = contentBrief.keyMessage || buildFallbackLessonText(currentPlanItem);
   const supportingPoints = Array.isArray(contentBrief.supportingPoints)
@@ -4464,6 +4603,7 @@ function buildSafeArchetypeFallbackActions(actions = [], request = '', existingS
   const exampleText = contentBrief.example || contentBrief.takeaway || '';
   const baseActions = [
     ...preservedSlideActions,
+    ...slideLifecycleActions,
     {
       type: 'add_element',
       slideId,
@@ -4473,7 +4613,7 @@ function buildSafeArchetypeFallbackActions(actions = [], request = '', existingS
         type: 'text',
         layoutRole: 'title',
         content: currentPlanItem.title || 'Nova etapa',
-        x: 72, y: 80, width: 900, height: 110,
+        x: 72, y: 64, width: 900, height: 100,
         fontSize: 46,
         fontWeight: '800',
         textColor: getThemeColor(theme, 'text', '#171934')
@@ -4488,8 +4628,8 @@ function buildSafeArchetypeFallbackActions(actions = [], request = '', existingS
         type: 'block',
         layoutRole: 'body',
         content: keyMessage,
-        x: 72, y: 240, width: 500, height: 280,
-        fontSize: 22,
+        x: 72, y: 196, width: 500, height: 190,
+        fontSize: 21,
         fontWeight: '500',
         backgroundColor: getThemeColor(theme, 'surface', '#ffffff'),
         solidColor: getThemeColor(theme, 'surface', '#ffffff'),
@@ -4507,8 +4647,8 @@ function buildSafeArchetypeFallbackActions(actions = [], request = '', existingS
         type: 'block',
         layoutRole: 'card',
         content: supportingText,
-        x: 72, y: 390, width: 500, height: 180,
-        fontSize: 19,
+        x: 72, y: 414, width: 500, height: 118,
+        fontSize: 18,
         fontWeight: '500',
         backgroundColor: getThemeColor(theme, 'backgroundAlt', '#f3f0ff'),
         solidColor: getThemeColor(theme, 'backgroundAlt', '#f3f0ff'),
@@ -4526,8 +4666,8 @@ function buildSafeArchetypeFallbackActions(actions = [], request = '', existingS
         type: 'block',
         layoutRole: 'card',
         content: `Exemplo: ${exampleText}`,
-        x: 72, y: 540, width: 500, height: 110,
-        fontSize: 18,
+        x: 72, y: 560, width: 500, height: 96,
+        fontSize: 17,
         fontWeight: '500',
         backgroundColor: getThemeColor(theme, 'backgroundAlt', '#f3f0ff'),
         solidColor: getThemeColor(theme, 'backgroundAlt', '#f3f0ff'),
@@ -4558,7 +4698,11 @@ function buildSafeArchetypeFallbackActions(actions = [], request = '', existingS
       }
     });
   }
-  if (currentPlanItem.imageIntent === 'required' && !['quiz', 'drag-drop', 'reveal'].includes(currentPlanItem.archetype)) {
+  if (
+    currentPlanItem.imageIntent === 'required'
+    && !interactionOwnsVisualZone
+    && archetypeHasImageZone
+  ) {
     baseActions.push({
       type: 'add_element',
       slideId,
@@ -4610,11 +4754,90 @@ function assertActionQuality(actions = [], existingSlides = [], stageSize = DEFA
   return actions;
 }
 
+const VISUAL_CORRECTION_ELEMENT_FIELDS = new Set([
+  'x', 'y', 'width', 'height', 'zIndex', 'rotation', 'opacity',
+  'fontSize', 'fontWeight', 'fontFamily', 'textAlign', 'textColor',
+  'backgroundColor', 'solidColor', 'borderColor', 'borderWidth', 'borderRadius',
+  'hasTextBackground', 'hasTextBorder', 'hasTextBlock',
+  'quizBackgroundColor', 'quizQuestionColor', 'quizOptionBackgroundColor',
+  'quizOptionTextColor', 'quizButtonBackgroundColor'
+]);
+
+function buildVisualCorrectionActions(actions = [], existingSlides = [], currentPlanItem = null, stageSize = DEFAULT_STAGE_SIZE) {
+  if (!Array.isArray(actions) || !currentPlanItem) return [];
+  const targetSlideId = currentPlanItem.targetSlideId || currentPlanItem.id;
+  const targetSlide = existingSlides.find((slide) => slide?.id === targetSlideId);
+  if (!targetSlide) return [];
+  const elementsById = new Map((targetSlide.elements || []).map((element) => [element?.id, element]).filter(([id]) => id));
+
+  return actions.flatMap((action) => {
+    if (action?.type === 'update_slide') {
+      const slidePatch = {};
+      ['backgroundColor', 'backgroundFillType', 'backgroundGradientStart', 'backgroundGradientEnd', 'backgroundGradientAngle']
+        .forEach((key) => {
+          if (action.slide?.[key] !== undefined) slidePatch[key] = action.slide[key];
+        });
+      return Object.keys(slidePatch).length
+        ? [{ type: 'update_slide', slideId: targetSlideId, reason: action.reason || 'Aplicar correcao visual ao fundo.', slide: slidePatch }]
+        : [];
+    }
+    if (action?.type !== 'update_element') return [];
+    const elementId = action.elementId || action.element?.id;
+    const existingElement = elementsById.get(elementId);
+    if (!existingElement || !action.element) return [];
+    const requestedPatch = {};
+    VISUAL_CORRECTION_ELEMENT_FIELDS.forEach((key) => {
+      if (action.element[key] !== undefined) requestedPatch[key] = action.element[key];
+    });
+    if (!Object.keys(requestedPatch).length) return [];
+    const projectedAction = {
+      type: 'update_element',
+      slideId: targetSlideId,
+      elementId,
+      element: { ...existingElement, ...requestedPatch, id: elementId }
+    };
+    constrainActionGeometry([projectedAction], stageSize);
+    const safePatch = {};
+    VISUAL_CORRECTION_ELEMENT_FIELDS.forEach((key) => {
+      if (requestedPatch[key] !== undefined || ['x', 'y', 'width', 'height'].includes(key)) {
+        safePatch[key] = projectedAction.element[key];
+      }
+    });
+    return [{
+      type: 'update_element',
+      slideId: targetSlideId,
+      elementId,
+      reason: action.reason || 'Aplicar ajuste indicado pela revisao visual.',
+      element: safePatch
+    }];
+  });
+}
+
+function collectVisualCorrectionQualityIssues(actions = [], existingSlides = [], stageSize = DEFAULT_STAGE_SIZE, currentPlanItem = null) {
+  const planningState = {
+    slides: clonePlanningSlides(existingSlides),
+    activeSlideId: currentPlanItem?.targetSlideId || currentPlanItem?.id || existingSlides[0]?.id || null,
+    selectedElementId: null
+  };
+  actions.forEach((action, index) => applyActionToPlanningState(planningState, JSON.parse(JSON.stringify(action)), index));
+  const targetSlideId = currentPlanItem?.targetSlideId || currentPlanItem?.id || planningState.activeSlideId;
+  const targetSlide = planningState.slides.find((slide) => slide?.id === targetSlideId);
+  if (!targetSlide) {
+    return [{ code: 'missing_target_slide', message: 'A correcao visual perdeu a referencia do slide atual.' }];
+  }
+  const projectedActions = (targetSlide.elements || []).map((element) => ({
+    type: 'add_element',
+    slideId: targetSlideId,
+    element: JSON.parse(JSON.stringify(element))
+  }));
+  return collectActionQualityIssues(projectedActions, [], stageSize, currentPlanItem);
+}
+
 function planItemHasRenderableContent(actions, currentPlanItem, existingSlides = []) {
   if (!currentPlanItem) {
     return true;
   }
-  const targetSlideId = currentPlanItem.targetSlideId || currentPlanItem.id;
+  const targetSlideId = resolveCurrentPlanActionSlideId(actions, currentPlanItem);
   const existingSlide = existingSlides.find((slide) => slide?.id === targetSlideId);
   const projectedElements = [
     ...(existingSlide?.elements || []),
@@ -4645,7 +4868,7 @@ function ensurePlanItemHasRenderableContent(actions, currentPlanItem, existingSl
   if (!currentPlanItem || planItemHasRenderableContent(actions, currentPlanItem, existingSlides)) {
     return actions;
   }
-  const targetSlideId = currentPlanItem.targetSlideId || currentPlanItem.id;
+  const targetSlideId = resolveCurrentPlanActionSlideId(actions, currentPlanItem);
   const title = currentPlanItem.title || `Slide ${currentPlanItem.order || ''}`.trim();
   const briefCandidates = getContentBriefCandidates(currentPlanItem);
   const body = buildFallbackLessonText(currentPlanItem);
@@ -5228,6 +5451,7 @@ function summarizePromptPlanContext(executionPlan = null, currentPlanItem = null
   return {
     mode: executionPlan.mode || 'deck',
     summary: truncateText(executionPlan.summary || '', 200),
+    deckContract: executionPlan.deckContract || null,
     visualTheme: executionPlan.visualTheme || currentPlanItem?.visualTheme || null,
     designSystem: executionPlan.designSystem || currentPlanItem?.designSystem || null,
     interactionStrategy: executionPlan.interactionStrategy || null,
@@ -5265,7 +5489,9 @@ function createAiPrompt({
   attachments = [],
   attachmentInsights = '',
   executionPlan = null,
-  currentPlanItem = null
+  currentPlanItem = null,
+  slideMemory = [],
+  visualReview = null
 }) {
   const safeStage = stageSize?.width && stageSize?.height ? stageSize : DEFAULT_STAGE_SIZE;
   const orderedSlides = summarizeSlides(slides, activeSlideId);
@@ -5284,6 +5510,7 @@ function createAiPrompt({
       'goal, layoutNotes e interactionNotes sao briefing interno. Nunca copie esses textos literalmente para content, label, question ou options.',
       'Transforme objetivos em conteudo final de aula. Exemplo: se o goal for "Definir o escambo como pratica de troca", o slide deve dizer "O escambo era uma troca direta de produtos e servicos, sem dinheiro".',
       `Use este briefing de conteudo como fonte principal: ${JSON.stringify(currentPlanItem.contentBrief || {})}.`,
+      `Contrato editorial do deck: ${JSON.stringify(executionPlan.deckContract || { objective: executionPlan.summary || request })}.`,
       'Escreva primeiro o conteudo final do aluno e somente depois associe cada trecho a um elemento visual.',
       'Cada bloco textual precisa acrescentar uma informacao diferente. Nunca duplique keyMessage, supportingPoints, example ou takeaway em dois elementos.',
       'Nao corte frases com reticencias. Se o texto nao couber, resuma em uma frase completa ou divida fatos diferentes em cards.',
@@ -5307,6 +5534,18 @@ function createAiPrompt({
       'Se criar algo para revelar depois, o elemento alvo deve ter initiallyHidden true e o gatilho deve usar showElement ou hideElement de verdade.',
       'Se criar imagem gerada, use type image com generationPrompt detalhado. Nao use block como placeholder de imagem.'
     );
+    if (Array.isArray(slideMemory) && slideMemory.length) {
+      dynamicRules.push(
+        `Slides ja concluidos (nao repita a mesma explicacao ou composicao): ${JSON.stringify(slideMemory.slice(-4))}`,
+        'Use os slides concluidos apenas como memoria editorial. O briefing do slide atual continua sendo a fonte de conteudo.'
+      );
+    }
+    if (visualReview?.needsCorrection && Array.isArray(visualReview.issues) && visualReview.issues.length) {
+      dynamicRules.push(
+        `MODO DE CORRECAO VISUAL: corrija apenas o slide atual usando este relatorio: ${JSON.stringify(visualReview)}`,
+        'Preserve o conteudo correto, a paleta e as imagens existentes. Retorne somente patches necessarios; nao crie slide novo nem gere imagem nova, exceto se o relatorio apontar explicitamente problema na imagem.'
+      );
+    }
     if (currentPlanItem.interactionType === 'drag-drop') {
       dynamicRules.push(
         'Este slide deve ser gamificado em arrastar e colar: crie uma peca com studentCanDrag true, uma area visual de destino e um detector invisivel funcional sobre a area.',
@@ -5358,6 +5597,8 @@ function createAiPrompt({
       activeSlideId: activeSlideId || null,
       userRequest: truncateText(request, MAX_REQUEST_LENGTH),
       attachmentSummary: truncateText(attachmentInsights, MAX_ATTACHMENT_INSIGHTS_LENGTH),
+      completedSlideMemory: Array.isArray(slideMemory) ? slideMemory.slice(-4) : [],
+      visualReview: visualReview?.needsCorrection ? visualReview : null,
       explicitImageRequest: wantsGeneratedImage,
       imagePolicy,
       targetSlideContract: currentPlanItem
@@ -6564,10 +6805,189 @@ async function enrichActionsWithGeneratedImages(actions, settingsRow, attachment
   return nextActions;
 }
 
-async function callCompatibleChatApi({ settings, messages, temperature = 0.2 }) {
+async function callGeminiTextFallback({ settings, messages, temperature = 0.2, timeoutMs = 25000 }) {
+  if (!settings?.image_encrypted_api_key) {
+    throw new Error('A credencial Gemini de fallback nao esta configurada.');
+  }
+  const apiKey = decryptApiKey(settings.image_encrypted_api_key);
+  const baseUrl = String(settings.image_base_url || DEFAULT_IMAGE_PROVIDER.baseUrl).replace(/\/+$/, '');
+  const prompt = prepareMessagesForProvider(messages)
+    .map((message) => `${String(message?.role || 'user').toUpperCase()}: ${String(message?.content || '')}`)
+    .join('\n\n');
+  const response = await safeFetch(`${baseUrl}/models/${DEFAULT_GEMINI_TEXT_FALLBACK_MODEL}:generateContent`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-goog-api-key': apiKey
+    },
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature,
+        maxOutputTokens: 8192
+      }
+    })
+  }, { allowHttp: allowHttpProviderUrls, timeoutMs });
+  const body = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(body?.error?.message || body?.message || 'Falha ao chamar o Gemini de fallback.');
+  }
+  const content = extractGoogleText(body);
+  if (!content) {
+    throw new Error('O Gemini de fallback nao retornou conteudo.');
+  }
+  return content;
+}
+
+async function callCompatibleChatApi({
+  settings,
+  messages,
+  temperature = 0.2,
+  primaryTimeoutMs = 32000,
+  fallbackTimeoutMs = 25000
+}) {
   const apiKey = decryptApiKey(settings.encrypted_api_key);
   const baseUrl = String(settings.base_url || '').replace(/\/+$/, '');
   const preparedMessages = prepareMessagesForProvider(messages);
+  try {
+    const response = await safeFetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: getEffectiveChatModel(settings),
+        messages: preparedMessages,
+        temperature,
+        stream: false
+      })
+    }, { allowHttp: allowHttpProviderUrls, timeoutMs: primaryTimeoutMs });
+    const body = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(body?.error?.message || body?.message || 'Falha ao chamar o provedor de IA.');
+    }
+    const content = body?.choices?.[0]?.message?.content;
+    if (!content) {
+      throw new Error('O provedor de IA nao retornou conteudo.');
+    }
+    return content;
+  } catch (primaryError) {
+    if (!settings?.image_encrypted_api_key) {
+      throw primaryError;
+    }
+    console.warn(`Provedor principal indisponivel; usando ${DEFAULT_GEMINI_TEXT_FALLBACK_MODEL}:`, primaryError?.message || primaryError);
+    try {
+      return await callGeminiTextFallback({
+        settings,
+        messages,
+        temperature,
+        timeoutMs: fallbackTimeoutMs
+      });
+    } catch (fallbackError) {
+      const error = new Error(`Provedor principal e Gemini de fallback falharam: ${fallbackError?.message || fallbackError}`);
+      error.code = 'AI_PROVIDERS_UNAVAILABLE';
+      error.primaryError = primaryError?.message || String(primaryError || '');
+      throw error;
+    }
+  }
+}
+
+function getEffectiveVisionModel(settings = {}) {
+  return String(settings.vision_model || DEFAULT_DEEPSEEK_VISION_MODEL).trim() || DEFAULT_DEEPSEEK_VISION_MODEL;
+}
+
+function isSupportedVisionRender(value = '') {
+  const dataUrl = String(value || '').trim();
+  if (!/^data:image\/(png|jpe?g|webp);base64,[a-z0-9+/=\s]+$/i.test(dataUrl)) {
+    return false;
+  }
+  const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+  return Buffer.byteLength(base64, 'base64') <= 6 * 1024 * 1024;
+}
+
+function normalizeVisualReviewReport(payload = {}) {
+  const issueTypes = new Set([
+    'visual_overflow', 'alignment', 'symmetry', 'hierarchy', 'legibility',
+    'contrast', 'palette', 'spacing', 'occlusion', 'balance', 'duplication', 'interaction_clarity'
+  ]);
+  const severities = new Set(['low', 'medium', 'high']);
+  const rawIssues = Array.isArray(payload?.issues) ? payload.issues : [];
+  const issues = rawIssues
+    .filter((issue) => issue && typeof issue === 'object')
+    .slice(0, 10)
+    .map((issue) => ({
+      severity: severities.has(String(issue.severity || '').toLowerCase())
+        ? String(issue.severity).toLowerCase()
+        : 'medium',
+      type: issueTypes.has(String(issue.type || '').toLowerCase())
+        ? String(issue.type).toLowerCase()
+        : 'balance',
+      targetElementId: truncateText(String(issue.targetElementId || '').trim(), 120),
+      targetElementIds: normalizeStringList(issue.targetElementIds).slice(0, 6).map((id) => truncateText(id, 120)),
+      evidence: truncateText(String(issue.evidence || '').trim(), 300),
+      suggestedFix: truncateText(String(issue.suggestedFix || '').trim(), 300)
+    }))
+    .filter((issue) => issue.evidence || issue.suggestedFix);
+  const needsCorrection = issues.some((issue) => issue.severity === 'high' || issue.severity === 'medium');
+  return {
+    approved: payload?.approved === true && !needsCorrection,
+    needsCorrection,
+    summary: truncateText(String(payload?.summary || '').trim(), 360),
+    issues
+  };
+}
+
+function buildVisualReviewPrompt({ slide = null, currentPlanItem = null, executionPlan = null, stageSize = null }) {
+  const safeStage = stageSize?.width && stageSize?.height ? stageSize : DEFAULT_STAGE_SIZE;
+  const elementIndex = (slide?.elements || []).slice(0, 24).map((element) => ({
+    id: element?.id || '',
+    type: element?.type || '',
+    x: Number(element?.x) || 0,
+    y: Number(element?.y) || 0,
+    width: Number(element?.width) || 0,
+    height: Number(element?.height) || 0,
+    text: truncateText(getElementTextValue(element), 100)
+  }));
+  return JSON.stringify({
+    role: 'slide_visual_reviewer',
+    task: 'Inspecione o PNG renderizado do slide como um revisor humano exigente.',
+    rules: [
+      'Responda SOMENTE um objeto JSON valido.',
+      'Avalie o que realmente aparece na imagem; nao invente elementos ausentes.',
+      'Procure texto vazando, escondido, cortado ou visualmente apertado dentro de cards, botoes, imagens e blocos.',
+      'Avalie alinhamento, simetria intencional, margens, espacamento, hierarquia, contraste, paleta, equilibrio e clareza da interacao.',
+      'Use targetElementId somente quando a evidencia visual e o indice de elementos permitirem identificar o alvo com seguranca.',
+      'Nao sugira recriar imagem nem reescrever o slide inteiro quando bastar um ajuste localizado.',
+      'Retorne {"approved":boolean,"summary":"...","issues":[{"severity":"low|medium|high","type":"visual_overflow|alignment|symmetry|hierarchy|legibility|contrast|palette|spacing|occlusion|balance|duplication|interaction_clarity","targetElementId":"","targetElementIds":[],"evidence":"","suggestedFix":""}]}.',
+      'Quando nao houver problema relevante, retorne approved=true e issues=[].'
+    ],
+    context: {
+      stageSize: safeStage,
+      slide: {
+        id: slide?.id || currentPlanItem?.targetSlideId || '',
+        title: slide?.title || currentPlanItem?.title || '',
+        backgroundColor: slide?.backgroundColor || currentPlanItem?.slideStyle?.backgroundColor || '',
+        elementIndex
+      },
+      deckPalette: currentPlanItem?.visualTheme?.palette || executionPlan?.visualTheme?.palette || {},
+      designSystem: currentPlanItem?.designSystem || executionPlan?.designSystem || {},
+      slideBrief: currentPlanItem?.contentBrief || {}
+    }
+  });
+}
+
+async function reviewRenderedSlideVisual({ settingsRow, renderDataUrl, slide, currentPlanItem = null, executionPlan = null, stageSize = null }) {
+  if (settingsRow?.vision_is_enabled !== true) {
+    return { enabled: false, approved: true, needsCorrection: false, summary: 'Revisao visual desativada.', issues: [] };
+  }
+  if (!isSupportedVisionRender(renderDataUrl)) {
+    const error = new Error('A renderizacao visual enviada para revisao e invalida ou grande demais.');
+    error.code = 'AI_VISUAL_RENDER_INVALID';
+    throw error;
+  }
+  const apiKey = decryptApiKey(settingsRow.encrypted_api_key);
+  const baseUrl = String(settingsRow.base_url || '').replace(/\/+$/, '');
   const response = await safeFetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -6575,21 +6995,38 @@ async function callCompatibleChatApi({ settings, messages, temperature = 0.2 }) 
       Authorization: `Bearer ${apiKey}`
     },
     body: JSON.stringify({
-      model: getEffectiveChatModel(settings),
-      messages: preparedMessages,
-      temperature,
-      stream: false
+      model: getEffectiveVisionModel(settingsRow),
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: 'Voce e um revisor visual de slides. Seja objetivo e responda somente JSON valido.' },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: buildVisualReviewPrompt({ slide, currentPlanItem, executionPlan, stageSize }) },
+            { type: 'image_url', image_url: { url: renderDataUrl, detail: 'low' } }
+          ]
+        }
+      ]
     })
   }, { allowHttp: allowHttpProviderUrls, timeoutMs: 60000 });
   const body = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(body?.error?.message || body?.message || 'Falha ao chamar o provedor de IA.');
+    const error = new Error(body?.error?.message || body?.message || 'Falha ao revisar visualmente o slide.');
+    error.code = 'AI_VISUAL_REVIEW_FAILED';
+    throw error;
   }
   const content = body?.choices?.[0]?.message?.content;
   if (!content) {
-    throw new Error('O provedor de IA nao retornou conteudo.');
+    throw new Error('O revisor visual nao retornou conteudo.');
   }
-  return content;
+  let parsed;
+  try {
+    parsed = tryParseJsonCandidate(content);
+  } catch {
+    parsed = { approved: false, summary: 'O revisor visual retornou um formato invalido.', issues: [] };
+  }
+  return { enabled: true, ...normalizeVisualReviewReport(parsed) };
 }
 
 async function testAiConnection(settingsRow) {
@@ -6610,7 +7047,21 @@ async function testAiConnection(settingsRow) {
     });
     imageReply = extractGoogleText(body) || (extractGoogleImageDataUrl(body) ? 'IMAGE_OK' : '');
   }
-  return imageReply ? `Texto: ${textReply} | Nano Banana: ${imageReply}` : textReply;
+  let visionReply = '';
+  if (settingsRow?.vision_is_enabled === true) {
+    await reviewRenderedSlideVisual({
+      settingsRow,
+      renderDataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL7hQAAAABJRU5ErkJggg==',
+      slide: { id: 'vision-test', title: 'Teste', backgroundColor: '#ffffff', elements: [] },
+      stageSize: DEFAULT_STAGE_SIZE
+    });
+    visionReply = `Visao: ${getEffectiveVisionModel(settingsRow)}`;
+  }
+  return [
+    `Texto: ${textReply}`,
+    imageReply ? `Nano Banana: ${imageReply}` : '',
+    visionReply
+  ].filter(Boolean).join(' | ');
 }
 
 function extractJsonlessText(content) {
@@ -6904,6 +7355,10 @@ function normalizeExecutionPlan(planPayload, request, existingSlides = [], activ
     return {
       mode: 'simple',
       summary: normalizedSummary,
+      deckContract: {
+        objective: normalizedSummary,
+        continuityRule: 'Conclua somente a alteracao pontual solicitada.'
+      },
       visualTheme,
       designSystem,
       interactionStrategy: buildBalancedInteractionStrategy(1),
@@ -6971,7 +7426,7 @@ function normalizeExecutionPlan(planPayload, request, existingSlides = [], activ
   applyBalancedInteractionSequence(normalizedSlides, request);
   if (!['rich', 'required'].includes(imagePolicy)) {
     normalizedSlides.forEach((item, index) => {
-      if (index > 0 && ['quiz', 'reveal', 'drag-drop', 'timed-challenge'].includes(item.interactionType)) {
+      if (['quiz', 'reveal', 'drag-drop', 'timed-challenge'].includes(item.interactionType)) {
         item.imageIntent = 'optional';
       }
     });
@@ -6987,6 +7442,17 @@ function normalizeExecutionPlan(planPayload, request, existingSlides = [], activ
   return {
     mode: 'deck',
     summary: normalizedSummary,
+    deckContract: {
+      objective: normalizedSummary,
+      continuityRule: 'Cada slide deve acrescentar uma ideia nova e manter a mesma identidade visual.',
+      narrative: normalizedSlides.map((item) => ({
+        order: item.order,
+        title: item.title,
+        keyMessage: item.contentBrief?.keyMessage || '',
+        interactionType: item.interactionType,
+        archetype: item.archetype
+      }))
+    },
     imagePolicy,
     visualTheme,
     designSystem,
@@ -7114,9 +7580,12 @@ async function proposeSlideActions({
   stageSize,
   attachments = [],
   executionPlan = null,
-  currentPlanItem = null
+  currentPlanItem = null,
+  slideMemory = [],
+  visualReview = null
 }) {
   const normalizedAttachments = normalizeImageAttachments(attachments);
+  const isVisualCorrection = Boolean(visualReview?.needsCorrection && currentPlanItem);
   if (shouldUseDeterministicSimpleBackground({ request, attachments: normalizedAttachments, executionPlan })) {
     const simpleBackgroundActions = buildSimpleBackgroundColorActions({
       request,
@@ -7152,7 +7621,7 @@ async function proposeSlideActions({
       return simpleBlockActions;
     }
   }
-  if (shouldUseDeterministicPlannedSlide({ executionPlan, currentPlanItem })) {
+  if (!isVisualCorrection && shouldUseDeterministicPlannedSlide({ executionPlan, currentPlanItem })) {
     const deterministicActions = buildSafeArchetypeFallbackActions(
       [],
       request,
@@ -7198,7 +7667,9 @@ async function proposeSlideActions({
           attachments: normalizedAttachments,
           attachmentInsights,
           executionPlan,
-          currentPlanItem
+          currentPlanItem,
+          slideMemory,
+          visualReview
         })
       )
     }
@@ -7206,9 +7677,66 @@ async function proposeSlideActions({
 
   const firstContent = await callCompatibleChatApi({
     settings: settingsRow,
-    messages: baseMessages
+    messages: baseMessages,
+    ...(isVisualCorrection
+      ? { primaryTimeoutMs: 15000, fallbackTimeoutMs: 12000 }
+      : {})
   });
   const firstParsed = await parseActionsFromModelContent(settingsRow, baseMessages, firstContent);
+  if (isVisualCorrection) {
+    let correctionActions = buildVisualCorrectionActions(
+      normalizeActionList(firstParsed),
+      Array.isArray(slides) ? slides : [],
+      currentPlanItem,
+      stageSize || DEFAULT_STAGE_SIZE
+    );
+    let correctionIssues = collectVisualCorrectionQualityIssues(
+      correctionActions,
+      Array.isArray(slides) ? slides : [],
+      stageSize || DEFAULT_STAGE_SIZE,
+      currentPlanItem
+    );
+    if (!correctionActions.length || correctionIssues.length) {
+      const targetSlide = (Array.isArray(slides) ? slides : []).find((slide) => slide?.id === (currentPlanItem.targetSlideId || currentPlanItem.id));
+      const editableIds = (targetSlide?.elements || []).map((element) => element?.id).filter(Boolean);
+      const retryContent = await callCompatibleChatApi({
+        settings: settingsRow,
+        messages: [
+          ...baseMessages,
+          { role: 'assistant', content: JSON.stringify(normalizeActionList(firstParsed)) },
+          {
+            role: 'user',
+            content: [
+              'A correcao visual anterior foi rejeitada.',
+              'Retorne somente update_element ou update_slide. Nao use add_slide, add_element ou delete_element.',
+              `IDs de elementos que podem ser ajustados: ${JSON.stringify(editableIds)}.`,
+              'Preserve todo o conteudo e toda a configuracao funcional. Altere apenas geometria, tipografia, cores, bordas, opacidade ou zIndex.',
+              correctionIssues.length ? buildQualityRetryInstruction(correctionIssues) : ''
+            ].filter(Boolean).join(' ')
+          }
+        ],
+        primaryTimeoutMs: 15000,
+        fallbackTimeoutMs: 12000
+      });
+      const retryParsed = await parseActionsFromModelContent(settingsRow, baseMessages, retryContent);
+      correctionActions = buildVisualCorrectionActions(
+        normalizeActionList(retryParsed),
+        Array.isArray(slides) ? slides : [],
+        currentPlanItem,
+        stageSize || DEFAULT_STAGE_SIZE
+      );
+      correctionIssues = collectVisualCorrectionQualityIssues(
+        correctionActions,
+        Array.isArray(slides) ? slides : [],
+        stageSize || DEFAULT_STAGE_SIZE,
+        currentPlanItem
+      );
+    }
+    if (correctionIssues.length) {
+      return [];
+    }
+    return correctionActions;
+  }
   let actions = postProcessActions(normalizeActionList(firstParsed), request, slides, {
     disableStoryExpansion,
     currentPlanItem,
@@ -7289,6 +7817,10 @@ async function proposeSlideActionsSafely(args) {
   try {
     return await proposeSlideActions(args);
   } catch (error) {
+    if (args?.visualReview?.needsCorrection) {
+      console.warn('Correcao visual descartada sem interromper a fila de slides:', error?.message || error);
+      return [];
+    }
     if (!isRecoverableJsonError(error)) {
       throw error;
     }
@@ -7514,6 +8046,7 @@ module.exports = {
   proposeSlideActions: proposeSlideActionsSafely,
   generateBackgroundMaskWithNanoBanana,
   compareImagesWithNanoBanana,
+  reviewRenderedSlideVisual,
   proposeAdminAssistantTurn,
   testAiConnection,
   __test: {
@@ -7539,6 +8072,8 @@ module.exports = {
     requestSupportsDragDrop,
     requestSuggestsEducationalDeck,
     normalizeExecutionPlan,
+    normalizeVisualReviewReport,
+    isSupportedVisionRender,
     normalizePlanItemActions,
     createAiPrompt,
     createAiExecutionPlanPrompt,
@@ -7562,6 +8097,8 @@ module.exports = {
     areImageAttachmentsIdentical,
     normalizeProviderModel,
     getEffectiveChatModel,
+    callGeminiTextFallback,
+    callCompatibleChatApi,
     ensureRequiredImageGeneration,
     actionListNeedsNanoBanana,
     looksLikePlannerInstructionText,
@@ -7571,6 +8108,8 @@ module.exports = {
     repairTextOverflowWithProgressiveDisclosure,
     collectActionQualityIssues,
     collectFunctionalDesignIssues,
+    buildVisualCorrectionActions,
+    collectVisualCorrectionQualityIssues,
     assertActionQuality,
     getContrastRatio,
     estimateTextCapacity,

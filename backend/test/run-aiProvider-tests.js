@@ -142,6 +142,36 @@ const tests = [
     }
   },
   {
+    name: 'accept only bounded image data URLs for visual review',
+    run() {
+      assert.equal(
+        __test.isSupportedVisionRender('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL7hQAAAABJRU5ErkJggg=='),
+        true
+      );
+      assert.equal(__test.isSupportedVisionRender('data:text/plain;base64,b2k='), false);
+      assert.equal(__test.isSupportedVisionRender('not-a-data-url'), false);
+    }
+  },
+  {
+    name: 'normalize visual review issues into safe bounded patches',
+    run() {
+      const report = __test.normalizeVisualReviewReport({
+        approved: true,
+        summary: 'Ajustar o alinhamento do card.',
+        issues: [{
+          severity: 'high',
+          type: 'alignment',
+          targetElementId: 'card-1',
+          evidence: 'O card esta deslocado.',
+          suggestedFix: 'Alinhar a grade.'
+        }]
+      });
+      assert.equal(report.approved, false);
+      assert.equal(report.needsCorrection, true);
+      assert.equal(report.issues[0].targetElementId, 'card-1');
+    }
+  },
+  {
     name: 'do not infer story flow when request forbids creating more slides',
     run() {
       assert.equal(
@@ -1499,6 +1529,389 @@ const tests = [
         );
         const issues = __test.collectActionQualityIssues(actions, [], { width: 1280, height: 720 }, planItem);
         assert.deepEqual(issues, [], `${planItem.interactionType}: ${JSON.stringify(issues)}`);
+      });
+    }
+  },
+  {
+    name: 'first interactive hero reserves its visual zone for the quiz',
+    run() {
+      const prompt = 'crie 3 slides falando sobre a importancia da tecnologia nos sistema de ensino';
+      const plan = __test.normalizeExecutionPlan(
+        {
+          mode: 'deck',
+          slides: [
+            {
+              title: 'A tecnologia como porta de entrada para o conhecimento',
+              goal: 'Apresentar ao aluno o impacto da tecnologia na ampliacao do acesso a educacao.',
+              archetype: 'hero',
+              interactionType: 'quiz',
+              imageIntent: 'required'
+            },
+            { title: 'Tecnologia e participacao', archetype: 'cards' },
+            { title: 'Aplicacao consciente', archetype: 'summary' }
+          ]
+        },
+        prompt,
+        [{ id: 'slide-atual', title: '', elements: [] }],
+        'slide-atual'
+      );
+      const firstSlide = plan.slides[0];
+      assert.equal(firstSlide.interactionType, 'quiz');
+      assert.equal(firstSlide.imageIntent, 'optional');
+
+      const actions = __test.buildSafeArchetypeFallbackActions(
+        [],
+        prompt,
+        [],
+        firstSlide,
+        plan,
+        { width: 1280, height: 720 }
+      );
+      assert.equal(actions.some((action) => action.element?.type === 'image'), false);
+      assert.deepEqual(
+        __test.collectActionQualityIssues(actions, [], { width: 1280, height: 720 }, firstSlide),
+        []
+      );
+    }
+  },
+  {
+    name: 'visual review correction cannot recreate the candidate slide',
+    run() {
+      const plan = __test.normalizeExecutionPlan(
+        {
+          mode: 'deck',
+          slides: [{
+            title: 'O que a tecnologia realmente muda?',
+            archetype: 'quiz',
+            interactionType: 'quiz',
+            imageIntent: 'optional',
+            contentBrief: {
+              keyMessage: 'A tecnologia gera valor quando resolve um problema real de aprendizagem.',
+              supportingPoints: [
+                'O retorno imediato permite corrigir a rota durante o estudo.',
+                'A formacao docente orienta o uso pedagogico dos recursos.'
+              ],
+              example: 'Uma simulacao ajuda a turma a testar hipoteses antes da atividade pratica.',
+              takeaway: 'Intencao pedagogica vem antes da ferramenta.'
+            }
+          }]
+        },
+        'Crie um slide com quiz sobre tecnologia no ensino',
+        [{ id: 'slide-atual', title: '', elements: [] }],
+        'slide-atual'
+      );
+      const planItem = plan.slides[0];
+      const initialActions = __test.buildSafeArchetypeFallbackActions(
+        [],
+        'Crie um slide com quiz sobre tecnologia no ensino',
+        [],
+        planItem,
+        plan,
+        { width: 1280, height: 720 }
+      );
+      const state = { slides: [], activeSlideId: null, selectedElementId: null };
+      initialActions.forEach((action, index) => {
+        __test.applyActionToPlanningState(state, JSON.parse(JSON.stringify(action)), index);
+      });
+      const title = state.slides[0].elements.find((element) => element.type === 'text');
+      const rawCorrection = [
+        {
+          type: 'add_slide',
+          slide: { id: 'slide-duplicado', title: 'Duplicado' }
+        },
+        {
+          type: 'add_element',
+          slideId: planItem.targetSlideId,
+          element: { id: 'quiz-duplicado', type: 'quiz', x: 500, y: 200, width: 600, height: 400 }
+        },
+        {
+          type: 'update_element',
+          slideId: planItem.targetSlideId,
+          elementId: title.id,
+          element: {
+            id: title.id,
+            fontSize: 42,
+            content: 'Este texto nao pode substituir o conteudo existente.'
+          }
+        }
+      ];
+      const corrections = __test.buildVisualCorrectionActions(
+        rawCorrection,
+        state.slides,
+        planItem,
+        { width: 1280, height: 720 }
+      );
+      assert.equal(corrections.length, 1);
+      assert.equal(corrections[0].type, 'update_element');
+      assert.equal(corrections[0].elementId, title.id);
+      assert.equal(corrections[0].element.fontSize, 42);
+      assert.equal(corrections[0].element.content, undefined);
+      assert.deepEqual(
+        __test.collectVisualCorrectionQualityIssues(
+          corrections,
+          state.slides,
+          { width: 1280, height: 720 },
+          planItem
+        ),
+        []
+      );
+    }
+  },
+  {
+    name: 'deck backgrounds rotate through vivid readable colors',
+    run() {
+      const theme = __test.inferDeckVisualTheme('aula criativa sobre tecnologia');
+      assert.equal(theme.key, 'future-tech');
+      const styles = Array.from({ length: 4 }, (_, index) => __test.getThemeSlideStyle(theme, index));
+      assert.equal(new Set(styles.map((style) => style.backgroundGradientStart)).size, 4);
+      styles.forEach((style) => {
+        assert.equal(style.backgroundFillType, 'gradient');
+        assert.equal(style.backgroundGradientAngle, 135);
+        assert.notEqual(style.backgroundGradientStart, style.backgroundGradientEnd);
+        assert.ok(__test.getContrastRatio(style.backgroundGradientStart, '#ffffff') >= 4.5);
+        assert.ok(__test.getContrastRatio(style.backgroundGradientEnd, '#ffffff') >= 4.5);
+      });
+
+      const plan = __test.normalizeExecutionPlan(
+        {
+          mode: 'deck',
+          slides: Array.from({ length: 4 }, (_, index) => ({
+            title: `Tecnologia ${index + 1}`,
+            goal: `Explicar o aspecto ${index + 1} da tecnologia no ensino.`
+          }))
+        },
+        'Crie 4 slides criativos sobre tecnologia no ensino',
+        [{ id: 'slide-atual', title: '', elements: [] }],
+        'slide-atual'
+      );
+      assert.equal(new Set(plan.slides.map((item) => item.slideStyle.backgroundGradientStart)).size, 4);
+    }
+  },
+  {
+    name: 'reused initial blank slide receives its planned vivid background',
+    run() {
+      const blankSlide = {
+        id: 'slide-atual',
+        title: '',
+        elements: [],
+        backgroundColor: '#ffffff',
+        backgroundFillType: 'solid'
+      };
+      const plan = __test.normalizeExecutionPlan(
+        {
+          mode: 'deck',
+          slides: [{
+            title: 'Tecnologia como porta de entrada',
+            goal: 'Mostrar como a tecnologia amplia o acesso ao conhecimento.',
+            archetype: 'hero',
+            interactionType: 'content',
+            contentBrief: {
+              keyMessage: 'A tecnologia aproxima pessoas, recursos e novas formas de aprender.',
+              supportingPoints: ['Acesso ampliado', 'Retorno imediato']
+            }
+          }]
+        },
+        'Crie slides sobre a importancia da tecnologia nos sistemas de ensino',
+        [blankSlide],
+        blankSlide.id
+      );
+      const item = plan.slides[0];
+      const actions = __test.buildSafeArchetypeFallbackActions(
+        [],
+        'Crie slides sobre a importancia da tecnologia nos sistemas de ensino',
+        [blankSlide],
+        item,
+        plan,
+        { width: 1280, height: 720 }
+      );
+      const update = actions.find((action) => action.type === 'update_slide' && action.slideId === blankSlide.id);
+      assert.ok(update);
+      assert.equal(update.slide.backgroundFillType, 'gradient');
+      assert.equal(update.slide.backgroundGradientStart, item.slideStyle.backgroundGradientStart);
+      assert.equal(update.slide.backgroundGradientEnd, item.slideStyle.backgroundGradientEnd);
+
+      const state = { slides: [JSON.parse(JSON.stringify(blankSlide))], activeSlideId: blankSlide.id, selectedElementId: null };
+      actions.forEach((action, index) => {
+        __test.applyActionToPlanningState(state, JSON.parse(JSON.stringify(action)), index);
+      });
+      assert.equal(state.slides.length, 1);
+      assert.equal(state.slides[0].backgroundFillType, 'gradient');
+      assert.notEqual(state.slides[0].backgroundGradientStart, '#ffffff');
+      assert.ok(__test.getContrastRatio(state.slides[0].backgroundGradientStart, '#ffffff') >= 4.5);
+    }
+  },
+  {
+    name: 'progressive details buttons expose both required actions',
+    run() {
+      const planItem = {
+        id: 'slide-detalhes',
+        targetSlideId: 'slide-detalhes',
+        title: 'Tecnologia no ensino',
+        order: 1,
+        interactionType: 'content',
+        visualTheme: __test.inferDeckVisualTheme('aula criativa')
+      };
+      const actions = __test.repairTextOverflowWithProgressiveDisclosure(
+        [{
+          type: 'add_element',
+          slideId: planItem.targetSlideId,
+          element: {
+            id: 'texto-longo',
+            type: 'block',
+            layoutRole: 'body',
+            content: 'A tecnologia amplia o acesso ao conhecimento, personaliza percursos de aprendizagem e oferece retorno imediato ao estudante. '.repeat(18),
+            x: 72,
+            y: 196,
+            width: 420,
+            height: 150,
+            fontSize: 22
+          }
+        }],
+        planItem,
+        { width: 1280, height: 720 }
+      );
+      const overlay = actions.find((action) => action.element?.initiallyHidden && action.element?.type === 'block')?.element;
+      const openButton = actions.find((action) => action.element?.label === 'Ver detalhes')?.element;
+      const closeButton = actions.find((action) => action.element?.label === 'Fechar detalhes')?.element;
+      assert.ok(overlay && openButton && closeButton);
+      assert.deepEqual(
+        openButton.interactionTriggers.map((trigger) => [trigger.actionConfig.type, trigger.actionConfig.targetElementId]),
+        [['showElement', overlay.id], ['showElement', closeButton.id]]
+      );
+      assert.deepEqual(
+        closeButton.interactionTriggers.map((trigger) => [trigger.actionConfig.type, trigger.actionConfig.targetElementId]),
+        [['hideElement', overlay.id], ['hideElement', closeButton.id]]
+      );
+      assert.deepEqual(openButton.actionConfig, openButton.interactionTriggers[0].actionConfig);
+      assert.deepEqual(closeButton.actionConfig, closeButton.interactionTriggers[0].actionConfig);
+    }
+  },
+  {
+    name: 'planned slide layout matrix stays valid across archetypes interactions and densities',
+    run() {
+      const archetypes = ['hero', 'cards', 'process', 'comparison', 'quiz', 'reveal', 'summary', 'split-visual'];
+      const interactions = ['content', 'mission-content', 'quiz', 'drag-drop', 'reveal', 'timed-challenge'];
+      const densities = ['low', 'medium', 'high'];
+      const visualTheme = __test.inferDeckVisualTheme('aula criativa sobre tecnologia');
+      const designSystem = __test.buildDeckDesignSystem(visualTheme);
+
+      archetypes.forEach((archetype) => {
+        interactions.forEach((interactionType) => {
+          densities.forEach((contentDensity) => {
+            const planItem = {
+              id: 's',
+              targetSlideId: 's',
+              title: 'Tecnologia e conhecimento',
+              goal: 'Explicar como a tecnologia amplia o acesso ao ensino.',
+              archetype,
+              interactionType,
+              imageIntent: 'required',
+              contentDensity,
+              visualTheme,
+              designSystem,
+              contentBrief: {
+                keyMessage: 'A tecnologia conecta estudantes a diferentes fontes de conhecimento e novas formas de aprender.',
+                supportingPoints: [
+                  'Recursos digitais ampliam o acesso a materiais atualizados.',
+                  'Atividades interativas oferecem retorno imediato ao estudante.',
+                  'Dados ajudam o professor a adaptar o percurso de aprendizagem.'
+                ],
+                example: 'Uma turma pode comparar fontes e testar hipoteses em uma simulacao.',
+                takeaway: 'Tecnologia com intencao pedagogica melhora acesso, participacao e acompanhamento.'
+              }
+            };
+            const plan = { mode: 'deck', slides: [planItem], visualTheme, designSystem };
+            const actions = __test.buildSafeArchetypeFallbackActions(
+              [],
+              'Crie slides sobre tecnologia no ensino',
+              [],
+              planItem,
+              plan,
+              { width: 1280, height: 720 }
+            );
+            const issues = __test.collectActionQualityIssues(
+              actions,
+              [],
+              { width: 1280, height: 720 },
+              planItem
+            );
+            assert.deepEqual(
+              issues,
+              [],
+              `${archetype}/${interactionType}/${contentDensity}: ${JSON.stringify(issues)}`
+            );
+          });
+        });
+      });
+    }
+  },
+  {
+    name: 'planned slide survives repeated and oversized planner content',
+    run() {
+      const archetypes = ['hero', 'cards', 'process', 'comparison', 'quiz', 'reveal', 'summary', 'split-visual'];
+      const interactions = ['content', 'mission-content', 'quiz', 'drag-drop', 'reveal', 'timed-challenge'];
+      const repeatedText = 'A tecnologia amplia o acesso ao conhecimento em diferentes contextos educacionais.';
+      const variants = [
+        {
+          keyMessage: repeatedText,
+          supportingPoints: [repeatedText, repeatedText],
+          example: repeatedText,
+          takeaway: repeatedText
+        },
+        {
+          keyMessage: 'A tecnologia amplia o acesso ao conhecimento e cria novas possibilidades de aprendizagem personalizada ao conectar estudantes, professores, materiais atualizados, simulacoes praticas e recursos de acessibilidade em uma experiencia educacional orientada por objetivos claros e acompanhamento continuo.',
+          supportingPoints: [
+            'Recursos digitais permitem acessar materiais atualizados em diferentes formatos e ritmos de estudo, respeitando necessidades de cada estudante.',
+            'Atividades interativas oferecem retorno imediato e ajudam o professor a identificar dificuldades antes que elas se acumulem.'
+          ],
+          example: 'Uma turma utiliza uma simulacao para testar hipoteses e depois compara os resultados com conceitos estudados.',
+          takeaway: 'O valor da tecnologia aparece quando ela serve a uma intencao pedagogica clara.'
+        }
+      ];
+      const visualTheme = __test.inferDeckVisualTheme('aula criativa sobre tecnologia');
+      const designSystem = __test.buildDeckDesignSystem(visualTheme);
+
+      archetypes.forEach((archetype) => {
+        interactions.forEach((interactionType) => {
+          variants.forEach((contentBrief) => {
+            const planItem = {
+              id: 's',
+              targetSlideId: 's',
+              title: 'Tecnologia e conhecimento',
+              goal: 'Explicar como a tecnologia amplia o acesso ao ensino com exemplos praticos.',
+              archetype,
+              interactionType,
+              imageIntent: 'required',
+              contentDensity: 'high',
+              visualTheme,
+              designSystem,
+              contentBrief
+            };
+            const plan = { mode: 'deck', slides: [planItem], visualTheme, designSystem };
+            const actions = __test.buildSafeArchetypeFallbackActions(
+              [],
+              'Crie slides sobre tecnologia no ensino',
+              [],
+              planItem,
+              plan,
+              { width: 1280, height: 720 }
+            );
+            const createdSlideId = actions.find((action) => action.type === 'add_slide')?.slide?.id;
+            assert.ok(createdSlideId);
+            assert.equal(
+              actions
+                .filter((action) => action.type === 'add_element')
+                .every((action) => action.slideId === createdSlideId),
+              true,
+              `${archetype}/${interactionType} espalhou elementos entre IDs diferentes`
+            );
+            assert.deepEqual(
+              __test.collectActionQualityIssues(actions, [], { width: 1280, height: 720 }, planItem),
+              [],
+              `${archetype}/${interactionType} nao reparou conteudo adverso`
+            );
+          });
+        });
       });
     }
   },

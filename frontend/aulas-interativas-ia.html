@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="Crie aulas interativas com IA em um único prompt. Conheça o Criatyve Pro Ilimitado para professores, teste exemplos reais e assine por R$97,90 ao mês." />
+  <meta name="description" content="Crie aulas interativas com IA em um único prompt. No cartão, teste o Criatyve Pro Ilimitado por 20 dias sem pagar agora; no Pix, conte com garantia de reembolso." />
   <meta name="theme-color" content="#0b0914" />
   <title>Criatyve | Aulas interativas com IA para professores</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
@@ -11,8 +11,9 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet" />
-  <link rel="stylesheet" href="aulas-interativas-ia.css?v=20260817-2" />
-  <script src="meta-pixel.js?v=20260817-1"></script>
+  <link rel="stylesheet" href="aulas-interativas-ia.css?v=20260831-2" />
+  <script src="analytics.js?v=20260831-3"></script>
+  <script src="meta-pixel.js?v=20260831-1"></script>
 </head>
 <body>
   <noscript><img height="1" width="1" style="display:none" alt="" src="https://www.facebook.com/tr?id=1067171249057361&amp;ev=PageView&amp;noscript=1" /></noscript>
@@ -29,7 +30,7 @@
       <a href="#duvidas">Dúvidas</a>
     </nav>
     <a class="button button-small tracked-checkout" data-cta-location="header" href="checkout.html?plan=pro-unlimited">
-      Assinar por R$97,90 <i class="bi bi-arrow-right" aria-hidden="true"></i>
+      Começar 20 dias grátis <i class="bi bi-arrow-right" aria-hidden="true"></i>
     </a>
   </header>
 
@@ -47,23 +48,57 @@
         </div>
         <ul class="trust-row" aria-label="Destaques da oferta">
           <li><i class="bi bi-people-fill" aria-hidden="true"></i> Alunos ilimitados</li>
-          <li><i class="bi bi-arrow-counterclockwise" aria-hidden="true"></i> Garantia de 20 dias</li>
+          <li><i class="bi bi-gift-fill" aria-hidden="true"></i> 20 dias sem risco</li>
           <li><i class="bi bi-shield-check" aria-hidden="true"></i> Checkout seguro Asaas</li>
-          <li><i class="bi bi-credit-card" aria-hidden="true"></i> Pix ou cartão</li>
+          <li><i class="bi bi-credit-card" aria-hidden="true"></i> Cartão ou Pix</li>
         </ul>
       </div>
 
-      <div class="hero-preview" aria-hidden="true">
+      <div class="hero-preview">
         <div class="preview-toolbar"><span></span><span></span><span></span><strong>Aula criada no Criatyve</strong></div>
         <div class="preview-stage">
-          <div class="preview-label">Aula de Ciências</div>
-          <h2>Como funciona o sistema solar?</h2>
-          <div class="orbit-demo">
-            <span class="sun"></span>
-            <span class="planet planet-one"></span>
-            <span class="planet planet-two"></span>
+          <div class="preview-player" data-analytics-video="criador-demo" aria-label="Demonstração em vídeo do Criatyve">
+            <video id="creatorDemoVideo" class="preview-video" playsinline preload="none" poster="assets/videos/criador-demo-poster.jpg">
+              <source src="assets/videos/criador-demo-web.mp4" type="video/mp4" />
+              Seu navegador não conseguiu carregar a demonstração em vídeo.
+            </video>
+            <button class="preview-big-play" type="button" aria-label="Reproduzir demonstração" data-video-action="toggle-play">
+              <i class="bi bi-play-fill" aria-hidden="true"></i>
+            </button>
+            <div class="preview-controls" aria-label="Controles do vídeo">
+              <div class="preview-progress-row">
+                <span class="preview-buffered" aria-hidden="true"></span>
+                <span class="preview-progress" aria-hidden="true"></span>
+                <input class="preview-seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Posição do vídeo" />
+              </div>
+              <div class="preview-control-row">
+                <button type="button" class="preview-control" data-video-action="toggle-play" aria-label="Reproduzir"><i class="bi bi-play-fill" aria-hidden="true"></i></button>
+                <button type="button" class="preview-control" data-video-action="rewind" aria-label="Voltar 10 segundos"><i class="bi bi-arrow-counterclockwise" aria-hidden="true"></i></button>
+                <button type="button" class="preview-control" data-video-action="forward" aria-label="Avançar 10 segundos"><i class="bi bi-arrow-clockwise" aria-hidden="true"></i></button>
+                <div class="preview-volume">
+                  <button type="button" class="preview-control" data-video-action="toggle-mute" aria-label="Silenciar"><i class="bi bi-volume-up-fill" aria-hidden="true"></i></button>
+                  <input class="preview-volume-range" type="range" min="0" max="1" value="1" step="0.05" aria-label="Volume" />
+                </div>
+                <span class="preview-time" aria-live="off">0:00 / 0:00</span>
+                <div class="preview-spacer"></div>
+                <div class="preview-settings">
+                  <button type="button" class="preview-control" data-video-action="toggle-settings" aria-haspopup="true" aria-expanded="false" aria-label="Configurações de reprodução"><i class="bi bi-gear-fill" aria-hidden="true"></i></button>
+                  <div class="preview-settings-menu" hidden>
+                    <span>Velocidade</span>
+                    <div role="group" aria-label="Velocidade de reprodução">
+                      <button type="button" data-playback-rate="0.75">0,75x</button>
+                      <button type="button" data-playback-rate="1">Normal</button>
+                      <button type="button" data-playback-rate="1.25">1,25x</button>
+                      <button type="button" data-playback-rate="1.5">1,5x</button>
+                      <button type="button" data-playback-rate="2">2x</button>
+                    </div>
+                  </div>
+                </div>
+                <button type="button" class="preview-control preview-pip" data-video-action="pip" aria-label="Imagem em imagem"><i class="bi bi-pip" aria-hidden="true"></i></button>
+                <button type="button" class="preview-control" data-video-action="fullscreen" aria-label="Tela cheia"><i class="bi bi-fullscreen" aria-hidden="true"></i></button>
+              </div>
+            </div>
           </div>
-          <div class="preview-question"><i class="bi bi-lightning-charge-fill" aria-hidden="true"></i> Quiz e gatilhos prontos para interagir</div>
         </div>
       </div>
     </section>
@@ -130,14 +165,15 @@
         <div class="clarity-list">
           <span><i class="bi bi-check-circle-fill" aria-hidden="true"></i> Preço claro antes do pagamento</span>
           <span><i class="bi bi-check-circle-fill" aria-hidden="true"></i> Sem taxa por aluno</span>
-          <span><i class="bi bi-check-circle-fill" aria-hidden="true"></i> Reembolso de 100% em até 20 dias</span>
+          <span><i class="bi bi-check-circle-fill" aria-hidden="true"></i> Cartão sem cobrança por 20 dias</span>
+          <span><i class="bi bi-check-circle-fill" aria-hidden="true"></i> Pix com garantia de reembolso</span>
           <span><i class="bi bi-check-circle-fill" aria-hidden="true"></i> Renovação mensal</span>
         </div>
       </div>
       <article class="pricing-card">
         <div class="pricing-badge">Pro Ilimitado</div>
         <div class="price"><span>R$</span><strong>97,90</strong><small>/mês</small></div>
-        <p class="price-caption">Pix mensal ou cartão com renovação automática.</p>
+        <p class="price-caption">No cartão, R$0 agora. No Pix, pagamento imediato com garantia.</p>
         <ul>
           <li><i class="bi bi-check2" aria-hidden="true"></i><strong>Alunos ilimitados</strong> no portal</li>
           <li><i class="bi bi-check2" aria-hidden="true"></i>Editor completo e módulos interativos</li>
@@ -149,12 +185,12 @@
         <div class="guarantee-box">
           <i class="bi bi-shield-fill-check" aria-hidden="true"></i>
           <div>
-            <strong>Use por 20 dias sem risco</strong>
-            <p>Você paga agora e pode testar tudo. Se não gostar, solicite o cancelamento dentro dos primeiros 20 dias e devolveremos 100% do valor da primeira mensalidade.</p>
+            <strong>Escolha como usar os 20 dias sem risco</strong>
+            <p>No cartão, nada é cobrado hoje e a primeira cobrança acontece após 20 dias. No Pix, você paga R$97,90 agora e pode solicitar ao suporte o reembolso integral dentro dos primeiros 20 dias.</p>
           </div>
         </div>
         <a class="button button-full tracked-checkout" data-cta-location="pricing" href="checkout.html?plan=pro-unlimited">
-          Assinar o Pro Ilimitado <i class="bi bi-arrow-right" aria-hidden="true"></i>
+          Escolher cartão ou Pix <i class="bi bi-arrow-right" aria-hidden="true"></i>
         </a>
         <p class="secure-line"><i class="bi bi-lock-fill" aria-hidden="true"></i> Pagamento processado com segurança pelo Asaas</p>
       </article>
@@ -169,16 +205,16 @@
         <details><summary>Preciso saber design ou programação?<i class="bi bi-plus-lg" aria-hidden="true"></i></summary><p>Não. Você pode começar descrevendo a aula para a IA e depois ajustar os elementos visualmente no editor.</p></details>
         <details><summary>“Alunos ilimitados” significa que não pago por novas vagas?<i class="bi bi-plus-lg" aria-hidden="true"></i></summary><p>Sim. Nesta oferta não existe cobrança por aluno nem compra de vagas adicionais. Você pode aprovar novos alunos sem alterar o valor mensal do plano.</p></details>
         <details><summary>Quais limites continuam existindo?<i class="bi bi-plus-lg" aria-hidden="true"></i></summary><p>O plano inclui 1 GB de armazenamento e 100 créditos de IA por mês. Os alunos são ilimitados; os demais limites técnicos e de uso continuam os informados no plano.</p></details>
-        <details><summary>Como funciona o pagamento?<i class="bi bi-plus-lg" aria-hidden="true"></i></summary><p>No cartão, a assinatura é renovada automaticamente todos os meses. No Pix, você faz o pagamento mensal e o acesso é liberado após a confirmação.</p></details>
-        <details><summary>Como funciona a garantia de 20 dias?<i class="bi bi-plus-lg" aria-hidden="true"></i></summary><p>A primeira mensalidade é cobrada normalmente para liberar o acesso. Você pode usar a plataforma por até 20 dias corridos e, se não gostar, pedir o cancelamento pelo suporte dentro desse prazo. Devolveremos 100% do valor pago na primeira mensalidade. Renovações não reiniciam o período de garantia.</p></details>
-        <details><summary>O que acontece depois do pagamento?<i class="bi bi-plus-lg" aria-hidden="true"></i></summary><p>Após a confirmação do Asaas, você recebe no e-mail informado o login e uma senha temporária para acessar a plataforma.</p></details>
+        <details><summary>Como funciona o pagamento no cartão?<i class="bi bi-plus-lg" aria-hidden="true"></i></summary><p>Você cadastra o cartão no checkout seguro do Asaas, mas não paga nada no primeiro dia. A primeira cobrança de R$97,90 acontece somente após 20 dias e depois se repete mensalmente enquanto a assinatura estiver ativa.</p></details>
+        <details><summary>Como funciona o pagamento no Pix?<i class="bi bi-plus-lg" aria-hidden="true"></i></summary><p>No Pix, o pagamento de R$97,90 é feito no momento da contratação e o acesso é liberado após a confirmação. Se não gostar, entre em contato com o suporte dentro dos primeiros 20 dias para solicitar o reembolso integral. O suporte processará a devolução imediatamente; o prazo para o valor aparecer depende do banco.</p></details>
+        <details><summary>Como funcionam os 20 dias sem risco?<i class="bi bi-plus-lg" aria-hidden="true"></i></summary><p>No cartão, você pode cancelar antes do primeiro vencimento e nada será cobrado. No Pix, você paga agora e pode solicitar o reembolso integral ao suporte dentro do prazo. A condição é concedida apenas na primeira contratação desta oferta.</p></details>
       </div>
     </section>
 
     <section class="final-cta">
       <p class="eyebrow">Sua próxima aula pode começar por uma frase</p>
       <h2>Troque horas de preparação por uma aula que convida o aluno a participar.</h2>
-      <p>Pro Ilimitado por R$97,90 por mês, com todos os seus alunos no portal e garantia total de 20 dias.</p>
+      <p>No cartão, use por 20 dias sem pagar agora. No Pix, pague R$97,90 e conte com reembolso integral dentro do prazo.</p>
       <a class="button tracked-checkout" data-cta-location="final" href="checkout.html?plan=pro-unlimited">Começar com o Criatyve <i class="bi bi-arrow-right" aria-hidden="true"></i></a>
     </section>
   </main>
@@ -194,10 +230,10 @@
   </a>
 
   <div class="mobile-offer-bar">
-    <div><strong>R$97,90/mês</strong><small>Alunos ilimitados</small></div>
-    <a class="button button-small tracked-checkout" data-cta-location="mobile_sticky" href="checkout.html?plan=pro-unlimited">Assinar <i class="bi bi-arrow-right" aria-hidden="true"></i></a>
+    <div><strong>Cartão: R$0 hoje</strong><small>Pix com garantia</small></div>
+    <a class="button button-small tracked-checkout" data-cta-location="mobile_sticky" href="checkout.html?plan=pro-unlimited">Escolher <i class="bi bi-arrow-right" aria-hidden="true"></i></a>
   </div>
 
-  <script src="aulas-interativas-ia.js?v=20260817-2"></script>
+  <script src="aulas-interativas-ia.js?v=20260831-4"></script>
 </body>
 </html>

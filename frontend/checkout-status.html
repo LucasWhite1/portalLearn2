@@ -84,6 +84,7 @@
       box-shadow: 0 18px 38px rgba(124, 58, 237, .32);
     }
   </style>
+  <script src="analytics.js?v=20260831-1"></script>
 </head>
 <body>
   <main class="panel">
@@ -101,6 +102,8 @@
     const params = new URLSearchParams(window.location.search);
     const status = params.get('status') || 'success';
     const plan = params.get('plan') || 'pro';
+    const billingType = String(params.get('billingType') || '').toUpperCase();
+    const isUnlimitedPix = plan === 'pro-unlimited' && billingType === 'PIX';
     const renewal = params.get('renewal') === '1';
     const returnLink = document.getElementById('checkoutReturnLink');
     if (returnLink && plan === 'pro-unlimited') {
@@ -110,11 +113,19 @@
     const messages = {
       success: {
         eyebrow: 'Checkout concluido',
-        heading: plan === 'trial-30-dias' ? 'Seu teste gratis foi iniciado' : 'Sua assinatura foi iniciada',
-        text: plan === 'trial-30-dias'
+        heading: isUnlimitedPix
+          ? 'Seu pagamento Pix foi concluido'
+          : ['trial-30-dias', 'pro-unlimited'].includes(plan) ? 'Seu teste gratis foi iniciado' : 'Sua assinatura foi iniciada',
+        text: isUnlimitedPix
+          ? 'O Asaas recebeu o pagamento e seu acesso seguira para ativacao. Sua garantia de reembolso integral vale pelos primeiros 20 dias.'
+          : plan === 'pro-unlimited'
+          ? 'Seu cartao foi cadastrado no gateway e os 20 dias gratis comecam agora. A primeira cobranca ficou programada para depois desse periodo.'
+          : plan === 'trial-30-dias'
           ? 'Agora o cartao ja ficou cadastrado no gateway e o periodo de 30 dias comeca a contar.'
           : 'Seu pagamento foi enviado ao gateway e a assinatura ja pode seguir para ativacao.',
-        note: plan === 'trial-30-dias'
+        note: isUnlimitedPix
+          ? 'Se nao gostar, entre em contato com o suporte dentro de 20 dias. O reembolso aprovado sera processado imediatamente no gateway.'
+          : ['trial-30-dias', 'pro-unlimited'].includes(plan)
           ? 'Assim que a ativacao for processada, o login e a senha temporaria serao enviados para o email informado antes do checkout.'
           : 'Assim que o pagamento for confirmado pelo Asaas, o login e a senha temporaria serao enviados para o email informado antes do checkout.'
       },

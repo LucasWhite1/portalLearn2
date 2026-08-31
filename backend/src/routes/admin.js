@@ -17,7 +17,8 @@ const {
   proposeSlideActions,
   testAiConnection,
   generateBackgroundMaskWithNanoBanana,
-  compareImagesWithNanoBanana
+  compareImagesWithNanoBanana,
+  reviewRenderedSlideVisual
 } = require('../aiProvider');
 const {
   cleanHistory,
@@ -1288,7 +1289,8 @@ const DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-pro';
 
 const ADMIN_AI_SETTINGS_SELECT = `SELECT admin_user_id, provider_key, provider_label, base_url, model, encrypted_api_key,
         system_prompt, require_confirmation, is_enabled, updated_at,
-        image_provider_key, image_provider_label, image_base_url, image_model, image_encrypted_api_key, image_is_enabled
+        image_provider_key, image_provider_label, image_base_url, image_model, image_encrypted_api_key, image_is_enabled,
+        vision_model, vision_is_enabled, vision_max_corrections
    FROM admin_ai_settings`;
 
 const ensureAdminAiImageColumns = async () => {
@@ -1318,6 +1320,18 @@ const ensureAdminAiImageColumns = async () => {
   await db.query(
     `ALTER TABLE admin_ai_settings
        ADD COLUMN IF NOT EXISTS image_is_enabled BOOLEAN NOT NULL DEFAULT FALSE`
+  );
+  await db.query(
+    `ALTER TABLE admin_ai_settings
+       ADD COLUMN IF NOT EXISTS vision_model TEXT NOT NULL DEFAULT 'deepseek-v4-flash-vision-exp'`
+  );
+  await db.query(
+    `ALTER TABLE admin_ai_settings
+       ADD COLUMN IF NOT EXISTS vision_is_enabled BOOLEAN NOT NULL DEFAULT FALSE`
+  );
+  await db.query(
+    `ALTER TABLE admin_ai_settings
+       ADD COLUMN IF NOT EXISTS vision_max_corrections SMALLINT NOT NULL DEFAULT 1`
   );
   await db.query(
     `UPDATE admin_ai_settings
@@ -3357,6 +3371,9 @@ router.put('/ai-settings', async (req, res) => {
     imageModel,
     imageApiKey,
     imageEnabled,
+    visionModel,
+    visionEnabled,
+    visionMaxCorrections,
     aiCreditCostPerCall,
     aiTextCreditCostPerCall,
     aiImageCreditCostPerCall,
@@ -3380,6 +3397,12 @@ router.put('/ai-settings', async (req, res) => {
   const cleanImageModel = String(imageModel || 'gemini-2.5-flash-image').trim() || 'gemini-2.5-flash-image';
   const cleanImageProviderKey = String(imageProviderKey || 'google-gemini-image').trim() || 'google-gemini-image';
   const cleanImageProviderLabel = String(imageProviderLabel || 'Nano Banana').trim() || 'Nano Banana';
+  const cleanVisionModel = String(visionModel || 'deepseek-v4-flash-vision-exp').trim() || 'deepseek-v4-flash-vision-exp';
+  const requestedVisionMaxCorrections = Number.parseInt(visionMaxCorrections, 10);
+  const cleanVisionMaxCorrections = Math.max(
+    0,
+    Math.min(2, Number.isFinite(requestedVisionMaxCorrections) ? requestedVisionMaxCorrections : 1)
+  );
   const currentCosts = await getCreditCosts();
   const cleanAiCreditCostPerCall = parsePlatformCreditCostInput(aiTextCreditCostPerCall ?? aiCreditCostPerCall) ?? currentCosts.text;
   const cleanImageAiCreditCostPerCall = parsePlatformCreditCostInput(aiImageCreditCostPerCall) ?? currentCosts.image;
@@ -3407,9 +3430,10 @@ router.put('/ai-settings', async (req, res) => {
     `INSERT INTO admin_ai_settings (
        admin_user_id, provider_key, provider_label, base_url, model, encrypted_api_key,
        system_prompt, require_confirmation, is_enabled, updated_at,
-       image_provider_key, image_provider_label, image_base_url, image_model, image_encrypted_api_key, image_is_enabled
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), $10, $11, $12, $13, $14, $15)
+       image_provider_key, image_provider_label, image_base_url, image_model, image_encrypted_api_key, image_is_enabled,
+       vision_model, vision_is_enabled, vision_max_corrections
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), $10, $11, $12, $13, $14, $15, $16, $17, $18)
       ON CONFLICT (admin_user_id)
       DO UPDATE SET
        provider_key = EXCLUDED.provider_key,
@@ -3424,8 +3448,11 @@ router.put('/ai-settings', async (req, res) => {
        image_provider_label = EXCLUDED.image_provider_label,
        image_base_url = EXCLUDED.image_base_url,
        image_model = EXCLUDED.image_model,
-       image_encrypted_api_key = EXCLUDED.image_encrypted_api_key,
-       image_is_enabled = EXCLUDED.image_is_enabled,
+        image_encrypted_api_key = EXCLUDED.image_encrypted_api_key,
+        image_is_enabled = EXCLUDED.image_is_enabled,
+        vision_model = EXCLUDED.vision_model,
+        vision_is_enabled = EXCLUDED.vision_is_enabled,
+        vision_max_corrections = EXCLUDED.vision_max_corrections,
        updated_at = NOW()`,
     [
       req.user.id,
@@ -3442,7 +3469,10 @@ router.put('/ai-settings', async (req, res) => {
       cleanImageBaseUrl,
       cleanImageModel,
       encryptedImageApiKey,
-      imageEnabled !== false
+       imageEnabled !== false,
+       cleanVisionModel,
+       visionEnabled === true,
+       cleanVisionMaxCorrections
     ]
   );
 
@@ -3578,6 +3608,8 @@ router.post('/ai/slide-actions', aiRequestRateLimiter, async (req, res) => {
   const attachments = Array.isArray(req.body?.attachments) ? req.body.attachments : [];
   const executionPlan = req.body?.executionPlan && typeof req.body.executionPlan === 'object' ? req.body.executionPlan : null;
   const currentPlanItem = req.body?.currentPlanItem && typeof req.body.currentPlanItem === 'object' ? req.body.currentPlanItem : null;
+  const slideMemory = Array.isArray(req.body?.slideMemory) ? req.body.slideMemory.slice(-4) : [];
+  const visualReview = req.body?.visualReview && typeof req.body.visualReview === 'object' ? req.body.visualReview : null;
   if (!request) {
     return res.status(400).json({ message: 'Descreva o que a IA deve fazer.' });
   }
@@ -3607,7 +3639,9 @@ router.post('/ai/slide-actions', aiRequestRateLimiter, async (req, res) => {
       stageSize: stageSize || null,
       attachments: Array.isArray(attachments) ? attachments : [],
       executionPlan,
-      currentPlanItem
+      currentPlanItem,
+      slideMemory,
+      visualReview
     });
     const generatedImageCount = countGeneratedImageCharges(actions);
     if (generatedImageCount > 0) {
@@ -3620,9 +3654,25 @@ router.post('/ai/slide-actions', aiRequestRateLimiter, async (req, res) => {
       actions,
       requireConfirmation: settingsRow.require_confirmation !== false,
       providerLabel: settingsRow.provider_label,
+      visualReviewEnabled: settingsRow.vision_is_enabled === true,
+      visualReviewMaxCorrections: Math.max(
+        0,
+        Math.min(2, Number.isFinite(Number(settingsRow.vision_max_corrections)) ? Number(settingsRow.vision_max_corrections) : 1)
+      ),
       platformCreditsRemaining: imageCreditCharge?.remainingCredits ?? creditCharge?.remainingCredits ?? null
     });
   } catch (error) {
+    console.error('Falha na geracao de slide pela IA', {
+      slideOrder: Number(currentPlanItem?.order) || null,
+      slideTitle: sanitizeText(currentPlanItem?.title || '', 120) || null,
+      targetSlideId: sanitizeText(currentPlanItem?.targetSlideId || currentPlanItem?.id || '', 120) || null,
+      correctionMode: visualReview?.needsCorrection === true,
+      code: error?.code || null,
+      message: error?.message || 'Erro desconhecido',
+      issues: Array.isArray(error?.issues)
+        ? error.issues.slice(0, 10).map((issue) => ({ code: issue?.code || null, message: issue?.message || null }))
+        : []
+    });
     if (imageCreditCharge?.charged) {
       await imageCreditCharge.refund();
     }
@@ -3631,6 +3681,51 @@ router.post('/ai/slide-actions', aiRequestRateLimiter, async (req, res) => {
     }
     res.status(error?.statusCode || 400).json({
       message: error.message || 'A IA nÃ£o conseguiu propor aÃ§Ãµes vÃ¡lidas.',
+      code: error?.code || null,
+      platformCreditsRemaining: error?.platformCredits ?? error?.creditStatus?.platformCredits ?? null
+    });
+  }
+});
+
+router.post('/ai/slide-actions/visual-review', aiRequestRateLimiter, async (req, res) => {
+  await ensureAdminAiImageColumns();
+  const slides = sanitizeBuilderData({ slides: Array.isArray(req.body?.slides) ? req.body.slides : [] }).slides || [];
+  const activeSlideId = sanitizeText(req.body?.activeSlideId || '', 120);
+  const stageSize = req.body?.stageSize && typeof req.body.stageSize === 'object' ? req.body.stageSize : null;
+  const executionPlan = req.body?.executionPlan && typeof req.body.executionPlan === 'object' ? req.body.executionPlan : null;
+  const currentPlanItem = req.body?.currentPlanItem && typeof req.body.currentPlanItem === 'object' ? req.body.currentPlanItem : null;
+  const renderDataUrl = String(req.body?.renderDataUrl || '').trim();
+  const slideId = sanitizeText(req.body?.slideId || currentPlanItem?.targetSlideId || activeSlideId || '', 120);
+  const { rows } = await loadEffectiveAiSettings(req);
+  const settingsRow = rows[0];
+  if (!settingsRow?.is_enabled) {
+    return res.status(400).json({ message: 'A integraÃ§Ã£o de IA deste admin nÃ£o estÃ¡ configurada ou ativa.' });
+  }
+  if (settingsRow.vision_is_enabled !== true) {
+    return res.json({ enabled: false, approved: true, needsCorrection: false, issues: [] });
+  }
+  const slide = slides.find((entry) => entry?.id === slideId) || slides.find((entry) => entry?.id === activeSlideId) || null;
+  if (!slide) {
+    return res.status(400).json({ message: 'Slide alvo nao encontrado para revisao visual.' });
+  }
+  let creditCharge = null;
+  try {
+    creditCharge = await consumeProfessorAiCredit(req, 'a revisao visual de um slide');
+    const review = await reviewRenderedSlideVisual({
+      settingsRow,
+      renderDataUrl,
+      slide,
+      currentPlanItem,
+      executionPlan,
+      stageSize
+    });
+    res.json({ ...review, platformCreditsRemaining: creditCharge?.remainingCredits ?? null });
+  } catch (error) {
+    if (creditCharge?.charged) {
+      await creditCharge.refund();
+    }
+    res.status(error?.statusCode || 400).json({
+      message: error.message || 'Nao foi possivel revisar visualmente o slide.',
       code: error?.code || null,
       platformCreditsRemaining: error?.platformCredits ?? error?.creditStatus?.platformCredits ?? null
     });

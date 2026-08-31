@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Administração | Portal do Curso</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=20260831-2" />
 </head>
 <body class="admin-page">
   <button type="button" class="mobile-sidenav-toggle" id="mobileSidenavToggle" aria-controls="mobileSidenav" aria-expanded="false">
@@ -25,6 +25,7 @@
         <li id="globalStudentFinanceNavItem"><button type="button" class="nav-link" data-target="globalStudentFinanceSection">Financeiro geral</button></li>
         <li><button type="button" class="nav-link" data-target="adminProfessorsSection">Professores</button></li>
         <li><button type="button" class="nav-link" data-target="adminReportsSection">Relatórios</button></li>
+        <li id="siteAnalyticsNavItem"><button type="button" class="nav-link" data-target="siteAnalyticsSection">Trackeamento</button></li>
         <li><button type="button" class="nav-link" data-target="adminCoursesSection">Cursos</button></li>
         <li><button type="button" class="nav-link" data-target="adminChatsSection">Chats</button></li>
         <li><button type="button" class="nav-link" data-target="adminNotificationsSection">Notificações</button></li>
@@ -62,6 +63,7 @@
         <div class="subscription-access-actions">
           <button class="primary-btn" id="subscriptionPayPix" type="button">Pagar próximo mês com Pix</button>
           <button class="secondary-btn" id="subscriptionPayCard" type="button">Pagar com cartão</button>
+          <button class="secondary-btn hidden" id="subscriptionCancel" type="button">Cancelar assinatura</button>
           <small id="subscriptionPaymentFeedback"></small>
         </div>
       </section>
@@ -322,6 +324,129 @@
           <div class="global-professor-finance-list" id="globalProfessorStudentFinanceList">
             <p class="financial-empty-state">Carregando financeiro dos alunos...</p>
           </div>
+        </div>
+
+        <div class="panel analytics-dashboard" id="siteAnalyticsSection" data-section="siteAnalyticsSection">
+          <div class="analytics-heading">
+            <div>
+              <span class="badge">ANALYTICS DO SITE</span>
+              <h2>Trackeamento de visitantes</h2>
+              <p>Entenda de onde as pessoas chegam, como navegam e quais caminhos levam ao checkout e à compra.</p>
+            </div>
+            <div class="analytics-heading-status">
+              <span class="analytics-live-dot" aria-hidden="true"></span>
+              <small id="analyticsUpdatedAt">Aguardando atualização</small>
+            </div>
+          </div>
+
+          <div class="analytics-toolbar" aria-label="Filtros do trackeamento">
+            <label>
+              <span>Período</span>
+              <select id="analyticsDays">
+                <option value="7">Últimos 7 dias</option>
+                <option value="30" selected>Últimos 30 dias</option>
+                <option value="90">Últimos 90 dias</option>
+                <option value="180">Últimos 6 meses</option>
+                <option value="365">Último ano</option>
+              </select>
+            </label>
+            <label>
+              <span>Origem</span>
+              <select id="analyticsSource"><option value="">Todas as origens</option></select>
+            </label>
+            <label>
+              <span>Dispositivo</span>
+              <select id="analyticsDevice">
+                <option value="">Todos</option>
+                <option value="desktop">Computador</option>
+                <option value="mobile">Celular</option>
+                <option value="tablet">Tablet</option>
+              </select>
+            </label>
+            <label>
+              <span>Página</span>
+              <select id="analyticsPage"><option value="">Todas as páginas</option></select>
+            </label>
+            <label class="analytics-search-field">
+              <span>Buscar jornada ou campanha</span>
+              <input id="analyticsSearch" type="search" placeholder="ID, origem ou campanha" />
+            </label>
+            <button class="secondary-btn" id="analyticsRefreshBtn" type="button">Atualizar</button>
+          </div>
+
+          <div class="analytics-metrics" id="analyticsMetrics">
+            <div><span>Visitantes</span><strong id="analyticsVisitors">0</strong><small>Pessoas anônimas únicas</small></div>
+            <div><span>Sessões</span><strong id="analyticsSessions">0</strong><small>Visitas no período</small></div>
+            <div><span>Visualizações</span><strong id="analyticsPageviews">0</strong><small>Páginas abertas</small></div>
+            <div><span>Tempo médio</span><strong id="analyticsAvgDuration">0s</strong><small>Por sessão</small></div>
+            <div><span>Engajamento</span><strong id="analyticsEngagement">0%</strong><small>Sessões ativas</small></div>
+            <div><span>Rejeição</span><strong id="analyticsBounce">0%</strong><small>Saída rápida</small></div>
+            <div><span>Checkouts</span><strong id="analyticsCheckouts">0</strong><small>Inícios de pagamento</small></div>
+            <div><span>Compras</span><strong id="analyticsPurchases">0</strong><small>Conversões detectadas</small></div>
+          </div>
+
+          <section class="analytics-video-band" aria-labelledby="analyticsVideoTitle">
+            <div class="analytics-section-title">
+              <div><h3 id="analyticsVideoTitle">Vídeo de demonstração</h3><p>Veja se a demonstração está convencendo antes da pessoa chegar ao checkout.</p></div>
+            </div>
+            <div class="analytics-video-metrics">
+              <div><span>Visualizações</span><strong id="analyticsVideoImpressions">0</strong><small>Vídeo visível na tela</small></div>
+              <div><span>Reproduções</span><strong id="analyticsVideoStarts">0</strong><small>Pessoas que deram play</small></div>
+              <div><span>Tempo assistido</span><strong id="analyticsVideoAvgWatched">0s</strong><small>Média por reprodução</small></div>
+              <div><span>Conclusão</span><strong id="analyticsVideoCompletionRate">0%</strong><small>Chegaram ao fim</small></div>
+            </div>
+          </section>
+
+          <section class="analytics-overview-band" aria-labelledby="analyticsTrendTitle">
+            <div class="analytics-section-title">
+              <div><h3 id="analyticsTrendTitle">Tráfego ao longo do tempo</h3><p>Compare sessões, visitantes e visualizações por dia.</p></div>
+              <div class="analytics-legend"><span data-series="sessions">Sessões</span><span data-series="visitors">Visitantes</span><span data-series="pageviews">Visualizações</span></div>
+            </div>
+            <div class="analytics-trend" id="analyticsTrend"><p class="analytics-empty">Ainda não há dados para este período.</p></div>
+          </section>
+
+          <section class="analytics-funnel-band" aria-labelledby="analyticsFunnelTitle">
+            <div class="analytics-section-title">
+              <div><h3 id="analyticsFunnelTitle">Funil da campanha</h3><p>Do acesso ao site até a compra confirmada.</p></div>
+            </div>
+            <div class="analytics-funnel" id="analyticsFunnel"></div>
+          </section>
+
+          <div class="analytics-report-grid">
+            <section>
+              <div class="analytics-section-title"><div><h3>Páginas mais acessadas</h3><p>Conteúdos que mais recebem atenção.</p></div></div>
+              <div class="analytics-ranking" id="analyticsPagesRanking"></div>
+            </section>
+            <section>
+              <div class="analytics-section-title"><div><h3>Origens do tráfego</h3><p>UTM, referência ou acesso direto.</p></div></div>
+              <div class="analytics-ranking" id="analyticsSourcesRanking"></div>
+            </section>
+            <section>
+              <div class="analytics-section-title"><div><h3>Campanhas</h3><p>Sessões, checkouts e compras por UTM.</p></div></div>
+              <div class="analytics-ranking" id="analyticsCampaignsRanking"></div>
+            </section>
+            <section>
+              <div class="analytics-section-title"><div><h3>Tecnologia</h3><p>Dispositivos e navegadores usados.</p></div></div>
+              <div class="analytics-technology-grid">
+                <div><strong>Dispositivos</strong><div class="analytics-ranking" id="analyticsDevicesRanking"></div></div>
+                <div><strong>Navegadores</strong><div class="analytics-ranking" id="analyticsBrowsersRanking"></div></div>
+              </div>
+            </section>
+          </div>
+
+          <section class="analytics-sessions-band" aria-labelledby="analyticsSessionsTitle">
+            <div class="analytics-section-title">
+              <div><h3 id="analyticsSessionsTitle">Jornadas recentes</h3><p>Cada linha representa uma visita. Abra para ver cliques, rolagem e páginas em ordem.</p></div>
+              <strong id="analyticsSessionCount">0 jornadas</strong>
+            </div>
+            <div class="table-wrapper analytics-table-wrap">
+              <table class="table admin-responsive-table analytics-sessions-table">
+                <thead><tr><th>Visitante</th><th>Início</th><th>Origem / campanha</th><th>Tecnologia</th><th>Comportamento</th><th>Resultado</th><th>Ação</th></tr></thead>
+                <tbody id="analyticsSessionsBody"><tr><td colspan="7">Carregando trackeamento...</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+          <p class="analytics-privacy-note">Privacidade: não são armazenados campos digitados, senha, CPF ou dados de cartão. O IP é convertido em identificador irreversível e o visitante pode recusar a análise.</p>
         </div>
 
         <div class="panel" id="adminNotificationsSection" data-section="adminNotificationsSection">
@@ -794,6 +919,15 @@
               <input id="aiApiKey" type="password" placeholder="Cole aqui a chave da API" />
             </div>
             <div class="field-group">
+              <label for="aiVisionModel">Modelo de revisão visual</label>
+              <input id="aiVisionModel" value="deepseek-v4-flash-vision-exp" placeholder="deepseek-v4-flash-vision-exp" />
+              <small style="color:#8b92b1;">Usa a mesma chave do provedor de texto. O PNG do palco vai somente para este modelo visual.</small>
+            </div>
+            <div class="field-group">
+              <label for="aiVisionMaxCorrections">Máximo de correções visuais por slide</label>
+              <input id="aiVisionMaxCorrections" type="number" min="0" max="2" step="1" value="1" />
+            </div>
+            <div class="field-group">
               <label for="aiImageProviderLabel">Nome do provedor de imagem</label>
               <input id="aiImageProviderLabel" value="Nano Banana" placeholder="Ex: Nano Banana" />
             </div>
@@ -825,6 +959,9 @@
             </div>
             <div class="field-group">
               <label><input id="aiImageEnabled" type="checkbox" checked /> Nano Banana ativa para gerar imagens</label>
+            </div>
+            <div class="field-group">
+              <label><input id="aiVisionEnabled" type="checkbox" /> Revisão visual multimodal ativa</label>
             </div>
             <div class="form-actions" style="display:flex; gap:0.5rem; flex-wrap:wrap;">
               <button class="primary-btn" type="submit">Salvar integracao</button>
@@ -949,6 +1086,21 @@
       </div>
     </div>
   </div>
+  <div id="analyticsJourneyModal" class="admin-report-modal hidden" aria-hidden="true">
+    <div class="admin-report-modal-backdrop" data-analytics-close="true"></div>
+    <div class="admin-report-modal-card analytics-journey-modal" role="dialog" aria-modal="true" aria-labelledby="analyticsJourneyTitle">
+      <div class="admin-report-modal-head">
+        <div>
+          <p class="badge">JORNADA DO VISITANTE</p>
+          <h3 id="analyticsJourneyTitle">Detalhes da sessão</h3>
+          <p id="analyticsJourneySubtitle">Carregando eventos...</p>
+        </div>
+        <button class="secondary-btn small" type="button" data-analytics-close="true">Fechar</button>
+      </div>
+      <div class="analytics-journey-summary" id="analyticsJourneySummary"></div>
+      <div class="analytics-journey-timeline" id="analyticsJourneyTimeline"></div>
+    </div>
+  </div>
   <div id="progressTimelineModal" class="admin-report-modal hidden" aria-hidden="true">
     <div class="admin-report-modal-backdrop" data-progress-modal-close="true"></div>
     <div class="admin-report-modal-card" role="dialog" aria-modal="true" aria-labelledby="progressTimelineTitle">
@@ -1006,6 +1158,6 @@
       </div>
     </div>
   </div>
-  <script src="script.js" type="module"></script>
+  <script src="script.js?v=20260831-2" type="module"></script>
 </body>
 </html>

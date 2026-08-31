@@ -8,6 +8,7 @@ const { processCreditTopupWebhook } = require('../creditTopups');
 const { processStudentSeatUpgradeWebhook } = require('../studentSeatUpgrades');
 const { applyCreditChange, ensurePlatformCreditTables } = require('../platformCredits');
 const { sendMetaPurchaseEvent } = require('../metaConversions');
+const { recordPurchaseEvent } = require('../siteAnalytics');
 const { requireAuth } = require('../middleware/auth');
 const {
   PAYMENT_FAILURE_EVENTS,
@@ -21,7 +22,8 @@ const {
   sanitizeEmail,
   sanitizePhone,
   createRateLimiter,
-  assertSafeRemoteUrl
+  assertSafeRemoteUrl,
+  isUuid
 } = require('../security');
 
 const router = express.Router();
@@ -35,13 +37,14 @@ const checkoutRateLimiter = createRateLimiter({
 const ASAAS_SANDBOX_URL = 'https://api-sandbox.asaas.com/v3';
 const ASAAS_PRODUCTION_URL = 'https://api.asaas.com/v3';
 const TRIAL_DAYS = Number.parseInt(process.env.ASAAS_TRIAL_DAYS || '30', 10) || 30;
+const PRO_UNLIMITED_TRIAL_DAYS = Number.parseInt(process.env.ASAAS_PRO_UNLIMITED_TRIAL_DAYS || '20', 10) || 20;
 const PRO_MONTHLY_PRICE = Number.parseFloat(process.env.ASAAS_PRO_MONTHLY_PRICE || '97.90');
 const INCLUDED_STUDENT_LIMIT = Number.parseInt(process.env.ASAAS_INCLUDED_STUDENT_LIMIT || '15', 10) || 15;
 const EXTRA_STUDENT_MONTHLY_PRICE = Number.parseFloat(process.env.ASAAS_EXTRA_STUDENT_MONTHLY_PRICE || '9.70');
 const PRO_PLATFORM_CREDITS = Number.parseFloat(process.env.ASAAS_PRO_PLATFORM_CREDITS || process.env.ASAAS_PRO_AI_CREDITS || '100');
 const TRIAL_PLATFORM_CREDITS = Number.parseFloat(process.env.ASAAS_TRIAL_PLATFORM_CREDITS || process.env.ASAAS_TRIAL_AI_CREDITS || '10');
 const APP_NAME = sanitizeText(process.env.ASAAS_APP_NAME || 'Criatyve/1.0', 120) || 'Criatyve/1.0';
-const LEGAL_TERMS_VERSION = '2026-07-28';
+const LEGAL_TERMS_VERSION = '2026-08-28';
 const ASAAS_API_KEY = sanitizeText(process.env.ASAAS_API_KEY || '', 255);
 const ASAAS_WEBHOOK_AUTH_TOKEN = sanitizeText(process.env.ASAAS_WEBHOOK_AUTH_TOKEN || '', 255);
 const ASAAS_ENV = String(process.env.ASAAS_ENV || 'sandbox').toLowerCase() === 'production'
@@ -165,9 +168,9 @@ const PLANS = {
     id: 'pro-unlimited',
     label: 'Criatyve Pro Ilimitado',
     price: Number.isFinite(PRO_MONTHLY_PRICE) ? PRO_MONTHLY_PRICE : 97.90,
-    description: 'Assinatura mensal Criatyve Pro com alunos ilimitados, 1 GB e 100 creditos de IA',
-    nextDueDate: () => formatDateOnly(new Date()),
-    trialDays: 0,
+    description: `Assinatura mensal Criatyve Pro com ${PRO_UNLIMITED_TRIAL_DAYS} dias gratis, alunos ilimitados, 1 GB e 100 creditos de IA`,
+    nextDueDate: () => formatDateOnly(addDaysToDate(new Date(), PRO_UNLIMITED_TRIAL_DAYS)),
+    trialDays: PRO_UNLIMITED_TRIAL_DAYS,
     billingTypes: PRO_BILLING_TYPES,
     studentLimit: 0,
     unlimitedStudents: true,
@@ -241,7 +244,7 @@ const buildPlanPurchase = ({ plan, requestedStudentLimit, existingStudentLimit =
 const resolveCheckoutPaymentMode = (plan, requestedBillingType) => {
   const requested = sanitizeText(requestedBillingType || '', 30).toUpperCase();
   const configuredBillingTypes = Array.isArray(plan?.billingTypes) ? plan.billingTypes : ['CREDIT_CARD'];
-  if (plan?.trialDays === 0 && requested === 'PIX' && configuredBillingTypes.includes('PIX')) {
+  if (requested === 'PIX' && configuredBillingTypes.includes('PIX')) {
     return {
       billingTypes: ['PIX'],
       chargeTypes: ['DETACHED'],
@@ -258,6 +261,31 @@ const resolveCheckoutPaymentMode = (plan, requestedBillingType) => {
       cycle: 'MONTHLY',
       nextDueDate: plan.nextDueDate()
     }
+  };
+};
+
+const getRenewalPlanConfig = (plan) => ({
+  ...plan,
+  trialDays: 0,
+  nextDueDate: () => formatDateOnly(new Date()),
+  billingTypes: PRO_BILLING_TYPES
+});
+
+const buildTrialAccessWindow = (subscription, plan, now = new Date()) => {
+  const trialDays = Math.max(1, Number.parseInt(String(plan?.trialDays || 0), 10) || 0);
+  const periodReference = sanitizeText(
+    subscription?.provider_subscription_id || subscription?.checkout_external_reference || subscription?.id || '',
+    180
+  );
+  if (!periodReference || trialDays <= 0) {
+    throw new Error('Nao foi possivel identificar o periodo gratuito desta assinatura.');
+  }
+  return {
+    providerPaymentId: `trial:${periodReference}`,
+    accessStart: new Date(now),
+    accessExpires: addDaysToDate(now, trialDays),
+    eventType: 'TRIAL_STARTED',
+    paymentStatus: 'TRIALING'
   };
 };
 
@@ -286,6 +314,30 @@ const findExistingProfessorBillingLimit = async (email) => {
     [normalizedEmail]
   );
   return Number.isFinite(Number(rows[0]?.student_limit)) ? Number(rows[0].student_limit) : 0;
+};
+
+const hasPreviouslyActivatedPlanTrial = async (email, plan) => {
+  const normalizedEmail = sanitizeEmail(email || '');
+  if (!normalizedEmail || Number(plan?.trialDays || 0) <= 0) return false;
+  await ensureBillingTables();
+  const { rows } = await db.query(
+    `SELECT EXISTS (
+       SELECT 1
+         FROM billing_subscriptions
+        WHERE LOWER(payer_email) = LOWER($1)
+          AND plan_code = $2
+          AND (activated_at IS NOT NULL OR user_id IS NOT NULL)
+       UNION ALL
+       SELECT 1
+         FROM users
+        WHERE LOWER(email) = LOWER($1)
+          AND role = 'professor'
+          AND billing_access_managed = TRUE
+          AND subscription_plan_code = $2
+     ) AS used_trial`,
+    [normalizedEmail, plan.id]
+  );
+  return rows[0]?.used_trial === true;
 };
 
 const buildCheckoutUrl = (checkoutResponse) => {
@@ -485,6 +537,8 @@ const ensureBillingTables = async () => {
   await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ');
   await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS terms_version TEXT');
   await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS marketing_consent_at TIMESTAMPTZ');
+  await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS analytics_visitor_id UUID');
+  await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS analytics_session_id UUID');
   await ensureBillingAccessSchema();
   await db.query(`
     WITH latest_subscription AS (
@@ -569,8 +623,9 @@ const sendProfessorAccessEmail = async ({ fullName, email, temporaryPassword, pl
   });
 
   const loginUrl = `${PUBLIC_APP_URL || 'http://localhost:4000'}/login.html`;
-  const subject = planCode === 'trial-30-dias'
-    ? 'Seu acesso de teste na Criatyve foi liberado'
+  const plan = getPlanConfig(planCode);
+  const subject = plan.trialDays > 0
+    ? `Seus ${plan.trialDays} dias gratis na Criatyve foram liberados`
     : 'Seu acesso na Criatyve foi liberado';
 
   await transporter.sendMail({
@@ -603,6 +658,8 @@ const persistCheckoutLead = async ({
   studentLimit,
   termsAccepted,
   marketingConsent,
+  analyticsVisitorId,
+  analyticsSessionId,
   checkoutResponse
 }) => {
   await ensureBillingTables();
@@ -619,11 +676,13 @@ const persistCheckoutLead = async ({
         terms_accepted_at,
         terms_version,
         marketing_consent_at,
+        analytics_visitor_id,
+        analytics_session_id,
         status,
         raw_payload,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'CHECKOUT_CREATED', $11, NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'CHECKOUT_CREATED', $13, NOW())
     `,
     [
       'asaas',
@@ -636,6 +695,8 @@ const persistCheckoutLead = async ({
       termsAccepted ? new Date() : null,
       termsAccepted ? LEGAL_TERMS_VERSION : null,
       marketingConsent === false ? null : new Date(),
+      isUuid(analyticsVisitorId) ? analyticsVisitorId : null,
+      isUuid(analyticsSessionId) ? analyticsSessionId : null,
       checkoutResponse || null
     ]
   );
@@ -791,7 +852,7 @@ const upsertBillingSubscriptionRecord = async (client, eventType, payment, custo
   return rows[0];
 };
 
-const activateProfessorFromSubscription = async (client, subscription) => {
+const activateProfessorFromSubscription = async (client, subscription, { trialActivation = false } = {}) => {
   const email = sanitizeEmail(subscription?.payer_email || '');
   if (!email) {
     throw new Error('Nao foi possivel ativar o professor porque o email do pagador nao foi encontrado.');
@@ -892,7 +953,7 @@ const activateProfessorFromSubscription = async (client, subscription) => {
   let paymentPeriodCreated = false;
   if (professor.role === 'professor') {
     const providerPaymentId = sanitizeText(subscription?.provider_payment_id || '', 80);
-    if (!providerPaymentId) {
+    if (!providerPaymentId && !trialActivation) {
       throw new Error('A cobranca confirmada nao possui identificador para liberar o periodo de acesso.');
     }
     const { rows: lockedUsers } = await client.query(
@@ -904,10 +965,16 @@ const activateProfessorFromSubscription = async (client, subscription) => {
     );
     const now = new Date();
     const currentExpiration = lockedUsers[0]?.subscription_access_expires_at || null;
-    const nextExpiration = calculateNextAccessExpiration(currentExpiration, now);
-    const accessStart = currentExpiration && new Date(currentExpiration) > now
-      ? new Date(currentExpiration)
-      : now;
+    const trialWindow = trialActivation ? buildTrialAccessWindow(subscription, plan, now) : null;
+    const nextExpiration = trialWindow?.accessExpires || calculateNextAccessExpiration(currentExpiration, now);
+    const accessStart = trialWindow?.accessStart || (
+      currentExpiration && new Date(currentExpiration) > now
+        ? new Date(currentExpiration)
+        : now
+    );
+    const periodPaymentId = trialWindow?.providerPaymentId || providerPaymentId;
+    const accessEventType = trialWindow?.eventType || subscription.last_event_type || 'PAYMENT_CONFIRMED';
+    const paymentStatus = trialWindow?.paymentStatus || 'ACTIVE';
     const periodResult = await client.query(
       `INSERT INTO billing_payment_periods (
          provider_payment_id, user_id, billing_subscription_id,
@@ -916,7 +983,7 @@ const activateProfessorFromSubscription = async (client, subscription) => {
        VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (provider_payment_id) DO NOTHING
        RETURNING provider_payment_id`,
-      [providerPaymentId, professor.id, subscription.id, accessStart, nextExpiration, subscription.last_event_type || 'PAYMENT_CONFIRMED']
+      [periodPaymentId, professor.id, subscription.id, accessStart, nextExpiration, accessEventType]
     );
     paymentPeriodCreated = periodResult.rows.length > 0;
     const payment = subscription.raw_payload || {};
@@ -932,7 +999,7 @@ const activateProfessorFromSubscription = async (client, subscription) => {
               END,
               subscription_plan_code = $4,
               subscription_billing_type = COALESCE($5, subscription_billing_type),
-              subscription_payment_status = 'ACTIVE',
+              subscription_payment_status = $8,
               subscription_last_event_type = $6,
               subscription_payment_url = COALESCE($7, subscription_payment_url)
         WHERE id = $1`,
@@ -942,8 +1009,9 @@ const activateProfessorFromSubscription = async (client, subscription) => {
         nextExpiration,
         subscription.plan_code,
         billingType,
-        subscription.last_event_type || 'PAYMENT_CONFIRMED',
-        paymentUrl
+        accessEventType,
+        paymentUrl,
+        paymentStatus
       ]
     );
     professor.subscription_access_expires_at = periodResult.rows.length > 0
@@ -957,17 +1025,18 @@ const activateProfessorFromSubscription = async (client, subscription) => {
          SET user_id = $1,
              activated_at = COALESCE(activated_at, NOW()),
              deactivated_at = NULL,
-             status = 'ACTIVE',
+             status = $3,
              updated_at = NOW()
        WHERE id = $2
     `,
-    [professor.id, subscription.id]
+    [professor.id, subscription.id, trialActivation ? 'TRIALING' : 'ACTIVE']
   );
 
   return {
     professor,
     temporaryPassword,
-    paymentPeriodCreated
+    paymentPeriodCreated,
+    trialActivation
   };
 };
 
@@ -1003,8 +1072,15 @@ const updateProfessorPaymentIssue = async (client, subscription, nextStatus, { r
   );
 };
 
-const shouldActivateAccountForEvent = (eventType, planCode) => {
-  return ACTIVE_PAYMENT_EVENTS.has(eventType);
+const shouldActivateAccountForEvent = (eventType, planCode, payment = null) => {
+  const plan = getPlanConfig(planCode);
+  const billingType = sanitizeText(payment?.billingType || '', 30).toUpperCase();
+  const hasRecurringSubscription = Boolean(sanitizeText(payment?.subscription || '', 80));
+  const isCardTrialStart = plan.trialDays > 0
+    && eventType === 'PAYMENT_CREATED'
+    && billingType === 'CREDIT_CARD'
+    && hasRecurringSubscription;
+  return ACTIVE_PAYMENT_EVENTS.has(eventType) || isCardTrialStart;
 };
 
 const processAsaasWebhookEvent = async (eventPayload, requestMeta = {}) => {
@@ -1093,7 +1169,7 @@ const processAsaasWebhookEvent = async (eventPayload, requestMeta = {}) => {
   try {
     await client.query('BEGIN');
 
-    const isActivationEvent = shouldActivateAccountForEvent(eventType, eventPlanCode);
+    const isActivationEvent = shouldActivateAccountForEvent(eventType, eventPlanCode, payment);
     let verifiedPayment = payment;
     if (isActivationEvent) {
       verifiedPayment = await fetchAsaasPayment(payment.id);
@@ -1115,8 +1191,14 @@ const processAsaasWebhookEvent = async (eventPayload, requestMeta = {}) => {
     const subscription = await upsertBillingSubscriptionRecord(client, eventType, verifiedPayment, customerDetails);
     let activationResult = null;
 
-    if (shouldActivateAccountForEvent(eventType, subscription.plan_code)) {
-      activationResult = await activateProfessorFromSubscription(client, subscription);
+    if (shouldActivateAccountForEvent(eventType, subscription.plan_code, verifiedPayment)) {
+      const trialActivation = eventType === 'PAYMENT_CREATED'
+        && getPlanConfig(subscription.plan_code).trialDays > 0
+        && String(verifiedPayment.billingType || '').toUpperCase() === 'CREDIT_CARD'
+        && Boolean(verifiedPayment.subscription);
+      if (!trialActivation || !subscription.activated_at) {
+        activationResult = await activateProfessorFromSubscription(client, subscription, { trialActivation });
+      }
     } else if (ACCESS_REVOCATION_EVENTS.has(eventType)) {
       await updateProfessorPaymentIssue(client, subscription, eventType, { revokeAccess: true });
     } else if (PAYMENT_FAILURE_EVENTS.has(eventType) || PAYMENT_PENDING_EVENTS.has(eventType) || eventType === 'PAYMENT_DELETED') {
@@ -1146,7 +1228,15 @@ const processAsaasWebhookEvent = async (eventPayload, requestMeta = {}) => {
       });
     }
 
-    if (activationResult?.paymentPeriodCreated) {
+    if (activationResult?.paymentPeriodCreated && !activationResult?.trialActivation) {
+      await recordPurchaseEvent({
+        visitorId: subscription.analytics_visitor_id,
+        sessionId: subscription.analytics_session_id,
+        payment: verifiedPayment,
+        planCode: subscription.plan_code
+      }).catch((analyticsError) => {
+        console.error(`Erro ao registrar Purchase no analytics: ${analyticsError.message}`);
+      });
       try {
         const metaResult = await sendMetaPurchaseEvent({
           payment: verifiedPayment,
@@ -1219,6 +1309,10 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
     const message = 'Informe CPF/CNPJ, CEP, endereco, numero e bairro antes de iniciar o checkout.';
     return redirect ? res.status(400).send(message) : res.status(400).json({ message });
   }
+  if (await hasPreviouslyActivatedPlanTrial(email, plan)) {
+    const message = 'Este email ja utilizou o periodo gratuito desta oferta. Entre na sua conta para consultar ou renovar a assinatura.';
+    return redirect ? res.status(409).send(message) : res.status(409).json({ message, code: 'TRIAL_ALREADY_USED' });
+  }
   const existingStudentLimit = await findExistingProfessorBillingLimit(email);
   const purchase = buildPlanPurchase({
     plan,
@@ -1272,10 +1366,11 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
 
   if (isPublicCallbackUrl(publicBaseUrl)) {
     const callbackBase = `${publicBaseUrl}/checkout-status.html`;
+    const callbackPaymentType = paymentMode.billingTypes[0] || 'CREDIT_CARD';
     payload.callback = {
-      successUrl: `${callbackBase}?status=success&plan=${encodeURIComponent(plan.id)}&students=${encodeURIComponent(String(purchase.studentLimit))}`,
-      cancelUrl: `${callbackBase}?status=cancel&plan=${encodeURIComponent(plan.id)}&students=${encodeURIComponent(String(purchase.studentLimit))}`,
-      expiredUrl: `${callbackBase}?status=expired&plan=${encodeURIComponent(plan.id)}&students=${encodeURIComponent(String(purchase.studentLimit))}`
+      successUrl: `${callbackBase}?status=success&plan=${encodeURIComponent(plan.id)}&students=${encodeURIComponent(String(purchase.studentLimit))}&billingType=${encodeURIComponent(callbackPaymentType)}`,
+      cancelUrl: `${callbackBase}?status=cancel&plan=${encodeURIComponent(plan.id)}&students=${encodeURIComponent(String(purchase.studentLimit))}&billingType=${encodeURIComponent(callbackPaymentType)}`,
+      expiredUrl: `${callbackBase}?status=expired&plan=${encodeURIComponent(plan.id)}&students=${encodeURIComponent(String(purchase.studentLimit))}&billingType=${encodeURIComponent(callbackPaymentType)}`
     };
   }
 
@@ -1324,6 +1419,8 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
       unlimitedStudents: Boolean(purchase.unlimitedStudents),
       termsAccepted: true,
       marketingConsent: source?.marketingConsent !== false,
+      analyticsVisitorId: source?.analytics?.visitorId,
+      analyticsSessionId: source?.analytics?.sessionId,
       checkoutResponse: responseBody
     });
 
@@ -1369,7 +1466,8 @@ const normalizeAsaasPaymentUrl = (value) => {
 
 const describeBillingAccess = (access, user, subscription) => {
   const automaticRenewal = user.subscription_billing_type === 'CREDIT_CARD'
-    && Boolean(subscription?.provider_subscription_id);
+    && Boolean(subscription?.provider_subscription_id)
+    && !['CANCELED', 'INACTIVE', 'DELETED'].includes(String(subscription?.billing_status || '').toUpperCase());
   const descriptions = {
     PAYMENT_CREDIT_CARD_CAPTURE_REFUSED: 'O cartão não autorizou a cobrança. Isso pode acontecer por limite insuficiente, dados desatualizados ou bloqueio do banco.',
     PAYMENT_REPROVED_BY_RISK_ANALYSIS: 'O pagamento no cartão não foi aprovado pela análise de segurança. Tente novamente ou escolha Pix.',
@@ -1430,11 +1528,63 @@ router.get('/subscription/status', requireAuth, async (req, res) => {
     accessExpiresAt: access.expiration?.toISOString() || null,
     billingType: user.subscription_billing_type || null,
     paymentStatus: user.subscription_payment_status || null,
+    billingStatus: user.billing_status || null,
     lastEventType: user.subscription_last_event_type || null,
     paymentUrl: normalizeAsaasPaymentUrl(user.subscription_payment_url),
     automaticRenewal: details.automaticRenewal,
     message: details.message
   });
+});
+
+router.post('/subscription/cancel', requireAuth, checkoutRateLimiter, async (req, res) => {
+  await ensureBillingTables();
+  if (!ASAAS_API_KEY) return res.status(503).json({ message: 'O cancelamento ainda não foi configurado.' });
+  if (req.user.role !== 'professor') return res.status(403).json({ message: 'Cancelamento disponível apenas para professores.' });
+
+  const user = await loadProfessorSubscription(req.user.id);
+  if (!user?.billing_access_managed || !user.provider_subscription_id) {
+    return res.status(409).json({ message: 'Não foi encontrada uma assinatura automática ativa para cancelar.' });
+  }
+  if (['CANCELED', 'INACTIVE', 'DELETED'].includes(String(user.billing_status || '').toUpperCase())) {
+    return res.json({ canceled: true, accessExpiresAt: user.subscription_access_expires_at || null });
+  }
+
+  try {
+    const response = await fetch(`${ASAAS_BASE_URL}/subscriptions/${encodeURIComponent(user.provider_subscription_id)}`, {
+      method: 'DELETE',
+      headers: { accept: 'application/json', 'user-agent': APP_NAME, access_token: ASAAS_API_KEY }
+    });
+    if (!response.ok && response.status !== 404) {
+      const body = await response.json().catch(() => ({}));
+      const firstError = Array.isArray(body?.errors) ? body.errors[0] : null;
+      return res.status(response.status).json({
+        message: firstError?.description || 'Não foi possível cancelar a assinatura no Asaas.'
+      });
+    }
+
+    await db.query(
+      `UPDATE billing_subscriptions
+          SET status = 'CANCELED', deactivated_at = NOW(), updated_at = NOW()
+        WHERE id = $1`,
+      [user.billing_subscription_id]
+    );
+    await db.query(
+      `UPDATE users
+          SET subscription_payment_status = 'CANCELED',
+              subscription_last_event_type = 'SUBSCRIPTION_CANCELED',
+              subscription_payment_url = NULL
+        WHERE id = $1 AND role = 'professor'`,
+      [user.id]
+    );
+    return res.json({
+      canceled: true,
+      accessExpiresAt: user.subscription_access_expires_at || null,
+      message: 'Assinatura cancelada. Nenhuma nova cobrança automática será feita.'
+    });
+  } catch (error) {
+    console.error('Erro ao cancelar assinatura Asaas', error);
+    return res.status(502).json({ message: 'Falha ao conectar com o gateway para cancelar a assinatura.' });
+  }
 });
 
 router.post('/renewal-checkout', requireAuth, checkoutRateLimiter, async (req, res) => {
@@ -1479,7 +1629,7 @@ router.post('/renewal-checkout', requireAuth, checkoutRateLimiter, async (req, r
   const purchase = buildPlanPurchase({ plan, requestedStudentLimit: user.student_limit });
   if (Number.isFinite(Number(user.amount)) && Number(user.amount) > 0) purchase.amount = Number(user.amount);
   const externalReference = `checkout:${plan.id}:${crypto.randomUUID()}`;
-  const paymentMode = resolveCheckoutPaymentMode(plan, billingType);
+  const paymentMode = resolveCheckoutPaymentMode(getRenewalPlanConfig(plan), billingType);
   const publicBaseUrl = buildPublicBaseUrl(req);
   const callbackBase = `${publicBaseUrl}/checkout-status.html`;
   const callbackQuery = `plan=${encodeURIComponent(plan.id)}&renewal=1`;
@@ -1570,5 +1720,16 @@ router.post('/webhook/asaas', async (req, res) => {
     return res.status(500).json({ received: false, processingError: true });
   }
 });
+
+router.__test = {
+  PLANS,
+  buildTrialAccessWindow,
+  describeBillingAccess,
+  formatDateOnly,
+  getPlanConfig,
+  getRenewalPlanConfig,
+  resolveCheckoutPaymentMode,
+  shouldActivateAccountForEvent
+};
 
 module.exports = router;

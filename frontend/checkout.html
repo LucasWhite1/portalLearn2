@@ -8,7 +8,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
-  <script src="meta-pixel.js?v=20260817-1"></script>
+  <script src="analytics.js?v=20260831-1"></script>
+  <script src="meta-pixel.js?v=20260831-1"></script>
   <style>
     :root {
       color-scheme: dark;
@@ -61,6 +62,7 @@
       padding: 1.45rem;
       box-shadow: 0 28px 70px rgba(0,0,0,.28);
       backdrop-filter: blur(18px);
+      container-type: inline-size;
     }
     .kicker {
       display: inline-flex;
@@ -102,11 +104,14 @@
       margin-bottom: .35rem;
     }
     .summary-title {
-      display: flex;
-      justify-content: space-between;
-      gap: 1rem;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 1rem 1.25rem;
       align-items: flex-start;
       margin-bottom: 1.2rem;
+    }
+    .summary-title > div:first-child {
+      min-width: 0;
     }
     .summary-title h2 {
       margin: 0 0 .25rem;
@@ -118,13 +123,19 @@
       font-weight: 900;
       letter-spacing: -.06em;
       color: #fff;
-      white-space: nowrap;
+      min-width: 0;
+      max-width: 19rem;
+      text-align: right;
+      line-height: 1.08;
     }
     .price small {
+      display: block;
+      margin-top: .3rem;
       font-size: .92rem;
       color: rgba(236, 232, 248, .66);
       font-weight: 700;
       letter-spacing: normal;
+      line-height: 1.35;
     }
     .bullet-list {
       list-style: none;
@@ -278,6 +289,24 @@
     @media (max-width: 920px) {
       .grid { grid-template-columns: 1fr; }
     }
+    @media (max-width: 1080px) {
+      .summary-title {
+        grid-template-columns: 1fr;
+      }
+      .price {
+        max-width: none;
+        text-align: left;
+      }
+    }
+    @container (max-width: 440px) {
+      .summary-title {
+        grid-template-columns: 1fr;
+      }
+      .price {
+        max-width: none;
+        text-align: left;
+      }
+    }
     @media (max-width: 720px) {
       .shell {
         width: min(100vw - 1rem, 1120px);
@@ -289,9 +318,6 @@
       }
       .field-grid {
         grid-template-columns: 1fr;
-      }
-      .summary-title {
-        flex-direction: column;
       }
       .price {
         font-size: 1.85rem;
@@ -448,22 +474,24 @@
         footnote: 'Se o pagamento for concluído, o login e a senha temporária serão enviados para o e-mail informado aqui.'
       },
       'pro-unlimited': {
-        kicker: 'Oferta Pro Ilimitado',
-        heading: 'Assine o Criatyve Pro Ilimitado',
-        description: 'Crie aulas com IA e mantenha todos os seus alunos no portal sem pagar por vaga adicional.',
+        kicker: '20 dias sem risco',
+        heading: 'Comece com o Criatyve Pro Ilimitado',
+        description: 'Escolha cartão para não pagar nada agora ou Pix com pagamento imediato e garantia de reembolso por 20 dias.',
         planName: 'Criatyve Pro Ilimitado',
-        planSubtitle: 'Assinatura mensal, sem limite de alunos',
-        price: 'R$97,90 <small>/mês</small>',
+        planSubtitle: 'Condições diferentes para cartão e Pix',
+        price: 'R$0 <small>agora</small>',
         unlimitedStudents: true,
+        trialDays: 20,
+        allowsPixGuarantee: true,
         bullets: [
           'Alunos ilimitados no portal, sem cobrança por aluno ou compra de vagas.',
           '1 GB de armazenamento e 100 créditos de IA por mês.',
           'Editor completo, aulas interativas, quizzes, gatilhos e portal do aluno.',
-          'Garantia de 20 dias: reembolso de 100% da primeira mensalidade se você não gostar.',
-          'Cartão com renovação automática ou Pix para pagamento mensal avulso.'
+          'Cartão: R$0 agora e primeira cobrança somente após 20 dias.',
+          'Pix: pagamento de R$97,90 agora com reembolso integral solicitado ao suporte em até 20 dias.'
         ],
-        notice: 'Você pagará R$97,90 no checkout seguro do Asaas. Teste por até 20 dias e, se não gostar, solicite ao suporte o cancelamento e o reembolso de 100% da primeira mensalidade dentro desse prazo.',
-        footnote: 'Após a confirmação do pagamento, o login e a senha temporária serão enviados para o e-mail informado aqui.'
+        notice: 'O Asaas validará seu cartão agora, mas a primeira cobrança de R$97,90 será feita somente 20 dias depois. Cancelando antes do primeiro vencimento, nenhuma mensalidade será cobrada.',
+        footnote: 'Após a validação do cartão, o login e a senha temporária serão enviados para o e-mail informado aqui.'
       },
       'trial-30-dias': {
         kicker: 'Teste grátis',
@@ -512,9 +540,17 @@
       return basePrice + (extraStudents * extraStudentPrice);
     }
 
+    function isPixGuaranteeSelected() {
+      return Boolean(plan.allowsPixGuarantee && billingTypeSelect?.value === 'PIX');
+    }
+
     function syncStudentPricing() {
       if (plan.unlimitedStudents) {
-        document.getElementById('checkoutPrice').innerHTML = `${brl.format(basePrice)} <small>/mês</small>`;
+        document.getElementById('checkoutPrice').innerHTML = isPixGuaranteeSelected()
+          ? `${brl.format(basePrice)} <small>agora · garantia de ${plan.trialDays} dias</small>`
+          : plan.trialDays
+          ? `R$0 <small>agora · ${brl.format(basePrice)}/mês após ${plan.trialDays} dias</small>`
+          : `${brl.format(basePrice)} <small>/mês</small>`;
         if (studentInfo) studentInfo.textContent = 'Alunos ilimitados no portal, sem custo adicional por vaga.';
         return;
       }
@@ -540,6 +576,26 @@
       flash.classList.toggle('is-visible', Boolean(message));
     }
 
+    function getSubmitLabel() {
+      return isPixGuaranteeSelected()
+        ? `Pagar ${brl.format(basePrice)} com Pix`
+        : Number(plan.trialDays || 0) > 0
+        ? `Cadastrar cartão e começar ${plan.trialDays} dias grátis`
+        : 'Ir para o checkout seguro';
+    }
+
+    function syncPaymentOfferCopy() {
+      if (plan.allowsPixGuarantee && isPixGuaranteeSelected()) {
+        document.getElementById('checkoutNotice').textContent = `No Pix, ${brl.format(basePrice)} será cobrado agora. Você poderá usar a plataforma por até ${plan.trialDays} dias e solicitar ao suporte o reembolso integral dentro desse prazo.`;
+        document.getElementById('checkoutFootnote').textContent = 'O acesso será enviado após a confirmação do Pix. O suporte processará imediatamente o reembolso aprovado; o prazo para o saldo aparecer depende do banco do cliente.';
+      } else {
+        document.getElementById('checkoutNotice').textContent = plan.notice;
+        document.getElementById('checkoutFootnote').textContent = plan.footnote;
+      }
+      submitButton.textContent = getSubmitLabel();
+      syncStudentPricing();
+    }
+
     function applyPlanData() {
       document.getElementById('checkoutKicker').textContent = plan.kicker;
       document.getElementById('checkoutHeading').textContent = plan.heading;
@@ -549,6 +605,7 @@
       document.getElementById('checkoutPrice').innerHTML = plan.price;
       document.getElementById('checkoutNotice').textContent = plan.notice;
       document.getElementById('checkoutFootnote').textContent = plan.footnote;
+      submitButton.textContent = getSubmitLabel();
 
       const bulletList = document.getElementById('checkoutBulletList');
       bulletList.innerHTML = '';
@@ -567,14 +624,18 @@
       if (studentCountField) {
         studentCountField.hidden = Boolean(plan.unlimitedStudents);
       }
-      syncStudentPricing();
+      syncPaymentOfferCopy();
     }
 
     function syncPaymentHint() {
       if (!billingTypeHint || !billingTypeSelect) return;
       billingTypeHint.textContent = billingTypeSelect.value === 'PIX'
-        ? 'Pix libera o acesso depois da confirmação do pagamento pelo webhook. A renovação mensal não fica automática.'
-        : 'Cartão cria a assinatura mensal automática no Asaas.';
+        ? plan.allowsPixGuarantee
+          ? `O Pix de ${brl.format(basePrice)} é pago agora. Você pode solicitar reembolso integral ao suporte em até ${plan.trialDays} dias.`
+          : 'Pix libera o acesso depois da confirmação do pagamento pelo webhook. A renovação mensal não fica automática.'
+        : Number(plan.trialDays || 0) > 0
+          ? `O cartão fica salvo, nada é cobrado agora e a primeira cobrança acontece após ${plan.trialDays} dias.`
+          : 'Cartão cria a assinatura mensal automática no Asaas.';
     }
 
     document.getElementById('checkoutForm').addEventListener('submit', async (event) => {
@@ -600,6 +661,7 @@
         termsAccepted: formData.get('termsAccepted') === 'on',
         marketingConsent: formData.get('termsAccepted') === 'on'
       };
+      payload.analytics = window.CriatyveAnalytics?.getContext?.() || null;
       window.CriatyveMeta?.trackCustom('CheckoutFormSubmit', {
         plan: planKey,
         value: getCheckoutAmount(),
@@ -608,13 +670,13 @@
       });
       if (!payload.termsAccepted) {
         submitButton.disabled = false;
-        submitButton.textContent = 'Ir para o checkout seguro';
+        submitButton.textContent = getSubmitLabel();
         setFlash('Para continuar, aceite os Termos de Uso e Privacidade.');
         return;
       }
       if (!payload.email) {
         submitButton.disabled = false;
-        submitButton.textContent = 'Ir para o checkout seguro';
+        submitButton.textContent = getSubmitLabel();
         setFlash('Informe o e-mail que receberá o login e a senha de acesso.');
         return;
       }
@@ -635,7 +697,7 @@
         window.location.href = data.checkoutUrl;
       } catch (error) {
         submitButton.disabled = false;
-        submitButton.textContent = 'Ir para o checkout seguro';
+        submitButton.textContent = getSubmitLabel();
         const isNetworkError = error instanceof TypeError && /fetch/i.test(error.message || '');
         setFlash(isNetworkError
           ? `Não foi possível conectar ao servidor em ${API_ORIGIN}. Inicie o backend na porta 4000 e tente novamente.`
@@ -653,7 +715,10 @@
       currency: 'BRL'
     }, { onceKey: `checkout:${planKey}` });
     if (billingTypeSelect) {
-      billingTypeSelect.addEventListener('change', syncPaymentHint);
+      billingTypeSelect.addEventListener('change', () => {
+        syncPaymentHint();
+        syncPaymentOfferCopy();
+      });
       syncPaymentHint();
     }
     if (studentCountInput && !plan.unlimitedStudents) {

@@ -22,7 +22,13 @@
     });
   };
 
-  if (!window.fbq) {
+  const hasAnalyticsConsent = () => (
+    !window.CriatyveAnalytics || window.CriatyveAnalytics.consent === 'granted'
+  );
+
+  const initializePixel = () => {
+    if (!hasAnalyticsConsent() || window.__criatyveMetaPixelInitialized) return false;
+    if (!window.fbq) {
     const fbq = function fbq() {
       if (fbq.callMethod) {
         fbq.callMethod.apply(fbq, arguments);
@@ -41,31 +47,41 @@
     script.src = 'https://connect.facebook.net/en_US/fbevents.js';
     const firstScript = document.getElementsByTagName('script')[0];
     firstScript.parentNode.insertBefore(script, firstScript);
-  }
-
-  if (!window.__criatyveMetaPixelInitialized) {
+    }
     window.fbq('init', PIXEL_ID);
     window.fbq('track', 'PageView');
     window.__criatyveMetaPixelInitialized = true;
+    return true;
+  };
+
+  initializePixel();
+  if (!hasAnalyticsConsent()) {
+    window.addEventListener('criatyve-analytics-consent', (event) => {
+      if (event.detail?.value === 'granted') initializePixel();
+    }, { once: true });
   }
 
   const track = (eventName, data = {}, options = {}) => {
     const safeName = String(eventName || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 50);
-    if (!safeName) return false;
+    if (!safeName || !hasAnalyticsConsent()) return false;
+    initializePixel();
     const onceKey = options.onceKey ? String(options.onceKey) : '';
     if (onceKey && sentOnceKeys.has(onceKey)) return false;
     if (onceKey) sentOnceKeys.add(onceKey);
     window.fbq('track', safeName, sanitizeEventData({ ...getCampaignData(), ...data }));
+    window.CriatyveAnalytics?.track(safeName, sanitizeEventData(data));
     return true;
   };
 
   const trackCustom = (eventName, data = {}, options = {}) => {
     const safeName = String(eventName || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 50);
-    if (!safeName) return false;
+    if (!safeName || !hasAnalyticsConsent()) return false;
+    initializePixel();
     const onceKey = options.onceKey ? String(options.onceKey) : '';
     if (onceKey && sentOnceKeys.has(onceKey)) return false;
     if (onceKey) sentOnceKeys.add(onceKey);
     window.fbq('trackCustom', safeName, sanitizeEventData({ ...getCampaignData(), ...data }));
+    window.CriatyveAnalytics?.track(safeName, sanitizeEventData(data));
     return true;
   };
 

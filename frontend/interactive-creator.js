@@ -12064,8 +12064,148 @@ const getAiAssistantWorkingState = () => {
   return state;
 };
 
-const AI_PLAN_TIMEOUT_MS = 70000;
-const AI_SLIDE_TIMEOUT_MS = 80000;
+const buildAiSlideMemory = (plan, currentPlanItem, workingState) => {
+  const currentOrder = Number(currentPlanItem?.order) || 1;
+  const renderedSlides = Array.isArray(workingState?.slides) ? workingState.slides : [];
+  return (Array.isArray(plan?.slides) ? plan.slides : [])
+    .filter((item) => Number(item?.order) > 0 && Number(item.order) < currentOrder)
+    .slice(-4)
+    .map((item) => {
+      const rendered = renderedSlides.find((slide) => slide?.id === item.targetSlideId);
+      return {
+        order: item.order,
+        title: String(item.title || '').slice(0, 90),
+        keyMessage: String(item.contentBrief?.keyMessage || '').slice(0, 220),
+        archetype: item.archetype || 'cards',
+        interactionType: item.interactionType || 'content',
+        elementTypes: Array.from(new Set((rendered?.elements || []).map((element) => element?.type).filter(Boolean))).slice(0, 8)
+      };
+    });
+};
+
+const projectAiActionsForVisualReview = (actions) => {
+  const state = getAiAssistantWorkingState();
+  applyAiActionsToState(state, deepClone(actions || []), { selectedElementId: null });
+  return state;
+};
+
+const renderAiSlideForVisualReview = async (state, slideId) => {
+  const slide = state?.slides?.find((entry) => entry?.id === slideId)
+    || state?.slides?.find((entry) => entry?.id === state?.activeSlideId);
+  if (!slide) {
+    throw new Error('Nao foi possivel localizar o slide candidato para revisao visual.');
+  }
+  const canvas = await renderSlideToExportCanvas(slide, { scale: 1 });
+  return {
+    slide,
+    renderDataUrl: canvas.toDataURL('image/jpeg', 0.78)
+  };
+};
+
+const requestAiVisualReview = async ({ state, plan, planItem }) => {
+  const slideId = planItem?.targetSlideId || planItem?.id || state?.activeSlideId;
+  const { slide, renderDataUrl } = await renderAiSlideForVisualReview(state, slideId);
+  const response = await authorizedAiAssistantFetch('/api/admin/ai/slide-actions/visual-review', {
+    method: 'POST',
+    body: JSON.stringify({
+      slides: state.slides,
+      activeSlideId: slideId,
+      slideId: slide.id,
+      stageSize: builderState.stageSize.width && builderState.stageSize.height ? builderState.stageSize : DEFAULT_STAGE_SIZE,
+      executionPlan: compactAiExecutionPlan(plan),
+      currentPlanItem: planItem,
+      renderDataUrl
+    })
+  }, AI_SLIDE_TIMEOUT_MS);
+  const result = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(result?.message || 'A revisao visual nao conseguiu analisar o slide.');
+  }
+  syncProfessorCreditsFromPayload(result);
+  return result;
+};
+
+const requestAiVisualCorrection = async ({ request, plan, planItem, state, visualReview }) => {
+  const slideMemory = buildAiSlideMemory(plan, planItem, state);
+  const response = await authorizedAiAssistantFetch('/api/admin/ai/slide-actions', {
+    method: 'POST',
+    body: JSON.stringify({
+      request,
+      slides: state.slides,
+      activeSlideId: planItem?.targetSlideId || planItem?.id || state.activeSlideId,
+      selectedElementId: null,
+      stageSize: builderState.stageSize.width && builderState.stageSize.height ? builderState.stageSize : DEFAULT_STAGE_SIZE,
+      executionPlan: compactAiExecutionPlan(plan),
+      currentPlanItem: planItem,
+      slideMemory,
+      visualReview
+    })
+  }, AI_SLIDE_TIMEOUT_MS);
+  const result = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(result?.message || 'A IA nao conseguiu aplicar a correcao visual.');
+  }
+  syncProfessorCreditsFromPayload(result);
+  return Array.isArray(result?.actions) ? result.actions.map((action) => deepClone(action)) : [];
+};
+
+const refineAiSlideWithVisualReview = async ({ request, plan, planItem, initialActions, enabled, maxCorrections }) => {
+  if (!enabled || !Array.isArray(initialActions) || !initialActions.length) {
+    return initialActions;
+  }
+  const allowedCorrections = Math.max(0, Math.min(2, Number(maxCorrections) || 1));
+  let allActions = initialActions.slice();
+  let review;
+  try {
+    review = await requestAiVisualReview({
+      state: projectAiActionsForVisualReview(allActions),
+      plan,
+      planItem
+    });
+  } catch (error) {
+    pushAiAssistantFeedback('Revisao visual indisponivel', error.message || 'O slide foi mantido sem revisao visual.', 'muted');
+    return allActions;
+  }
+  if (!review?.enabled || !review?.needsCorrection) {
+    pushAiAssistantFeedback(`Revisao visual do slide ${planItem?.order || ''}`, review?.summary || 'Layout aprovado visualmente.', 'success');
+    return allActions;
+  }
+  for (let attempt = 0; attempt < allowedCorrections && review?.needsCorrection; attempt += 1) {
+    pushAiAssistantFeedback(
+      `Ajustando slide ${planItem?.order || ''}`,
+      review.summary || 'A revisao visual encontrou ajustes de alinhamento, leitura ou hierarquia.'
+    );
+    const projectedState = projectAiActionsForVisualReview(allActions);
+    const corrections = await requestAiVisualCorrection({ request, plan, planItem, state: projectedState, visualReview: review });
+    if (!corrections.length) {
+      break;
+    }
+    allActions = [...allActions, ...corrections];
+    try {
+      review = await requestAiVisualReview({
+        state: projectAiActionsForVisualReview(allActions),
+        plan,
+        planItem
+      });
+    } catch (error) {
+      pushAiAssistantFeedback('Revisao visual interrompida', error.message || 'Os ajustes gerados foram mantidos.', 'muted');
+      return allActions;
+    }
+  }
+  if (review?.needsCorrection) {
+    pushAiAssistantFeedback(
+      `Slide ${planItem?.order || ''} mantido com observacoes`,
+      review.summary || 'A IA aplicou o limite de correcoes visuais; revise os ajustes antes de publicar.',
+      'muted'
+    );
+  } else {
+    pushAiAssistantFeedback(`Slide ${planItem?.order || ''} aprovado visualmente`, review?.summary || 'Revisao visual concluida.', 'success');
+  }
+  return allActions;
+};
+
+const AI_PLAN_TIMEOUT_MS = 90000;
+const AI_SLIDE_TIMEOUT_MS = 150000;
 
 const authorizedAiAssistantFetch = async (path, options = {}, timeoutMs = AI_SLIDE_TIMEOUT_MS) => {
   const controller = new AbortController();
@@ -12093,6 +12233,13 @@ const authorizedAiAssistantFetch = async (path, options = {}, timeoutMs = AI_SLI
 
 const compactAiExecutionPlan = (plan = null) => ({
   mode: plan?.mode || 'deck',
+  summary: plan?.summary || '',
+  deckContract: plan?.deckContract
+    ? {
+        objective: plan.deckContract.objective || plan.summary || '',
+        continuityRule: plan.deckContract.continuityRule || ''
+      }
+    : null,
   visualTheme: plan?.visualTheme || null,
   designSystem: plan?.designSystem || null,
   interactionStrategy: plan?.interactionStrategy || null
@@ -12147,6 +12294,7 @@ const executeAiSlidePlanItem = async ({
 }) => {
   const workingState = getAiAssistantWorkingState();
   const resolvedAttachments = Array.isArray(attachmentsPayload) ? attachmentsPayload : getAiAssistantAttachmentsPayload();
+  const slideMemory = buildAiSlideMemory(plan, planItem, workingState);
   const response = await authorizedAiAssistantFetch('/api/admin/ai/slide-actions', {
     method: 'POST',
     body: JSON.stringify({
@@ -12157,7 +12305,8 @@ const executeAiSlidePlanItem = async ({
       stageSize: builderState.stageSize.width && builderState.stageSize.height ? builderState.stageSize : DEFAULT_STAGE_SIZE,
       attachments: resolvedAttachments,
       executionPlan: compactAiExecutionPlan(plan),
-      currentPlanItem: planItem
+      currentPlanItem: planItem,
+      slideMemory
     })
   }, AI_SLIDE_TIMEOUT_MS);
   const result = await response.json().catch(() => null);
@@ -12167,7 +12316,7 @@ const executeAiSlidePlanItem = async ({
     throw requestError;
   }
   syncProfessorCreditsFromPayload(result);
-  const actions = Array.isArray(result?.actions) ? result.actions.map((action) => deepClone(action)) : [];
+  let actions = Array.isArray(result?.actions) ? result.actions.map((action) => deepClone(action)) : [];
   aiAssistantState.debugInfo = {
     request,
     providerLabel: providerLabel || result?.providerLabel || '',
@@ -12187,6 +12336,14 @@ const executeAiSlidePlanItem = async ({
     );
     return 0;
   }
+  actions = await refineAiSlideWithVisualReview({
+    request,
+    plan,
+    planItem,
+    initialActions: actions,
+    enabled: result?.visualReviewEnabled === true,
+    maxCorrections: result?.visualReviewMaxCorrections
+  });
   applyOrQueueAiActions(actions, { requireConfirmation });
   aiAssistantState.stepIndex += 1;
   pushAiAssistantFeedback(

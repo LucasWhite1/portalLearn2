@@ -10,6 +10,10 @@ const adminFaceRoutes = require('./routes/adminFace');
 const billingRoutes = require('./routes/billing');
 const chatRoutes = require('./routes/chat');
 const {
+  publicRouter: siteAnalyticsPublicRoutes,
+  adminRouter: siteAnalyticsAdminRoutes
+} = require('./siteAnalytics');
+const {
   adminRouter: studentPaymentsAdminRoutes,
   studentRouter: studentPaymentsStudentRoutes,
   webhookRouter: studentPaymentsWebhookRoutes,
@@ -130,11 +134,13 @@ const requireStudentApiAuth = (req, res, next) => {
 };
 
 app.use('/api/auth', express.json({ limit: '64kb' }), authRoutes);
+app.use('/api/analytics', express.json({ limit: '128kb' }), siteAnalyticsPublicRoutes);
 app.use(
   '/api/admin',
   requireAuth,
   requireRole(['admin', 'professor']),
   express.json({ limit: ADMIN_JSON_BODY_LIMIT }),
+  siteAnalyticsAdminRoutes,
   adminFaceRoutes,
   studentPaymentsAdminRoutes,
   adminRoutes
