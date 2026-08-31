@@ -350,7 +350,7 @@
     }
   });
 
-  const isLocalTestEnvironment = ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
+  const isLocalTestEnvironment = ['localhost', '127.0.0.1', '::1', 'criatyve.com'].includes(window.location.hostname);
   if (isLocalTestEnvironment) {
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
     else start();
