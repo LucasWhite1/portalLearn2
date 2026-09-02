@@ -42,17 +42,33 @@
 
   const demoViewport = document.getElementById('demoViewport');
   const demoLoading = document.getElementById('demoLoading');
+  const demoRetry = document.getElementById('demoRetry');
   const activeDemoName = document.getElementById('activeDemoName');
   const MINIMUM_LOADING_INDICATOR_MS = 650;
   let activeTemplate = '1tutorial-completo-do-interactive-creator';
   const initialDemoFrame = demoViewport?.querySelector('.demo-frame');
   if (initialDemoFrame) initialDemoFrame.dataset.loadStartedAt = String(Date.now());
 
-  const setDemoLoading = (isLoading, message = 'Preparando a aula interativa...') => {
+  const setDemoLoading = (isLoading, message = 'Preparando a aula interativa...', canRetry = false) => {
     if (!demoLoading) return;
     demoLoading.hidden = !isLoading;
     const title = demoLoading.querySelector('strong');
     if (title) title.textContent = message;
+    if (demoRetry) demoRetry.hidden = !isLoading || !canRetry;
+  };
+
+  const getDemoUrl = (template, retryAttempt = 0) => {
+    const cacheKey = retryAttempt > 0 ? `&retry=${Date.now()}` : '';
+    return `${DEMO_BASE}${encodeURIComponent(template)}${cacheKey}`;
+  };
+
+  const reloadDemoFrame = (frame, template, demoName, retryAttempt = 0) => {
+    frame.dataset.ready = 'false';
+    frame.dataset.error = 'false';
+    frame.dataset.retryAttempt = String(retryAttempt);
+    frame.dataset.loadStartedAt = String(Date.now());
+    frame.title = `${demoName} criado no Criatyve`;
+    frame.src = getDemoUrl(template, retryAttempt);
   };
 
   const getOrCreateDemoFrame = (template, demoName) => {
@@ -64,8 +80,7 @@
     frame.title = `${demoName} criado no Criatyve`;
     frame.loading = 'lazy';
     frame.allow = 'fullscreen';
-    frame.dataset.loadStartedAt = String(Date.now());
-    frame.src = `${DEMO_BASE}${encodeURIComponent(template)}`;
+    reloadDemoFrame(frame, template, demoName);
     demoViewport?.appendChild(frame);
     return frame;
   };
@@ -76,9 +91,10 @@
     demoViewport?.querySelectorAll('.demo-frame').forEach((item) => {
       item.classList.toggle('active', item === frame);
     });
-    setDemoLoading(frame.dataset.ready !== 'true', frame.dataset.error === 'true'
+    const hasError = frame.dataset.error === 'true';
+    setDemoLoading(frame.dataset.ready !== 'true', hasError
       ? 'Não foi possível abrir este exemplo.'
-      : 'Preparando a aula interativa...');
+      : 'Preparando a aula interativa...', hasError);
   };
 
   window.addEventListener('message', (event) => {
@@ -95,9 +111,22 @@
         if (template === activeTemplate) setDemoLoading(false);
       }, remaining);
     } else if (event.data.type === 'demo-error') {
+      const retryAttempt = Number(frame.dataset.retryAttempt || 0);
+      if (retryAttempt < 1) {
+        reloadDemoFrame(frame, template, frame.title.replace(' criado no Criatyve', ''), retryAttempt + 1);
+        if (template === activeTemplate) setDemoLoading(true, 'Reconectando ao exemplo...');
+        return;
+      }
       frame.dataset.error = 'true';
-      if (template === activeTemplate) setDemoLoading(true, 'Não foi possível abrir este exemplo. Tente novamente.');
+      if (template === activeTemplate) setDemoLoading(true, 'Não foi possível abrir este exemplo.', true);
     }
+  });
+
+  demoRetry?.addEventListener('click', () => {
+    const frame = demoViewport?.querySelector(`.demo-frame[data-template="${activeTemplate}"]`);
+    if (!frame) return;
+    reloadDemoFrame(frame, activeTemplate, activeDemoName?.textContent || 'Exemplo interativo', 0);
+    setDemoLoading(true, 'Preparando a aula interativa...');
   });
 
   document.querySelectorAll('.demo-tab').forEach((button) => {

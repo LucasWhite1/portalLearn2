@@ -97,9 +97,10 @@ app.use('/vendor/three', express.static(threeVendorDir, {
 app.use('/template-store', express.static(templateStoreDir, {
   dotfiles: 'deny',
   fallthrough: false,
-  maxAge: '1h',
+  maxAge: 0,
   setHeaders(res) {
-    res.setHeader('Cache-Control', 'public, max-age=3600, stale-while-revalidate=86400');
+    // Templates podem mudar entre deploys; revalide o ETag antes de reutilizar um arquivo local antigo.
+    res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
   }
 }));
 app.use(express.static(frontendDir, {

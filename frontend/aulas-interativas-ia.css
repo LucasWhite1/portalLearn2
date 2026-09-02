@@ -151,6 +151,8 @@ h1 { max-width: 720px; margin: 0; font-size: clamp(2.7rem, 4.5vw, 4.5rem); line-
 .demo-loading[hidden] { display: none; }
 .demo-loading strong { font-size: 1rem; }
 .demo-loading small { color: var(--muted); }
+.demo-retry { margin-top: .45rem; padding: .55rem .85rem; border: 1px solid rgba(34,211,238,.7); border-radius: 6px; color: #071017; background: var(--cyan); font: inherit; font-size: .82rem; font-weight: 800; cursor: pointer; }
+.demo-retry:hover { background: #fff; }
 .demo-spinner { width: 42px; height: 42px; border: 4px solid rgba(255,255,255,.16); border-top-color: var(--cyan); border-radius: 50%; animation: demo-spin .8s linear infinite; }
 @keyframes demo-spin { to { transform: rotate(360deg); } }
 .demo-note { display: flex; justify-content: center; gap: .5rem; color: var(--muted); font-size: .8rem; }
