@@ -539,6 +539,14 @@ const ensureBillingTables = async () => {
   await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS marketing_consent_at TIMESTAMPTZ');
   await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS analytics_visitor_id UUID');
   await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS analytics_session_id UUID');
+  await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS checkout_phone TEXT');
+  await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS checkout_cpf_cnpj TEXT');
+  await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS checkout_postal_code TEXT');
+  await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS checkout_address TEXT');
+  await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS checkout_address_number TEXT');
+  await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS checkout_province TEXT');
+  await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS checkout_complement TEXT');
+  await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS checkout_billing_type TEXT');
   await ensureBillingAccessSchema();
   await db.query(`
     WITH latest_subscription AS (
@@ -654,12 +662,21 @@ const persistCheckoutLead = async ({
   planCode,
   payerName,
   payerEmail,
+  phone,
+  cpfCnpj,
+  postalCode,
+  address,
+  addressNumber,
+  province,
+  complement,
+  billingType,
   amount,
   studentLimit,
   termsAccepted,
   marketingConsent,
   analyticsVisitorId,
   analyticsSessionId,
+  checkoutStatus = 'CHECKOUT_CREATED',
   checkoutResponse
 }) => {
   await ensureBillingTables();
@@ -671,6 +688,14 @@ const persistCheckoutLead = async ({
         plan_code,
         payer_name,
         payer_email,
+        checkout_phone,
+        checkout_cpf_cnpj,
+        checkout_postal_code,
+        checkout_address,
+        checkout_address_number,
+        checkout_province,
+        checkout_complement,
+        checkout_billing_type,
         amount,
         student_limit,
         terms_accepted_at,
@@ -682,7 +707,7 @@ const persistCheckoutLead = async ({
         raw_payload,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'CHECKOUT_CREATED', $13, NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, NOW())
     `,
     [
       'asaas',
@@ -690,6 +715,14 @@ const persistCheckoutLead = async ({
       sanitizeText(planCode || '', 40) || 'pro',
       sanitizeText(payerName || '', 160) || null,
       sanitizeEmail(payerEmail || '') || null,
+      sanitizePhone(phone || '') || null,
+      sanitizeCpfCnpj(cpfCnpj || '') || null,
+      sanitizeText(postalCode || '', 16).replace(/\D/g, '').slice(0, 8) || null,
+      sanitizeText(address || '', 120) || null,
+      sanitizeText(addressNumber || '', 20) || null,
+      sanitizeText(province || '', 80) || null,
+      sanitizeText(complement || '', 80) || null,
+      sanitizeText(billingType || '', 30).toUpperCase() || null,
       Number.isFinite(Number(amount)) ? Number(amount) : null,
       Number.isFinite(Number(studentLimit)) ? Math.max(0, Math.round(Number(studentLimit))) : null,
       termsAccepted ? new Date() : null,
@@ -697,6 +730,7 @@ const persistCheckoutLead = async ({
       marketingConsent === false ? null : new Date(),
       isUuid(analyticsVisitorId) ? analyticsVisitorId : null,
       isUuid(analyticsSessionId) ? analyticsSessionId : null,
+      sanitizeText(checkoutStatus || '', 80) || 'CHECKOUT_CREATED',
       checkoutResponse || null
     ]
   );
@@ -1393,6 +1427,28 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
     const responseBody = await response.json().catch(() => ({}));
     if (!response.ok) {
       const firstError = Array.isArray(responseBody?.errors) ? responseBody.errors[0] : null;
+      await persistCheckoutLead({
+        externalReference,
+        planCode: plan.id,
+        payerName: name,
+        payerEmail: email,
+        phone,
+        cpfCnpj,
+        postalCode,
+        address,
+        addressNumber,
+        province,
+        complement,
+        billingType: paymentMode.billingTypes[0] || null,
+        amount: purchase.amount,
+        studentLimit: purchase.studentLimit,
+        termsAccepted: true,
+        marketingConsent: source?.marketingConsent !== false,
+        analyticsVisitorId: source?.analytics?.visitorId,
+        analyticsSessionId: source?.analytics?.sessionId,
+        checkoutStatus: 'CHECKOUT_REJECTED',
+        checkoutResponse: responseBody
+      });
       const errorPayload = {
         message: firstError?.description || 'Nao foi possivel iniciar o checkout no Asaas.',
         provider: 'asaas'
@@ -1402,6 +1458,28 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
 
     const checkoutUrl = buildCheckoutUrl(responseBody);
     if (!checkoutUrl) {
+      await persistCheckoutLead({
+        externalReference,
+        planCode: plan.id,
+        payerName: name,
+        payerEmail: email,
+        phone,
+        cpfCnpj,
+        postalCode,
+        address,
+        addressNumber,
+        province,
+        complement,
+        billingType: paymentMode.billingTypes[0] || null,
+        amount: purchase.amount,
+        studentLimit: purchase.studentLimit,
+        termsAccepted: true,
+        marketingConsent: source?.marketingConsent !== false,
+        analyticsVisitorId: source?.analytics?.visitorId,
+        analyticsSessionId: source?.analytics?.sessionId,
+        checkoutStatus: 'CHECKOUT_INVALID_RESPONSE',
+        checkoutResponse: responseBody
+      });
       const errorPayload = {
         message: 'O Asaas respondeu sem link de checkout utilizavel.',
         provider: 'asaas'
@@ -1414,6 +1492,14 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
       planCode: plan.id,
       payerName: name,
       payerEmail: email,
+      phone,
+      cpfCnpj,
+      postalCode,
+      address,
+      addressNumber,
+      province,
+      complement,
+      billingType: paymentMode.billingTypes[0] || null,
       amount: purchase.amount,
       studentLimit: purchase.studentLimit,
       unlimitedStudents: Boolean(purchase.unlimitedStudents),

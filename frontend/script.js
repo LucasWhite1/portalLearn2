@@ -59,6 +59,7 @@ let pendingPortalLogoImage = '';
 let portalColorPalettes = [];
 let siteAnalyticsCache = null;
 let siteAnalyticsSearchTimer = null;
+let checkoutSubmissionCache = [];
 
 const getCurrentUserRole = () => localStorage.getItem(USER_ROLE_KEY) || '';
 const getCurrentUserData = () => {
@@ -5030,6 +5031,98 @@ const renderAnalyticsSessions = (sessions) => {
   }).join('');
 };
 
+const checkoutSubmissionStatusLabel = (status) => ({
+  CHECKOUT_CREATED: 'Checkout criado',
+  CHECKOUT_REJECTED: 'Dados rejeitados',
+  CHECKOUT_INVALID_RESPONSE: 'Resposta inválida do Asaas',
+  PENDING: 'Aguardando pagamento',
+  CONFIRMED: 'Pagamento confirmado',
+  RECEIVED: 'Pagamento recebido',
+  ACTIVE: 'Assinatura ativa',
+  TRIALING: 'Período gratuito',
+  OVERDUE: 'Vencido',
+  REFUNDED: 'Reembolsado',
+  CANCELLED: 'Cancelado'
+}[String(status || '').toUpperCase()] || String(status || 'Não informado'));
+
+const renderCheckoutSubmissions = (submissions) => {
+  const body = document.getElementById('checkoutSubmissionsBody');
+  const count = document.getElementById('checkoutSubmissionCount');
+  if (!body) return;
+  checkoutSubmissionCache = Array.isArray(submissions) ? submissions : [];
+  if (count) count.textContent = `${checkoutSubmissionCache.length} ${checkoutSubmissionCache.length === 1 ? 'envio' : 'envios'}`;
+  if (!checkoutSubmissionCache.length) {
+    body.innerHTML = '<tr><td colspan="7">Nenhum checkout enviado foi encontrado.</td></tr>';
+    return;
+  }
+  body.innerHTML = checkoutSubmissionCache.map((item) => {
+    const createdAt = new Date(item.created_at);
+    const dateLabel = Number.isFinite(createdAt.getTime()) ? createdAt.toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }) : 'Data não informada';
+    return `
+      <tr>
+        <td data-label="Envio"><strong>${escapeHtml(dateLabel)}</strong><small>${escapeHtml(String(item.id || ''))}</small></td>
+        <td data-label="Pessoa"><strong>${escapeHtml(item.payer_name || 'Não informado')}</strong><small>${escapeHtml(item.payer_email || 'Sem e-mail')} · ${escapeHtml(item.checkout_phone || 'Sem telefone')}</small></td>
+        <td data-label="CPF/CNPJ"><strong>${escapeHtml(item.checkout_cpf_cnpj_masked || 'Não informado')}</strong></td>
+        <td data-label="Pagamento"><strong>${escapeHtml(item.checkout_billing_type === 'PIX' ? 'Pix' : item.checkout_billing_type === 'CREDIT_CARD' ? 'Cartão' : item.checkout_billing_type || 'Não informado')}</strong></td>
+        <td data-label="Plano"><strong>${escapeHtml(item.plan_code || 'pro')}</strong><small>${formatBrl(item.amount)}${Number(item.student_limit || 0) ? ` · ${Number(item.student_limit)} alunos` : ''}</small></td>
+        <td data-label="Status"><span class="analytics-result-pill ${['ACTIVE', 'CONFIRMED', 'RECEIVED'].includes(String(item.status || '').toUpperCase()) ? 'purchase' : 'checkout'}">${escapeHtml(checkoutSubmissionStatusLabel(item.status))}</span></td>
+        <td data-label="Ação"><button class="secondary-btn small" type="button" data-checkout-submission="${escapeAttribute(String(item.id))}">Ver dados</button></td>
+      </tr>
+    `;
+  }).join('');
+};
+
+const closeCheckoutSubmission = () => {
+  const modal = document.getElementById('checkoutSubmissionModal');
+  modal?.classList.add('hidden');
+  modal?.setAttribute('aria-hidden', 'true');
+};
+
+const openCheckoutSubmission = (submissionId) => {
+  const item = checkoutSubmissionCache.find((submission) => String(submission.id) === String(submissionId));
+  const modal = document.getElementById('checkoutSubmissionModal');
+  const details = document.getElementById('checkoutSubmissionDetails');
+  if (!item || !modal || !details) return;
+  const createdAt = new Date(item.created_at);
+  document.getElementById('checkoutSubmissionTitle').textContent = item.payer_name || 'Envio do checkout';
+  document.getElementById('checkoutSubmissionSubtitle').textContent = `Enviado em ${Number.isFinite(createdAt.getTime()) ? createdAt.toLocaleString('pt-BR') : 'data não informada'} · ${checkoutSubmissionStatusLabel(item.status)}`;
+  const address = [item.checkout_address, item.checkout_address_number, item.checkout_complement, item.checkout_province, item.checkout_postal_code ? `CEP ${item.checkout_postal_code}` : ''].filter(Boolean).join(', ');
+  const rows = [
+    ['Nome', item.payer_name],
+    ['E-mail', item.payer_email],
+    ['Telefone', item.checkout_phone],
+    ['CPF/CNPJ', item.checkout_cpf_cnpj],
+    ['Endereço', address],
+    ['Pagamento escolhido', item.checkout_billing_type === 'PIX' ? 'Pix' : item.checkout_billing_type === 'CREDIT_CARD' ? 'Cartão de crédito' : item.checkout_billing_type],
+    ['Plano', item.plan_code],
+    ['Valor', formatBrl(item.amount)],
+    ['Limite de alunos', Number(item.student_limit || 0) ? String(item.student_limit) : 'Ilimitado'],
+    ['Status', checkoutSubmissionStatusLabel(item.status)],
+    ['Motivo da rejeição', item.checkout_error],
+    ['ID do pagamento Asaas', item.provider_payment_id],
+    ['ID da assinatura Asaas', item.provider_subscription_id]
+  ].filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== '');
+  details.innerHTML = rows.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`).join('');
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+};
+
+const loadCheckoutSubmissions = async () => {
+  const body = document.getElementById('checkoutSubmissionsBody');
+  if (!isGlobalAdminUser() || !body) return;
+  try {
+    const query = new URLSearchParams();
+    const search = document.getElementById('analyticsSearch')?.value?.trim();
+    if (search) query.set('search', search);
+    const response = await authorizedFetch(`/api/admin/analytics/checkout-submissions?${query.toString()}`);
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(payload?.message || 'Não foi possível carregar os dados do checkout.');
+    renderCheckoutSubmissions(payload?.submissions);
+  } catch (error) {
+    body.innerHTML = `<tr><td colspan="7">${escapeHtml(error.message || 'Falha ao carregar os dados do checkout.')}</td></tr>`;
+  }
+};
+
 const fillAnalyticsFilterOptions = (payload) => {
   const sourceSelect = document.getElementById('analyticsSource');
   const pageSelect = document.getElementById('analyticsPage');
@@ -5091,6 +5184,7 @@ const loadSiteAnalytics = async () => {
     if (!response.ok) throw new Error(payload?.message || 'Não foi possível carregar o trackeamento.');
     siteAnalyticsCache = payload;
     renderSiteAnalytics(payload);
+    void loadCheckoutSubmissions();
   } catch (error) {
     const body = document.getElementById('analyticsSessionsBody');
     if (body) body.innerHTML = `<tr><td colspan="7">${escapeHtml(error.message || 'Falha ao carregar dados.')}</td></tr>`;
@@ -5173,6 +5267,13 @@ const initSiteAnalytics = () => {
     const button = event.target.closest('[data-analytics-session]');
     if (button) openAnalyticsJourney(button.dataset.analyticsSession);
   });
+  document.getElementById('checkoutSubmissionsBody')?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-checkout-submission]');
+    if (button) openCheckoutSubmission(button.dataset.checkoutSubmission);
+  });
+  document.getElementById('checkoutSubmissionModal')?.addEventListener('click', (event) => {
+    if (event.target.closest('[data-checkout-submission-close]')) closeCheckoutSubmission();
+  });
   document.getElementById('analyticsJourneyModal')?.addEventListener('click', (event) => {
     if (event.target.closest('[data-analytics-close]')) closeAnalyticsJourney();
   });
@@ -5192,6 +5293,7 @@ const initAdminFeatures = () => {
     document.getElementById('siteAnalyticsNavItem')?.remove();
     document.getElementById('siteAnalyticsSection')?.remove();
     document.getElementById('analyticsJourneyModal')?.remove();
+    document.getElementById('checkoutSubmissionModal')?.remove();
     document.querySelector('#adminSettingsSection h2')?.replaceChildren(document.createTextNode('Configuracoes'));
     document.getElementById('adminSmtpSettingsSection')?.remove();
     const aiTextCostField = document.getElementById('aiTextCreditCostPerCall')?.closest('.field-group');

@@ -394,6 +394,71 @@ const requireGlobalAdmin = (req, res, next) => {
   return next();
 };
 
+let checkoutSubmissionColumnsEnsured = false;
+const ensureCheckoutSubmissionColumns = async () => {
+  if (checkoutSubmissionColumnsEnsured) return true;
+  const exists = await db.query("SELECT to_regclass('public.billing_subscriptions') AS table_name");
+  if (!exists.rows[0]?.table_name) return false;
+  await Promise.all([
+    'checkout_phone TEXT',
+    'checkout_cpf_cnpj TEXT',
+    'checkout_postal_code TEXT',
+    'checkout_address TEXT',
+    'checkout_address_number TEXT',
+    'checkout_province TEXT',
+    'checkout_complement TEXT',
+    'checkout_billing_type TEXT'
+  ].map((definition) => db.query(`ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS ${definition}`)));
+  checkoutSubmissionColumnsEnsured = true;
+  return true;
+};
+
+const maskDocument = (value) => {
+  const digits = String(value || '').replace(/\D/g, '');
+  if (!digits) return 'Não informado';
+  if (digits.length === 11) return `${digits.slice(0, 3)}.***.***-${digits.slice(-2)}`;
+  return `${digits.slice(0, 2)}.***.***/****-${digits.slice(-2)}`;
+};
+
+adminRouter.get('/analytics/checkout-submissions', requireGlobalAdmin, async (req, res, next) => {
+  try {
+    if (!await ensureCheckoutSubmissionColumns()) return res.json({ submissions: [] });
+    const search = cleanText(req.query?.search, 180);
+    const values = [];
+    let searchClause = '';
+    if (search) {
+      values.push(`%${search}%`);
+      searchClause = ` AND (COALESCE(payer_name, '') ILIKE $1 OR COALESCE(payer_email, '') ILIKE $1 OR COALESCE(checkout_phone, '') ILIKE $1 OR COALESCE(checkout_cpf_cnpj, '') ILIKE $1)`;
+    }
+    const { rows } = await db.query(`
+      SELECT id, payer_name, payer_email, checkout_phone, checkout_cpf_cnpj,
+             checkout_postal_code, checkout_address, checkout_address_number,
+             checkout_province, checkout_complement, checkout_billing_type,
+             plan_code, amount, student_limit, status, provider_payment_id,
+             provider_subscription_id, created_at, updated_at, activated_at,
+             analytics_session_id, raw_payload
+        FROM billing_subscriptions
+       WHERE provider = 'asaas'
+         AND checkout_external_reference LIKE 'checkout:%'${searchClause}
+       ORDER BY created_at DESC
+       LIMIT 150`, values);
+    return res.json({
+      submissions: rows.map(({ raw_payload: rawPayload, ...row }) => ({
+        ...row,
+        checkout_cpf_cnpj_masked: maskDocument(row.checkout_cpf_cnpj),
+        checkout_error: cleanText(
+          Array.isArray(rawPayload?.errors)
+            ? rawPayload.errors.map((item) => item?.description).filter(Boolean).join(' ')
+            : rawPayload?.message,
+          300
+        )
+      }))
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 const buildSessionFilter = (query = {}) => {
   const values = [clampInteger(query.days, 1, 365, 30)];
   const conditions = [`s.started_at >= NOW() - ($1::int * INTERVAL '1 day')`];

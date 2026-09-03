@@ -446,7 +446,19 @@
               </table>
             </div>
           </section>
-          <p class="analytics-privacy-note">Privacidade: não são armazenados campos digitados, senha, CPF ou dados de cartão. O IP é convertido em identificador irreversível e o visitante pode recusar a análise.</p>
+          <section class="analytics-sessions-band checkout-submissions-band" aria-labelledby="checkoutSubmissionsTitle">
+            <div class="analytics-section-title">
+              <div><h3 id="checkoutSubmissionsTitle">Dados enviados no checkout</h3><p>Envios que chegaram ao Asaas. Use para conferir dados de contato e identificar tentativas suspeitas.</p></div>
+              <strong id="checkoutSubmissionCount">0 envios</strong>
+            </div>
+            <div class="table-wrapper analytics-table-wrap">
+              <table class="table admin-responsive-table analytics-sessions-table">
+                <thead><tr><th>Envio</th><th>Pessoa</th><th>CPF/CNPJ</th><th>Pagamento</th><th>Plano</th><th>Status</th><th>Ação</th></tr></thead>
+                <tbody id="checkoutSubmissionsBody"><tr><td colspan="7">Carregando dados de checkout...</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+          <p class="analytics-privacy-note">Privacidade: a jornada de navegação não registra campos digitados nem cartão. Os dados acima são os que a pessoa enviou voluntariamente ao checkout e ficam restritos ao administrador principal.</p>
         </div>
 
         <div class="panel" id="adminNotificationsSection" data-section="adminNotificationsSection">
@@ -1101,6 +1113,20 @@
       <div class="analytics-journey-timeline" id="analyticsJourneyTimeline"></div>
     </div>
   </div>
+  <div id="checkoutSubmissionModal" class="admin-report-modal hidden" aria-hidden="true">
+    <div class="admin-report-modal-backdrop" data-checkout-submission-close="true"></div>
+    <div class="admin-report-modal-card analytics-journey-modal" role="dialog" aria-modal="true" aria-labelledby="checkoutSubmissionTitle">
+      <div class="admin-report-modal-head">
+        <div>
+          <p class="badge">DADOS DO CHECKOUT</p>
+          <h3 id="checkoutSubmissionTitle">Envio do checkout</h3>
+          <p id="checkoutSubmissionSubtitle">Dados informados antes de abrir o pagamento.</p>
+        </div>
+        <button class="secondary-btn small" type="button" data-checkout-submission-close="true">Fechar</button>
+      </div>
+      <div class="analytics-journey-summary checkout-submission-details" id="checkoutSubmissionDetails"></div>
+    </div>
+  </div>
   <div id="progressTimelineModal" class="admin-report-modal hidden" aria-hidden="true">
     <div class="admin-report-modal-backdrop" data-progress-modal-close="true"></div>
     <div class="admin-report-modal-card" role="dialog" aria-modal="true" aria-labelledby="progressTimelineTitle">
@@ -1158,6 +1184,6 @@
       </div>
     </div>
   </div>
-  <script src="script.js?v=20260831-2" type="module"></script>
+  <script src="script.js?v=20260903-1" type="module"></script>
 </body>
 </html>
