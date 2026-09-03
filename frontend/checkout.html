@@ -340,10 +340,6 @@
             <strong>Checkout seguro no Asaas</strong>
             <p>Antes de abrir o ambiente do gateway, guardamos seu nome e e-mail para criar o acesso do professor depois da confirmação.</p>
           </div>
-          <div class="highlight">
-            <strong>Fluxo alinhado com o seu teste grátis</strong>
-            <p>No plano de 30 dias, o cartão fica cadastrado agora e a primeira cobrança só acontece no fim do período, se a assinatura continuar ativa.</p>
-          </div>
         </div>
 
         <form class="form" id="checkoutForm">
@@ -580,7 +576,7 @@
       return isPixGuaranteeSelected()
         ? `Pagar ${brl.format(basePrice)} com Pix`
         : Number(plan.trialDays || 0) > 0
-        ? `Cadastrar cartão e começar ${plan.trialDays} dias grátis`
+        ? `Começar ${plan.trialDays} dias grátis`
         : 'Ir para o checkout seguro';
     }
 
