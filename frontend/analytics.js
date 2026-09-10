@@ -347,8 +347,10 @@
       return { visitorId: getVisitorId(), sessionId: session.id };
     },
     get consent() {
-      return safeStorageGet(window.localStorage, CONSENT_KEY)
-        || (AUTOMATIC_ANALYTICS_HOSTS.has(window.location.hostname) ? 'granted' : 'pending');
+      // Test and production hosts use first-party analytics during this launch phase,
+      // including when this browser profile previously stored a denied preference.
+      if (AUTOMATIC_ANALYTICS_HOSTS.has(window.location.hostname)) return 'granted';
+      return safeStorageGet(window.localStorage, CONSENT_KEY) || 'pending';
     }
   });
 
