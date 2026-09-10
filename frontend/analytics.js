@@ -10,6 +10,7 @@
   const MAX_QUEUE_SIZE = 100;
   const SCROLL_THRESHOLDS = [25, 50, 75, 90, 100];
   const SENSITIVE_TEXT = /\b(senha|password|cpf|cnpj|cart[aã]o|card|cvv|email|telefone|phone)\b/i;
+  const AUTOMATIC_ANALYTICS_HOSTS = new Set(['localhost', '127.0.0.1', '::1', 'criatyve.com', 'www.criatyve.com']);
   let started = false;
   let flushTimer = null;
   let pageStartedAt = Date.now();
@@ -346,11 +347,12 @@
       return { visitorId: getVisitorId(), sessionId: session.id };
     },
     get consent() {
-      return safeStorageGet(window.localStorage, CONSENT_KEY) || 'pending';
+      return safeStorageGet(window.localStorage, CONSENT_KEY)
+        || (AUTOMATIC_ANALYTICS_HOSTS.has(window.location.hostname) ? 'granted' : 'pending');
     }
   });
 
-  const isLocalTestEnvironment = ['localhost', '127.0.0.1', '::1', 'criatyve.com'].includes(window.location.hostname);
+  const isLocalTestEnvironment = AUTOMATIC_ANALYTICS_HOSTS.has(window.location.hostname);
   if (isLocalTestEnvironment) {
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
     else start();
