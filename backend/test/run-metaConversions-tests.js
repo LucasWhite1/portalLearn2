@@ -6,7 +6,7 @@ process.env.META_CONVERSIONS_API_ACCESS_TOKEN = 'test-access-token';
 process.env.META_GRAPH_API_VERSION = 'v24.0';
 process.env.META_CAPI_TEST_EVENT_CODE = 'TEST123';
 
-const { buildPurchaseEvent, sendMetaPurchaseEvent } = require('../src/metaConversions');
+const { buildCheckoutEvent, buildPurchaseEvent, sendMetaPurchaseEvent } = require('../src/metaConversions');
 
 const hash = (value) => crypto.createHash('sha256').update(value, 'utf8').digest('hex');
 
@@ -28,6 +28,29 @@ assert.equal(purchaseEvent.custom_data.value, 117.3);
 assert.deepEqual(purchaseEvent.custom_data.content_ids, ['pro']);
 assert.equal(purchaseEvent.user_data.em[0], hash('professor@example.com'));
 assert.equal(purchaseEvent.user_data.ph[0], hash('5571999990000'));
+
+const checkoutEvent = buildCheckoutEvent({
+  eventId: 'checkout-event-123',
+  customer: { name: 'Ana Professora', email: 'ana@example.com', phone: '71999990000' },
+  attribution: {
+    visitorId: '60921ae5-2b5e-4577-afb3-d5f45197cb7c',
+    sessionStartedAt: '2026-09-10T12:00:00.000Z',
+    fbclid: 'meta-click-id',
+    fbp: 'fb.1.123456789.test',
+    clientIpAddress: '203.0.113.1',
+    clientUserAgent: 'Test Browser',
+    pageUrl: 'https://criatyve.com/checkout.html?plan=pro-unlimited',
+    utmCampaign: 'professores'
+  },
+  plan: { id: 'pro-unlimited', name: 'Criatyve Pro Ilimitado', value: 97.90, billingType: 'CREDIT_CARD' }
+});
+assert.equal(checkoutEvent.event_name, 'CheckoutFormSubmit');
+assert.equal(checkoutEvent.event_id, 'checkout-event-123');
+assert.equal(checkoutEvent.user_data.ph[0], hash('5571999990000'));
+assert.equal(checkoutEvent.user_data.client_ip_address, '203.0.113.1');
+assert.equal(checkoutEvent.user_data.fbp, 'fb.1.123456789.test');
+assert.equal(checkoutEvent.user_data.fbc, 'fb.1.1789041600000.meta-click-id');
+assert.equal(checkoutEvent.custom_data.utm_campaign, 'professores');
 
 const sentRequests = [];
 const run = async () => {

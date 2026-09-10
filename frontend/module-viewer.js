@@ -1,8 +1,4 @@
-import {
-  createThreeDStageController,
-  normalizeThreeDAttachment,
-  normalizeThreeDScene
-} from './modules/three-d-stage.js';
+import { normalizeThreeDAttachment, normalizeThreeDScene } from './modules/three-d-normalize.js';
 import { runFaceVerification } from './modules/face-verification.js';
 import { toggleSlideTrigger } from './modules/trigger-toggle.mjs';
 import { calculateViewerStageLayout } from './modules/viewer-stage-layout.mjs';
@@ -6583,7 +6579,9 @@ const applyViewerLiveThreeDTransform = (transform) => {
     zoom: transform.zoom
   });
   if (getCurrentSlide()?.id === slide.id) {
-    ensureViewerThreeDStageController().setSceneState(slide.threeDScene);
+    void ensureViewerThreeDStageController()
+      .then((controller) => controller.setSceneState(slide.threeDScene))
+      .catch((error) => console.warn('Atualizacao do palco 3D nao pode ser aplicada:', error));
   }
 };
 
@@ -7286,7 +7284,11 @@ const loadViewerThreeDAssetBuffer = async (assetId, variant) => {
   return response.arrayBuffer();
 };
 
-const ensureViewerThreeDStageController = () => {
+let viewerThreeDModulePromise = null;
+const ensureViewerThreeDStageController = async () => {
+  if (viewerThreeDStageController) return viewerThreeDStageController;
+  viewerThreeDModulePromise ||= import('./modules/three-d-stage.js');
+  const { createThreeDStageController } = await viewerThreeDModulePromise;
   if (viewerThreeDStageController) return viewerThreeDStageController;
   viewerThreeDStageController = createThreeDStageController({
     mode: 'viewer',
@@ -7339,7 +7341,13 @@ const renderSlide = (slide) => {
   wrapper.innerHTML = '';
   const threeDEnabled = Boolean(slide?.threeDScene?.enabled);
   if (threeDEnabled) {
-    void ensureViewerThreeDStageController().mount(wrapper, slide);
+    if (viewerThreeDStageController) {
+      void viewerThreeDStageController.mount(wrapper, slide);
+    } else {
+      void ensureViewerThreeDStageController().then(() => {
+        if (getCurrentSlide() === slide) renderSlide(slide);
+      }).catch((error) => console.warn('Palco 3D nao pode ser carregado:', error));
+    }
   } else {
     viewerThreeDStageController?.unmount();
   }
@@ -8201,7 +8209,9 @@ const initModuleViewerPage = async () => {
         content_name: 'Galeria de demonstracoes Criatyve',
         content_category: 'Interactive Demo',
         content_ids: demoTemplateKeys,
-        content_type: 'product_group'
+        content_type: 'product_group',
+        value: 0,
+        currency: 'BRL'
       }, { onceKey: 'demo-gallery-view-content' });
       trackDemoCustomEvent('DemoGalleryView', {
         funnel_step: 'demo_view'

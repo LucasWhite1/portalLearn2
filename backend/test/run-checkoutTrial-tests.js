@@ -76,6 +76,11 @@ const frontendScript = fs.readFileSync(path.join(frontendRoot, 'script.js'), 'ut
 assert.match(checkoutHtml, /R\$0 <small>agora<\/small>/);
 assert.match(checkoutHtml, /primeira cobrança de R\$97,90 será feita somente 20 dias depois/i);
 assert.match(checkoutHtml, /No Pix,.*será cobrado agora/i);
+assert.match(checkoutHtml, /name="phone"[^>]+required/i);
+assert.doesNotMatch(checkoutHtml, /name="cpfCnpj"/i);
+assert.doesNotMatch(checkoutHtml, /name="postalCode"/i);
+assert.match(checkoutHtml, /name="marketingConsent"/i);
+assert.match(checkoutHtml, /CheckoutFormSubmit[^]*checkoutUrl/i);
 assert.match(landingHtml, /No Pix, você paga R\$97,90 agora/i);
 assert.match(termsHtml, /primeira mensalidade não é cobrada no dia da contratação/i);
 assert.match(termsHtml, /No Pix, o valor da primeira mensalidade é pago no momento da contratação/i);

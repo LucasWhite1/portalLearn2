@@ -7,8 +7,8 @@ const { decryptStoredSecret } = require('../aiConfigCrypto');
 const { processCreditTopupWebhook } = require('../creditTopups');
 const { processStudentSeatUpgradeWebhook } = require('../studentSeatUpgrades');
 const { applyCreditChange, ensurePlatformCreditTables } = require('../platformCredits');
-const { sendMetaPurchaseEvent } = require('../metaConversions');
-const { recordPurchaseEvent } = require('../siteAnalytics');
+const { sendMetaCheckoutEvent, sendMetaPurchaseEvent } = require('../metaConversions');
+const { recordCheckoutCreatedEvent, recordPurchaseEvent } = require('../siteAnalytics');
 const { requireAuth } = require('../middleware/auth');
 const {
   PAYMENT_FAILURE_EVENTS,
@@ -547,6 +547,7 @@ const ensureBillingTables = async () => {
   await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS checkout_province TEXT');
   await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS checkout_complement TEXT');
   await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS checkout_billing_type TEXT');
+  await db.query("ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS attribution_data JSONB NOT NULL DEFAULT '{}'::jsonb");
   await ensureBillingAccessSchema();
   await db.query(`
     WITH latest_subscription AS (
@@ -676,6 +677,7 @@ const persistCheckoutLead = async ({
   marketingConsent,
   analyticsVisitorId,
   analyticsSessionId,
+  attributionData,
   checkoutStatus = 'CHECKOUT_CREATED',
   checkoutResponse
 }) => {
@@ -703,11 +705,12 @@ const persistCheckoutLead = async ({
         marketing_consent_at,
         analytics_visitor_id,
         analytics_session_id,
+        attribution_data,
         status,
         raw_payload,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, NOW())
     `,
     [
       'asaas',
@@ -730,6 +733,7 @@ const persistCheckoutLead = async ({
       marketingConsent === false ? null : new Date(),
       isUuid(analyticsVisitorId) ? analyticsVisitorId : null,
       isUuid(analyticsSessionId) ? analyticsSessionId : null,
+      attributionData && typeof attributionData === 'object' ? attributionData : {},
       sanitizeText(checkoutStatus || '', 80) || 'CHECKOUT_CREATED',
       checkoutResponse || null
     ]
@@ -1279,6 +1283,7 @@ const processAsaasWebhookEvent = async (eventPayload, requestMeta = {}) => {
             plan_label: getPlanConfig(subscription.plan_code).label
           },
           customer: customerDetails || {},
+          attribution: subscription.attribution_data || {},
           eventSourceUrl: PUBLIC_APP_URL
         });
         if (metaResult?.sent) {
@@ -1335,12 +1340,8 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
     const message = 'Para continuar, aceite os Termos de Uso e Privacidade.';
     return redirect ? res.status(400).send(message) : res.status(400).json({ message });
   }
-  if (!name || !email) {
-    const message = 'Informe nome e email antes de iniciar o checkout. O email sera usado para enviar login e senha.';
-    return redirect ? res.status(400).send(message) : res.status(400).json({ message });
-  }
-  if (!cpfCnpj || !postalCode || !address || !addressNumber || !province) {
-    const message = 'Informe CPF/CNPJ, CEP, endereco, numero e bairro antes de iniciar o checkout.';
+  if (!name || !email || !phone) {
+    const message = 'Informe nome, email e telefone antes de iniciar o checkout. O email sera usado para enviar login e senha.';
     return redirect ? res.status(400).send(message) : res.status(400).json({ message });
   }
   if (await hasPreviouslyActivatedPlanTrial(email, plan)) {
@@ -1362,6 +1363,26 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
     ? `${plan.description}. Inclui ${purchase.studentLimit} alunos no portal (${purchase.extraStudents} extras).`
     : plan.description;
   const paymentMode = resolveCheckoutPaymentMode(plan, source?.billingType || source?.paymentMethod);
+  const analytics = source?.analytics && typeof source.analytics === 'object' ? source.analytics : {};
+  const attributionData = {
+    visitorId: isUuid(analytics.visitorId) ? analytics.visitorId : null,
+    sessionId: isUuid(analytics.sessionId) ? analytics.sessionId : null,
+    sessionStartedAt: sanitizeText(analytics.sessionStartedAt || '', 40) || null,
+    pageUrl: sanitizeText(analytics.pageUrl || `${publicBaseUrl}/checkout.html`, 450) || null,
+    referrer: sanitizeText(analytics.referrer || '', 450) || null,
+    utmSource: sanitizeText(analytics.utmSource || '', 120) || null,
+    utmMedium: sanitizeText(analytics.utmMedium || '', 120) || null,
+    utmCampaign: sanitizeText(analytics.utmCampaign || '', 180) || null,
+    utmContent: sanitizeText(analytics.utmContent || '', 180) || null,
+    utmTerm: sanitizeText(analytics.utmTerm || '', 180) || null,
+    fbclid: sanitizeText(analytics.fbclid || '', 500) || null,
+    fbp: sanitizeText(analytics.fbp || '', 500) || null,
+    fbc: sanitizeText(analytics.fbc || '', 500) || null,
+    clientIpAddress: sanitizeText(req.ip || req.headers['x-forwarded-for'] || '', 120) || null,
+    clientUserAgent: sanitizeText(req.headers['user-agent'] || '', 1000) || null,
+    externalId: isUuid(analytics.visitorId) ? analytics.visitorId : null,
+    isInternal: analytics.isInternal === true
+  };
   const payload = {
     billingTypes: paymentMode.billingTypes,
     chargeTypes: paymentMode.chargeTypes,
@@ -1382,15 +1403,7 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
     payload.subscription = paymentMode.subscription;
   }
 
-  payload.customerData = {
-    name,
-    email,
-    cpfCnpj,
-    postalCode,
-    address,
-    addressNumber,
-    province
-  };
+  payload.customerData = { name, email };
   if (phone) {
     payload.customerData.phone = phone;
   }
@@ -1443,9 +1456,10 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
         amount: purchase.amount,
         studentLimit: purchase.studentLimit,
         termsAccepted: true,
-        marketingConsent: source?.marketingConsent !== false,
+        marketingConsent: source?.marketingConsent === true,
         analyticsVisitorId: source?.analytics?.visitorId,
         analyticsSessionId: source?.analytics?.sessionId,
+        attributionData,
         checkoutStatus: 'CHECKOUT_REJECTED',
         checkoutResponse: responseBody
       });
@@ -1474,9 +1488,10 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
         amount: purchase.amount,
         studentLimit: purchase.studentLimit,
         termsAccepted: true,
-        marketingConsent: source?.marketingConsent !== false,
+        marketingConsent: source?.marketingConsent === true,
         analyticsVisitorId: source?.analytics?.visitorId,
         analyticsSessionId: source?.analytics?.sessionId,
+        attributionData,
         checkoutStatus: 'CHECKOUT_INVALID_RESPONSE',
         checkoutResponse: responseBody
       });
@@ -1504,11 +1519,37 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
       studentLimit: purchase.studentLimit,
       unlimitedStudents: Boolean(purchase.unlimitedStudents),
       termsAccepted: true,
-      marketingConsent: source?.marketingConsent !== false,
+      marketingConsent: source?.marketingConsent === true,
       analyticsVisitorId: source?.analytics?.visitorId,
       analyticsSessionId: source?.analytics?.sessionId,
+      attributionData,
       checkoutResponse: responseBody
     });
+
+    const metaEventId = sanitizeText(source?.metaEventId || '', 100);
+    await recordCheckoutCreatedEvent({
+      visitorId: attributionData.visitorId,
+      sessionId: attributionData.sessionId,
+      eventId: metaEventId,
+      checkoutId: responseBody.id,
+      planCode: plan.id,
+      value: purchase.amount,
+      billingType: paymentMode.billingTypes[0] || null
+    }).catch((error) => console.error(`Erro ao registrar checkout criado no analytics: ${error.message}`));
+    if (metaEventId && !attributionData.isInternal) {
+      await sendMetaCheckoutEvent({
+        eventId: metaEventId,
+        customer: { name, email, phone },
+        attribution: attributionData,
+        plan: {
+          id: plan.id,
+          name: plan.label,
+          value: purchase.amount,
+          billingType: paymentMode.billingTypes[0] || null
+        },
+        eventSourceUrl: publicBaseUrl
+      }).catch((error) => console.error(`Erro ao enviar CheckoutFormSubmit para a Meta: ${error.message}`));
+    }
 
     if (redirect) {
       return res.redirect(303, checkoutUrl);

@@ -14,9 +14,24 @@
   let started = false;
   let flushTimer = null;
   let pageStartedAt = Date.now();
+  let activeDurationMs = 0;
+  let lastActiveTickAt = Date.now();
   let maxScrollDepth = 0;
   let formStarted = new Set();
   const sentScrollDepths = new Set();
+  const isEmbeddedDocument = (() => {
+    try {
+      return window.self !== window.top || new URLSearchParams(window.location.search).get('embedded') === '1';
+    } catch (error) {
+      return true;
+    }
+  })();
+
+  const readCookie = (name) => {
+    const prefix = `${name}=`;
+    const item = String(document.cookie || '').split(';').map((part) => part.trim()).find((part) => part.startsWith(prefix));
+    return item ? decodeURIComponent(item.slice(prefix.length)) : '';
+  };
 
   const uuid = () => {
     if (window.crypto?.randomUUID) return window.crypto.randomUUID();
@@ -81,7 +96,13 @@
         utmCampaign: params.get('utm_campaign') || '',
         utmContent: params.get('utm_content') || '',
         utmTerm: params.get('utm_term') || '',
-        clickIdKind: params.has('fbclid') ? 'fbclid' : params.has('gclid') ? 'gclid' : params.has('ttclid') ? 'ttclid' : ''
+        clickIdKind: params.has('fbclid') ? 'fbclid' : params.has('gclid') ? 'gclid' : params.has('ttclid') ? 'ttclid' : '',
+        fbclid: params.get('fbclid') || '',
+        fbp: readCookie('_fbp'),
+        fbc: readCookie('_fbc'),
+        isInternal: ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname)
+          || safeStorageGet(window.localStorage, 'criatyveAnalyticsInternal') === '1'
+          || params.get('analytics_internal') === '1'
       };
     }
     current.lastActiveAt = now;
@@ -134,7 +155,13 @@
   const normalizeCustomName = (name) => {
     const normalized = String(name || '').replace(/[^a-zA-Z0-9_]/g, '').toLowerCase();
     if (/purchase|paymentconfirmed|assinaturaativa/.test(normalized)) return 'purchase';
-    if (/initiatecheckout|checkoutformsubmit|checkoutclick/.test(normalized)) return 'checkout_start';
+    if (/checkoutcreated/.test(normalized)) return 'checkout_created';
+    if (/checkoutrejected|checkouterror/.test(normalized)) return 'checkout_rejected';
+    if (/checkoutformsubmit/.test(normalized)) return 'checkout_form_submit';
+    if (/checkoutformstart/.test(normalized)) return 'checkout_form_start';
+    if (/initiatecheckout|checkoutclick/.test(normalized)) return 'checkout_start';
+    if (/checkoutview/.test(normalized)) return 'checkout_view';
+    if (/trialstarted/.test(normalized)) return 'trial_started';
     if (/lead|completeRegistration/i.test(normalized)) return 'lead';
     if (/contact|whatsapp/.test(normalized)) return 'contact';
     if (/videoimpression/.test(normalized)) return 'video_impression';
@@ -157,7 +184,7 @@
     const session = getSession();
     const queue = readQueue();
     queue.push({
-      id: uuid(),
+      id: /^[0-9a-f-]{36}$/i.test(details.eventId || '') ? details.eventId : uuid(),
       name,
       occurredAt: new Date().toISOString(),
       pagePath: getPagePath(),
@@ -170,7 +197,7 @@
     session.lastActiveAt = Date.now();
     safeStorageSet(window.sessionStorage, SESSION_KEY, JSON.stringify(session));
     writeQueue(queue);
-    if (queue.length >= 10 || ['purchase', 'checkout_start', 'form_submit'].includes(name)) flush();
+    if (queue.length >= 10 || ['purchase', 'checkout_start', 'checkout_form_submit', 'checkout_created'].includes(name)) flush();
     return true;
   };
 
@@ -187,7 +214,10 @@
         screenWidth: window.screen?.width || 0,
         screenHeight: window.screen?.height || 0,
         viewportWidth: window.innerWidth,
-        viewportHeight: window.innerHeight
+        viewportHeight: window.innerHeight,
+        pageUrl: `${window.location.origin}${getPagePath()}`,
+        fbp: session.fbp || readCookie('_fbp'),
+        fbc: session.fbc || readCookie('_fbc')
       }
     };
   };
@@ -223,8 +253,15 @@
   const calculateScrollDepth = () => {
     const viewportBottom = window.scrollY + window.innerHeight;
     const documentHeight = Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0);
-    if (documentHeight <= window.innerHeight) return 100;
+    if (documentHeight <= window.innerHeight) return 0;
     return Math.max(0, Math.min(100, Math.round((viewportBottom / documentHeight) * 100)));
+  };
+
+  const accrueActiveTime = (now = Date.now()) => {
+    const elapsed = Math.max(0, Math.min(30000, now - lastActiveTickAt));
+    if (document.visibilityState === 'visible' && document.hasFocus()) activeDurationMs += elapsed;
+    lastActiveTickAt = now;
+    return activeDurationMs;
   };
 
   const handleScroll = () => {
@@ -261,18 +298,22 @@
     }, { capture: true });
     window.addEventListener('scroll', handleScroll, { passive: true });
     window.addEventListener('pagehide', () => {
+      accrueActiveTime();
       queueEvent('page_exit', {
-        durationMs: Date.now() - pageStartedAt,
+        durationMs: activeDurationMs,
         scrollDepth: Math.max(maxScrollDepth, calculateScrollDepth())
       });
       flush(true);
     });
     document.addEventListener('visibilitychange', () => {
+      accrueActiveTime();
       if (document.visibilityState === 'hidden') {
-        queueEvent('heartbeat', { durationMs: Date.now() - pageStartedAt, scrollDepth: maxScrollDepth });
+        queueEvent('heartbeat', { durationMs: activeDurationMs, scrollDepth: maxScrollDepth });
         flush(true);
       }
     });
+    window.addEventListener('focus', () => { lastActiveTickAt = Date.now(); });
+    window.addEventListener('blur', () => { accrueActiveTime(); });
   };
 
   const start = () => {
@@ -280,13 +321,16 @@
     started = true;
     document.documentElement.dataset.criatyveFirstPartyAnalytics = 'ready';
     pageStartedAt = Date.now();
+    activeDurationMs = 0;
+    lastActiveTickAt = pageStartedAt;
     getVisitorId();
     getSession();
     queueEvent('page_view');
     handleScroll();
     attachListeners();
     flushTimer = window.setInterval(() => {
-      queueEvent('heartbeat', { durationMs: Date.now() - pageStartedAt, scrollDepth: maxScrollDepth });
+      accrueActiveTime();
+      queueEvent('heartbeat', { durationMs: activeDurationMs, scrollDepth: maxScrollDepth });
       flush();
     }, 15000);
     window.setTimeout(flush, 350);
@@ -331,8 +375,9 @@
   };
 
   window.CriatyveAnalytics = Object.freeze({
-    track(name, metadata = {}) {
+    track(name, metadata = {}, options = {}) {
       return queueEvent(normalizeCustomName(name), {
+        eventId: options.eventId,
         metadata: { original_event: String(name || '').slice(0, 80), ...metadata }
       });
     },
@@ -344,7 +389,22 @@
     getContext() {
       if (!started) return null;
       const session = getSession();
-      return { visitorId: getVisitorId(), sessionId: session.id };
+      return {
+        visitorId: getVisitorId(),
+        sessionId: session.id,
+        sessionStartedAt: session.startedAt || '',
+        pageUrl: `${window.location.origin}${getPagePath()}`,
+        referrer: session.referrer || '',
+        utmSource: session.utmSource || '',
+        utmMedium: session.utmMedium || '',
+        utmCampaign: session.utmCampaign || '',
+        utmContent: session.utmContent || '',
+        utmTerm: session.utmTerm || '',
+        fbclid: session.fbclid || '',
+        fbp: session.fbp || readCookie('_fbp'),
+        fbc: session.fbc || readCookie('_fbc'),
+        isInternal: Boolean(session.isInternal)
+      };
     },
     get consent() {
       // Test and production hosts use first-party analytics during this launch phase,
@@ -355,6 +415,7 @@
   });
 
   const isLocalTestEnvironment = AUTOMATIC_ANALYTICS_HOSTS.has(window.location.hostname);
+  if (isEmbeddedDocument) return;
   if (isLocalTestEnvironment) {
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
     else start();

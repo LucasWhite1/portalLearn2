@@ -3,6 +3,24 @@
 
   const PIXEL_ID = '1067171249057361';
   const sentOnceKeys = new Set();
+  const isEmbeddedDocument = (() => {
+    try {
+      return window.self !== window.top || new URLSearchParams(window.location.search).get('embedded') === '1';
+    } catch (error) {
+      return true;
+    }
+  })();
+  const isInternalTraffic = (() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const internal = ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname)
+        || window.localStorage.getItem('criatyveAnalyticsInternal') === '1'
+        || params.get('analytics_internal') === '1';
+      return internal && params.get('meta_test') !== '1';
+    } catch (error) {
+      return false;
+    }
+  })();
   document.documentElement.dataset.criatyveAnalytics = 'ready';
 
   const sanitizeEventData = (data) => Object.fromEntries(
@@ -27,7 +45,7 @@
   );
 
   const initializePixel = () => {
-    if (!hasAnalyticsConsent() || window.__criatyveMetaPixelInitialized) return false;
+    if (isEmbeddedDocument || isInternalTraffic || !hasAnalyticsConsent() || window.__criatyveMetaPixelInitialized) return false;
     if (!window.fbq) {
     const fbq = function fbq() {
       if (fbq.callMethod) {
@@ -62,25 +80,33 @@
   }
 
   const track = (eventName, data = {}, options = {}) => {
+    if (isEmbeddedDocument || isInternalTraffic) return false;
     const safeName = String(eventName || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 50);
     if (!safeName || !hasAnalyticsConsent()) return false;
     initializePixel();
     const onceKey = options.onceKey ? String(options.onceKey) : '';
     if (onceKey && sentOnceKeys.has(onceKey)) return false;
     if (onceKey) sentOnceKeys.add(onceKey);
-    window.fbq('track', safeName, sanitizeEventData({ ...getCampaignData(), ...data }));
+    const eventId = options.eventId ? String(options.eventId).slice(0, 100) : '';
+    const eventData = sanitizeEventData({ ...getCampaignData(), ...data });
+    if (eventId) window.fbq('track', safeName, eventData, { eventID: eventId });
+    else window.fbq('track', safeName, eventData);
     window.CriatyveAnalytics?.track(safeName, sanitizeEventData(data));
     return true;
   };
 
   const trackCustom = (eventName, data = {}, options = {}) => {
+    if (isEmbeddedDocument || isInternalTraffic) return false;
     const safeName = String(eventName || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 50);
     if (!safeName || !hasAnalyticsConsent()) return false;
     initializePixel();
     const onceKey = options.onceKey ? String(options.onceKey) : '';
     if (onceKey && sentOnceKeys.has(onceKey)) return false;
     if (onceKey) sentOnceKeys.add(onceKey);
-    window.fbq('trackCustom', safeName, sanitizeEventData({ ...getCampaignData(), ...data }));
+    const eventId = options.eventId ? String(options.eventId).slice(0, 100) : '';
+    const eventData = sanitizeEventData({ ...getCampaignData(), ...data });
+    if (eventId) window.fbq('trackCustom', safeName, eventData, { eventID: eventId });
+    else window.fbq('trackCustom', safeName, eventData);
     window.CriatyveAnalytics?.track(safeName, sanitizeEventData(data));
     return true;
   };

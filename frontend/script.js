@@ -4918,7 +4918,13 @@ const analyticsEventLabel = (name) => ({
   video_volume_change: 'Alterou o volume do vídeo',
   video_fullscreen: 'Alterou a tela cheia do vídeo',
   demo_interaction: 'Interagiu com demonstração',
-  checkout_start: 'Iniciou checkout',
+  checkout_view: 'Abriu o checkout',
+  checkout_start: 'Clicou para iniciar checkout',
+  checkout_form_start: 'Começou os dados do checkout',
+  checkout_form_submit: 'Enviou dados válidos do checkout',
+  checkout_created: 'Checkout criado no Asaas',
+  checkout_rejected: 'Checkout rejeitado',
+  trial_started: 'Teste iniciado',
   purchase: 'Compra detectada',
   lead: 'Cadastro/lead',
   contact: 'Entrou em contato',
@@ -4929,6 +4935,7 @@ const getAnalyticsFilters = () => ({
   days: document.getElementById('analyticsDays')?.value || '30',
   source: document.getElementById('analyticsSource')?.value || '',
   device: document.getElementById('analyticsDevice')?.value || '',
+  traffic: document.getElementById('analyticsTraffic')?.value || 'external',
   page: document.getElementById('analyticsPage')?.value || '',
   search: String(document.getElementById('analyticsSearch')?.value || '').trim()
 });
@@ -4984,20 +4991,21 @@ const renderAnalyticsFunnel = (summary = {}) => {
   const container = document.getElementById('analyticsFunnel');
   if (!container) return;
   const visitors = Number(summary.visitors || 0);
+  const sessions = Number(summary.sessions || 0);
   const engaged = Number(summary.engagedSessions || 0);
   const checkouts = Number(summary.checkouts || 0);
   const purchases = Number(summary.purchases || 0);
   const steps = [
-    ['Visitantes', visitors, visitors ? 100 : 0],
-    ['Engajados', engaged, visitors ? (engaged / visitors) * 100 : 0],
-    ['Checkout', checkouts, visitors ? (checkouts / visitors) * 100 : 0],
-    ['Compras', purchases, visitors ? (purchases / visitors) * 100 : 0]
+    ['Sessões', sessions, sessions ? 100 : 0],
+    ['Engajadas', engaged, sessions ? (engaged / sessions) * 100 : 0],
+    ['Checkout criado', checkouts, sessions ? (checkouts / sessions) * 100 : 0],
+    ['Compras', purchases, sessions ? (purchases / sessions) * 100 : 0]
   ];
   container.innerHTML = steps.map(([label, value, rate]) => `
     <div class="analytics-funnel-step">
       <span>${escapeHtml(label)}</span>
       <strong>${Number(value).toLocaleString('pt-BR')}</strong>
-      <small>${Number(rate).toLocaleString('pt-BR', { maximumFractionDigits: 1 })}% dos visitantes</small>
+      <small>${Number(rate).toLocaleString('pt-BR', { maximumFractionDigits: 1 })}% das sessões</small>
     </div>
   `).join('');
 };
@@ -5058,11 +5066,12 @@ const renderCheckoutSubmissions = (submissions) => {
   body.innerHTML = checkoutSubmissionCache.map((item) => {
     const createdAt = new Date(item.created_at);
     const dateLabel = Number.isFinite(createdAt.getTime()) ? createdAt.toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }) : 'Data não informada';
+    const attribution = item.attribution || {};
     return `
       <tr>
         <td data-label="Envio"><strong>${escapeHtml(dateLabel)}</strong><small>${escapeHtml(String(item.id || ''))}</small></td>
         <td data-label="Pessoa"><strong>${escapeHtml(item.payer_name || 'Não informado')}</strong><small>${escapeHtml(item.payer_email || 'Sem e-mail')} · ${escapeHtml(item.checkout_phone || 'Sem telefone')}</small></td>
-        <td data-label="CPF/CNPJ"><strong>${escapeHtml(item.checkout_cpf_cnpj_masked || 'Não informado')}</strong></td>
+        <td data-label="Origem"><strong>${escapeHtml(attribution.utmSource || 'Direto')}</strong><small>${escapeHtml(attribution.utmCampaign || 'Sem campanha')}</small></td>
         <td data-label="Pagamento"><strong>${escapeHtml(item.checkout_billing_type === 'PIX' ? 'Pix' : item.checkout_billing_type === 'CREDIT_CARD' ? 'Cartão' : item.checkout_billing_type || 'Não informado')}</strong></td>
         <td data-label="Plano"><strong>${escapeHtml(item.plan_code || 'pro')}</strong><small>${formatBrl(item.amount)}${Number(item.student_limit || 0) ? ` · ${Number(item.student_limit)} alunos` : ''}</small></td>
         <td data-label="Status"><span class="analytics-result-pill ${['ACTIVE', 'CONFIRMED', 'RECEIVED'].includes(String(item.status || '').toUpperCase()) ? 'purchase' : 'checkout'}">${escapeHtml(checkoutSubmissionStatusLabel(item.status))}</span></td>
@@ -5087,6 +5096,7 @@ const openCheckoutSubmission = (submissionId) => {
   document.getElementById('checkoutSubmissionTitle').textContent = item.payer_name || 'Envio do checkout';
   document.getElementById('checkoutSubmissionSubtitle').textContent = `Enviado em ${Number.isFinite(createdAt.getTime()) ? createdAt.toLocaleString('pt-BR') : 'data não informada'} · ${checkoutSubmissionStatusLabel(item.status)}`;
   const address = [item.checkout_address, item.checkout_address_number, item.checkout_complement, item.checkout_province, item.checkout_postal_code ? `CEP ${item.checkout_postal_code}` : ''].filter(Boolean).join(', ');
+  const attribution = item.attribution || {};
   const rows = [
     ['Nome', item.payer_name],
     ['E-mail', item.payer_email],
@@ -5100,7 +5110,15 @@ const openCheckoutSubmission = (submissionId) => {
     ['Status', checkoutSubmissionStatusLabel(item.status)],
     ['Motivo da rejeição', item.checkout_error],
     ['ID do pagamento Asaas', item.provider_payment_id],
-    ['ID da assinatura Asaas', item.provider_subscription_id]
+    ['ID da assinatura Asaas', item.provider_subscription_id],
+    ['Origem UTM', attribution.utmSource],
+    ['Mídia UTM', attribution.utmMedium],
+    ['Campanha UTM', attribution.utmCampaign],
+    ['Criativo UTM', attribution.utmContent],
+    ['Página de origem', attribution.pageUrl],
+    ['Referência', attribution.referrer],
+    ['Clique da Meta identificado', attribution.metaClickIdentified ? 'Sim' : 'Não'],
+    ['Tráfego interno', attribution.internal ? 'Sim' : 'Não']
   ].filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== '');
   details.innerHTML = rows.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`).join('');
   modal.classList.remove('hidden');
@@ -5256,7 +5274,7 @@ const openAnalyticsJourney = async (sessionId) => {
 
 const initSiteAnalytics = () => {
   document.getElementById('analyticsRefreshBtn')?.addEventListener('click', loadSiteAnalytics);
-  ['analyticsDays', 'analyticsSource', 'analyticsDevice', 'analyticsPage'].forEach((id) => {
+  ['analyticsDays', 'analyticsSource', 'analyticsDevice', 'analyticsTraffic', 'analyticsPage'].forEach((id) => {
     document.getElementById(id)?.addEventListener('change', loadSiteAnalytics);
   });
   document.getElementById('analyticsSearch')?.addEventListener('input', () => {

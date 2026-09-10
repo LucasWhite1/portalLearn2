@@ -80,7 +80,7 @@
       margin: 1rem 0 .85rem;
       font-size: clamp(2rem, 4vw, 3.3rem);
       line-height: 1.02;
-      letter-spacing: -.05em;
+      letter-spacing: 0;
     }
     p {
       margin: 0;
@@ -92,6 +92,38 @@
       gap: .85rem;
       margin-top: 1.35rem;
     }
+    .trust-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: .65rem;
+      margin-top: 1rem;
+    }
+    .trust-item {
+      min-width: 0;
+      padding: .85rem;
+      border: 1px solid rgba(255,255,255,.09);
+      border-radius: 8px;
+      background: rgba(255,255,255,.035);
+    }
+    .trust-item strong, .trust-item small { display: block; }
+    .trust-item strong { color: #fff; font-size: .84rem; }
+    .trust-item small { margin-top: .3rem; color: var(--muted); line-height: 1.45; }
+    .proof-link {
+      display: inline-flex;
+      align-items: center;
+      margin-top: .75rem;
+      color: #ddd6fe;
+      font-size: .9rem;
+      font-weight: 800;
+      text-decoration: none;
+    }
+    .early-reviews[hidden] { display: none; }
+    .early-reviews { margin-top: 1.1rem; }
+    .early-reviews h2 { margin: 0 0 .7rem; font-size: 1rem; }
+    .early-review-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .65rem; }
+    .early-review { margin: 0; padding: .85rem; border: 1px solid rgba(255,255,255,.09); border-radius: 8px; background: rgba(255,255,255,.035); }
+    .early-review p { color: #f4f1ff; font-size: .86rem; line-height: 1.55; }
+    .early-review footer { margin-top: .6rem; color: var(--muted); font-size: .76rem; }
     .highlight {
       border-radius: 20px;
       border: 1px solid rgba(255,255,255,.09);
@@ -121,7 +153,7 @@
     .price {
       font-size: 2.1rem;
       font-weight: 900;
-      letter-spacing: -.06em;
+      letter-spacing: 0;
       color: #fff;
       min-width: 0;
       max-width: 19rem;
@@ -207,6 +239,7 @@
       display: grid;
       gap: .42rem;
     }
+    .field[hidden] { display: none; }
     .field label {
       font-size: .92rem;
       font-weight: 700;
@@ -319,6 +352,8 @@
       .field-grid {
         grid-template-columns: 1fr;
       }
+      .trust-grid { grid-template-columns: 1fr; }
+      .early-review-list { grid-template-columns: 1fr; }
       .price {
         font-size: 1.85rem;
       }
@@ -334,13 +369,10 @@
         <span class="kicker" id="checkoutKicker">Checkout Criatyve</span>
         <h1 id="checkoutHeading">Finalize sua assinatura</h1>
         <p id="checkoutDescription">Escolha o plano ideal e siga para um checkout seguro.</p>
-
-        <div class="highlights">
-          <div class="highlight">
-            <strong>Checkout seguro no Asaas</strong>
-            <p>Antes de abrir o ambiente do gateway, guardamos seu nome e e-mail para criar o acesso do professor depois da confirmação.</p>
+        <div class="trust-grid" aria-label="Garantias do checkout">
           </div>
-        </div>
+        <a class="proof-link" href="aulas-interativas-ia.html#exemplos" target="_blank" rel="noopener noreferrer">Abrir demonstrações interativas</a>
+        <div class="early-reviews" id="checkoutEarlyReviews" hidden aria-label="Relatos de usuários iniciais"></div>
 
         <form class="form" id="checkoutForm">
           <div class="field">
@@ -355,40 +387,7 @@
             </div>
             <div class="field">
               <label for="checkoutPhone">Telefone</label>
-              <input id="checkoutPhone" name="phone" type="tel" autocomplete="tel" />
-            </div>
-          </div>
-
-          <div class="field" id="checkoutStudentCountField">
-            <label for="checkoutCpfCnpj">CPF ou CNPJ</label>
-            <input id="checkoutCpfCnpj" name="cpfCnpj" type="text" inputmode="numeric" required />
-            <small>Os dados finais de pagamento serão preenchidos no checkout seguro do Asaas.</small>
-          </div>
-
-          <div class="field-grid">
-            <div class="field">
-              <label for="checkoutPostalCode">CEP</label>
-              <input id="checkoutPostalCode" name="postalCode" type="text" inputmode="numeric" autocomplete="postal-code" required />
-            </div>
-            <div class="field">
-              <label for="checkoutAddressNumber">Número</label>
-              <input id="checkoutAddressNumber" name="addressNumber" type="text" autocomplete="address-line2" required />
-            </div>
-          </div>
-
-          <div class="field">
-            <label for="checkoutAddress">Endereço</label>
-            <input id="checkoutAddress" name="address" type="text" autocomplete="address-line1" required />
-          </div>
-
-          <div class="field-grid">
-            <div class="field">
-              <label for="checkoutProvince">Bairro</label>
-              <input id="checkoutProvince" name="province" type="text" required />
-            </div>
-            <div class="field">
-              <label for="checkoutComplement">Complemento</label>
-              <input id="checkoutComplement" name="complement" type="text" autocomplete="address-line3" />
+              <input id="checkoutPhone" name="phone" type="tel" autocomplete="tel" required />
             </div>
           </div>
 
@@ -401,7 +400,7 @@
             <small id="checkoutBillingTypeHint">Para assinatura automática, use cartão. Pix é confirmado por webhook após o pagamento.</small>
           </div>
 
-          <div class="field">
+          <div class="field" id="checkoutStudentCountField">
             <label for="checkoutStudentCount">Alunos no portal</label>
             <input id="checkoutStudentCount" name="studentCount" type="number" min="15" step="1" value="15" inputmode="numeric" />
             <small id="checkoutStudentInfo">15 alunos inclusos. Sem cobrança extra.</small>
@@ -410,8 +409,12 @@
           <label class="legal-consent-box checkout-legal-consent" for="checkoutTermsAccepted">
             <input type="checkbox" id="checkoutTermsAccepted" name="termsAccepted" required />
             <span>
-              Li e aceito os <a href="terms.html" target="_blank" rel="noopener noreferrer">Termos de Uso e Privacidade</a>. Declaro que sou responsável pelos conteúdos que criar/publicar e autorizo contato da Criatyve para suporte, avisos, cobrança, segurança e marketing.
+              Li e aceito os <a href="terms.html" target="_blank" rel="noopener noreferrer">Termos de Uso e Privacidade</a> e as condições de cobrança da forma de pagamento escolhida.
             </span>
+          </label>
+          <label class="legal-consent-box checkout-legal-consent" for="checkoutMarketingConsent">
+            <input type="checkbox" id="checkoutMarketingConsent" name="marketingConsent" />
+            <span>Quero receber novidades, conteúdos e ofertas da Criatyve. Esta opção não é obrigatória para assinar.</span>
           </label>
         </form>
       </section>
@@ -471,7 +474,7 @@
       },
       'pro-unlimited': {
         kicker: '20 dias sem risco',
-        heading: 'Comece com o Criatyve Pro Ilimitado',
+        heading: 'Comece com o Criatyve Pro ilimitado',
         description: 'Escolha cartão para não pagar nada agora ou Pix com pagamento imediato e garantia de reembolso por 20 dias.',
         planName: 'Criatyve Pro Ilimitado',
         planSubtitle: 'Condições diferentes para cartão e Pix',
@@ -525,6 +528,29 @@
     const extraStudentPrice = 9.70;
     const requestedStudentInitial = Math.max(includedStudents, Math.round(Number(params.get('students') || includedStudents) || includedStudents));
 
+    function renderEarlyUserReviews() {
+      const container = document.getElementById('checkoutEarlyReviews');
+      const reviews = Array.isArray(window.CRIATYVE_EARLY_USER_REVIEWS) ? window.CRIATYVE_EARLY_USER_REVIEWS : [];
+      const validReviews = reviews.filter((review) => review && review.permission === true && review.name && review.quote).slice(0, 3);
+      if (!container || !validReviews.length) return;
+      const heading = document.createElement('h2');
+      heading.textContent = 'Relatos de quem já testou o Criatyve';
+      const list = document.createElement('div');
+      list.className = 'early-review-list';
+      validReviews.forEach((review) => {
+        const article = document.createElement('blockquote');
+        article.className = 'early-review';
+        const quote = document.createElement('p');
+        quote.textContent = `“${String(review.quote).trim()}”`;
+        const author = document.createElement('footer');
+        author.textContent = `${String(review.name).trim()}${review.context ? ` · ${String(review.context).trim()}` : ''}`;
+        article.append(quote, author);
+        list.appendChild(article);
+      });
+      container.replaceChildren(heading, list);
+      container.hidden = false;
+    }
+
     function getStudentCount() {
       if (plan.unlimitedStudents) return 0;
       return Math.max(includedStudents, Math.round(Number(studentCountInput?.value || requestedStudentInitial) || requestedStudentInitial));
@@ -574,9 +600,9 @@
 
     function getSubmitLabel() {
       return isPixGuaranteeSelected()
-        ? `Pagar ${brl.format(basePrice)} com Pix`
+        ? `Pagar ${brl.format(basePrice)} com garantia de 20 dias`
         : Number(plan.trialDays || 0) > 0
-        ? `Começar ${plan.trialDays} dias grátis`
+        ? `Iniciar ${plan.trialDays} dias sem cobrança`
         : 'Ir para o checkout seguro';
     }
 
@@ -646,24 +672,13 @@
         name: String(formData.get('name') || '').trim(),
         email: String(formData.get('email') || '').trim(),
         phone: String(formData.get('phone') || '').trim(),
-        cpfCnpj: String(formData.get('cpfCnpj') || '').trim(),
-        postalCode: String(formData.get('postalCode') || '').trim(),
-        address: String(formData.get('address') || '').trim(),
-        addressNumber: String(formData.get('addressNumber') || '').trim(),
-        province: String(formData.get('province') || '').trim(),
-        complement: String(formData.get('complement') || '').trim(),
         billingType: planKey === 'trial-30-dias' ? 'CREDIT_CARD' : String(formData.get('billingType') || 'CREDIT_CARD'),
         studentCount: getStudentCount(),
         termsAccepted: formData.get('termsAccepted') === 'on',
-        marketingConsent: formData.get('termsAccepted') === 'on'
+        marketingConsent: formData.get('marketingConsent') === 'on'
       };
       payload.analytics = window.CriatyveAnalytics?.getContext?.() || null;
-      window.CriatyveMeta?.trackCustom('CheckoutFormSubmit', {
-        plan: planKey,
-        value: getCheckoutAmount(),
-        currency: 'BRL',
-        billing_type: payload.billingType
-      });
+      payload.metaEventId = window.crypto?.randomUUID?.() || `checkout-${Date.now()}-${Math.random().toString(16).slice(2)}`;
       if (!payload.termsAccepted) {
         submitButton.disabled = false;
         submitButton.textContent = getSubmitLabel();
@@ -690,8 +705,23 @@
             : '';
           throw new Error(providerDetails || data.message || 'Não foi possível iniciar o checkout.');
         }
+        const eventData = {
+          plan: planKey,
+          value: getCheckoutAmount(),
+          currency: 'BRL',
+          billing_type: payload.billingType,
+          checkout_id: data.checkoutId || ''
+        };
+        window.CriatyveMeta?.trackCustom('CheckoutFormSubmit', eventData, { eventId: payload.metaEventId });
+        window.CriatyveAnalytics?.track('CheckoutCreated', eventData, { eventId: payload.metaEventId });
+        window.CriatyveAnalytics?.flush(true);
         window.location.href = data.checkoutUrl;
       } catch (error) {
+        window.CriatyveAnalytics?.track('CheckoutRejected', {
+          plan: planKey,
+          billing_type: payload.billingType,
+          reason: String(error.message || 'checkout_error').slice(0, 160)
+        });
         submitButton.disabled = false;
         submitButton.textContent = getSubmitLabel();
         const isNetworkError = error instanceof TypeError && /fetch/i.test(error.message || '');
@@ -703,13 +733,17 @@
     });
 
     applyPlanData();
-    window.CriatyveMeta?.track('InitiateCheckout', {
+    renderEarlyUserReviews();
+    window.CriatyveMeta?.trackCustom('CheckoutView', {
       content_name: plan.planName,
       content_category: 'SaaS para professores',
       content_ids: [planKey],
       value: getCheckoutAmount(),
       currency: 'BRL'
-    }, { onceKey: `checkout:${planKey}` });
+    }, { onceKey: `checkout-view:${planKey}` });
+    document.getElementById('checkoutForm')?.addEventListener('focusin', () => {
+      window.CriatyveAnalytics?.track('CheckoutFormStart', { plan: planKey });
+    }, { once: true });
     if (billingTypeSelect) {
       billingTypeSelect.addEventListener('change', () => {
         syncPaymentHint();

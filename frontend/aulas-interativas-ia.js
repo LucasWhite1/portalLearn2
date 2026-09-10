@@ -4,7 +4,8 @@
   const PLAN_ID = 'pro-unlimited';
   const PLAN_VALUE = 97.90;
   const WHATSAPP_PHONE = '5571993615509';
-  const DEMO_BASE = 'module-viewer.html?embedded=1&demoTemplates=';
+  const DEMO_VIEWER_BUILD = '20260910-1';
+  const DEMO_BASE = `module-viewer.html?demoBuild=${DEMO_VIEWER_BUILD}&embedded=1&demoTemplates=`;
   const campaignKeys = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'fbclid'];
   const params = new URLSearchParams(window.location.search);
 
@@ -71,6 +72,33 @@
     frame.src = getDemoUrl(template, retryAttempt);
   };
 
+  const guardDemoFrameNavigation = (frame) => {
+    frame.addEventListener('load', () => {
+      try {
+        const path = frame.contentWindow?.location?.pathname || '';
+        if (!path.endsWith('/login.html')) return;
+        const retryAttempt = Number(frame.dataset.retryAttempt || 0);
+        if (retryAttempt >= 1) {
+          frame.dataset.error = 'true';
+          if (frame.dataset.template === activeTemplate) {
+            setDemoLoading(true, 'Não foi possível abrir este exemplo.', true);
+          }
+          return;
+        }
+        reloadDemoFrame(
+          frame,
+          frame.dataset.template,
+          frame.title.replace(' criado no Criatyve', ''),
+          retryAttempt + 1
+        );
+      } catch (error) {
+        // O iframe de demonstração deve permanecer na origem da própria aplicação.
+      }
+    });
+  };
+
+  if (initialDemoFrame) guardDemoFrameNavigation(initialDemoFrame);
+
   const getOrCreateDemoFrame = (template, demoName) => {
     let frame = demoViewport?.querySelector(`.demo-frame[data-template="${template}"]`);
     if (frame) return frame;
@@ -80,6 +108,7 @@
     frame.title = `${demoName} criado no Criatyve`;
     frame.loading = 'lazy';
     frame.allow = 'fullscreen';
+    guardDemoFrameNavigation(frame);
     reloadDemoFrame(frame, template, demoName);
     demoViewport?.appendChild(frame);
     return frame;

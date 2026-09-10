@@ -6,6 +6,7 @@
   <title>Administração | Portal do Curso</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <link rel="stylesheet" href="style.css?v=20260831-2" />
+  <script>try { localStorage.setItem('criatyveAnalyticsInternal', '1'); } catch (error) {}</script>
 </head>
 <body class="admin-page">
   <button type="button" class="mobile-sidenav-toggle" id="mobileSidenavToggle" aria-controls="mobileSidenav" aria-expanded="false">
@@ -364,6 +365,14 @@
               </select>
             </label>
             <label>
+              <span>Tráfego</span>
+              <select id="analyticsTraffic">
+                <option value="external">Visitantes reais</option>
+                <option value="internal">Testes internos</option>
+                <option value="all">Todos</option>
+              </select>
+            </label>
+            <label>
               <span>Página</span>
               <select id="analyticsPage"><option value="">Todas as páginas</option></select>
             </label>
@@ -453,7 +462,7 @@
             </div>
             <div class="table-wrapper analytics-table-wrap">
               <table class="table admin-responsive-table analytics-sessions-table">
-                <thead><tr><th>Envio</th><th>Pessoa</th><th>CPF/CNPJ</th><th>Pagamento</th><th>Plano</th><th>Status</th><th>Ação</th></tr></thead>
+                <thead><tr><th>Envio</th><th>Pessoa</th><th>Origem</th><th>Pagamento</th><th>Plano</th><th>Status</th><th>Ação</th></tr></thead>
                 <tbody id="checkoutSubmissionsBody"><tr><td colspan="7">Carregando dados de checkout...</td></tr></tbody>
               </table>
             </div>

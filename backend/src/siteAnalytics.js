@@ -28,7 +28,13 @@ const EVENT_NAMES = new Set([
   'video_volume_change',
   'video_fullscreen',
   'demo_interaction',
+  'checkout_view',
   'checkout_start',
+  'checkout_form_start',
+  'checkout_form_submit',
+  'checkout_created',
+  'checkout_rejected',
+  'trial_started',
   'purchase',
   'lead',
   'contact',
@@ -192,6 +198,7 @@ const ensureAnalyticsSchema = async () => {
     CREATE INDEX IF NOT EXISTS idx_analytics_events_name_date ON analytics_events(event_name, occurred_at DESC);
     CREATE INDEX IF NOT EXISTS idx_analytics_events_page_date ON analytics_events(page_path, occurred_at DESC);
   `);
+  await db.query('ALTER TABLE analytics_sessions ADD COLUMN IF NOT EXISTS is_internal BOOLEAN NOT NULL DEFAULT FALSE');
   schemaEnsured = true;
 };
 
@@ -234,6 +241,37 @@ const recordPurchaseEvent = async ({ visitorId, sessionId, payment = {}, planCod
           SET event_count = event_count + 1,
               last_seen_at = NOW()
         WHERE id = $1`,
+      [sessionId]
+    );
+  }
+  return Boolean(result.rowCount);
+};
+
+const recordCheckoutCreatedEvent = async ({ visitorId, sessionId, eventId, checkoutId, planCode, value, billingType } = {}) => {
+  if (!isUuid(visitorId) || !isUuid(sessionId) || !isUuid(eventId)) return false;
+  await ensureAnalyticsSchema();
+  const sessionResult = await db.query(
+    'SELECT exit_path, landing_path FROM analytics_sessions WHERE id = $1 AND visitor_id = $2',
+    [sessionId, visitorId]
+  );
+  if (!sessionResult.rows.length) return false;
+  const pagePath = sessionResult.rows[0].exit_path || sessionResult.rows[0].landing_path || '/checkout.html';
+  const result = await db.query(
+    `INSERT INTO analytics_events (
+       id, session_id, visitor_id, event_name, occurred_at, page_path, metadata
+     ) VALUES ($1, $2, $3, 'checkout_created', NOW(), $4, $5)
+     ON CONFLICT (id) DO NOTHING`,
+    [eventId, sessionId, visitorId, pagePath, {
+      checkout_id: cleanText(checkoutId, 120),
+      plan: cleanText(planCode, 40),
+      value: Number.isFinite(Number(value)) ? Number(value) : null,
+      currency: 'BRL',
+      billing_type: cleanText(billingType, 30)
+    }]
+  );
+  if (result.rowCount) {
+    await db.query(
+      'UPDATE analytics_sessions SET event_count = event_count + 1, last_seen_at = NOW() WHERE id = $1',
       [sessionId]
     );
   }
@@ -301,15 +339,16 @@ publicRouter.post('/collect', collectLimiter, async (req, res, next) => {
            id, visitor_id, landing_path, exit_path, referrer_domain,
            utm_source, utm_medium, utm_campaign, utm_content, utm_term, click_id_kind,
            device_type, operating_system, browser_name, language, timezone, country_code,
-           screen_width, screen_height, network_hash
+           screen_width, screen_height, network_hash, is_internal
          ) VALUES (
            $1, $2, $3, $3, $4, $5, $6, $7, $8, $9, $10,
-           $11, $12, $13, $14, $15, $16, $17, $18, $19
+           $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
          )
          ON CONFLICT (id) DO UPDATE SET
            last_seen_at = NOW(),
            exit_path = EXCLUDED.exit_path,
-           duration_seconds = GREATEST(analytics_sessions.duration_seconds, EXCLUDED.duration_seconds)
+           duration_seconds = GREATEST(analytics_sessions.duration_seconds, EXCLUDED.duration_seconds),
+           is_internal = analytics_sessions.is_internal OR $20::boolean
          RETURNING (xmax = 0) AS inserted`,
         [
           sessionId,
@@ -330,7 +369,8 @@ publicRouter.post('/collect', collectLimiter, async (req, res, next) => {
           cleanText(req.headers['cf-ipcountry'] || req.headers['x-vercel-ip-country'], 2),
           clampInteger(session.screenWidth, 0, 16000),
           clampInteger(session.screenHeight, 0, 16000),
-          getNetworkHash(req)
+          getNetworkHash(req),
+          session.isInternal === true
         ]
       );
       if (!newVisitor && insertedSession.rows[0]?.inserted === true) {
@@ -407,7 +447,8 @@ const ensureCheckoutSubmissionColumns = async () => {
     'checkout_address_number TEXT',
     'checkout_province TEXT',
     'checkout_complement TEXT',
-    'checkout_billing_type TEXT'
+    'checkout_billing_type TEXT',
+    "attribution_data JSONB NOT NULL DEFAULT '{}'::jsonb"
   ].map((definition) => db.query(`ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS ${definition}`)));
   checkoutSubmissionColumnsEnsured = true;
   return true;
@@ -436,15 +477,25 @@ adminRouter.get('/analytics/checkout-submissions', requireGlobalAdmin, async (re
              checkout_province, checkout_complement, checkout_billing_type,
              plan_code, amount, student_limit, status, provider_payment_id,
              provider_subscription_id, created_at, updated_at, activated_at,
-             analytics_session_id, raw_payload
+             analytics_session_id, attribution_data, raw_payload
         FROM billing_subscriptions
        WHERE provider = 'asaas'
          AND checkout_external_reference LIKE 'checkout:%'${searchClause}
        ORDER BY created_at DESC
        LIMIT 150`, values);
     return res.json({
-      submissions: rows.map(({ raw_payload: rawPayload, ...row }) => ({
+      submissions: rows.map(({ raw_payload: rawPayload, attribution_data: attributionData, ...row }) => ({
         ...row,
+        attribution: {
+          utmSource: cleanText(attributionData?.utmSource, 120),
+          utmMedium: cleanText(attributionData?.utmMedium, 120),
+          utmCampaign: cleanText(attributionData?.utmCampaign, 180),
+          utmContent: cleanText(attributionData?.utmContent, 180),
+          referrer: cleanText(attributionData?.referrer, 300),
+          pageUrl: cleanText(attributionData?.pageUrl, 300),
+          metaClickIdentified: Boolean(attributionData?.fbclid || attributionData?.fbc),
+          internal: attributionData?.isInternal === true
+        },
         checkout_cpf_cnpj_masked: maskDocument(row.checkout_cpf_cnpj),
         checkout_error: cleanText(
           Array.isArray(rawPayload?.errors)
@@ -470,6 +521,9 @@ const buildSessionFilter = (query = {}) => {
   const device = ['desktop', 'mobile', 'tablet'].includes(query.device) ? query.device : null;
   const page = cleanText(query.page, 300);
   const search = cleanText(query.search, 180);
+  const traffic = ['all', 'internal', 'external'].includes(query.traffic) ? query.traffic : 'external';
+  if (traffic === 'external') conditions.push('COALESCE(s.is_internal, FALSE) = FALSE');
+  if (traffic === 'internal') conditions.push('COALESCE(s.is_internal, FALSE) = TRUE');
   if (source) add(`COALESCE(s.utm_source, s.referrer_domain, 'Direto') = ?`, source);
   if (device) add('s.device_type = ?', device);
   if (page) add('EXISTS (SELECT 1 FROM analytics_events pe WHERE pe.session_id = s.id AND pe.page_path = ?)', page);
@@ -510,6 +564,7 @@ adminRouter.get('/analytics/overview', requireGlobalAdmin, async (req, res, next
         "         MAX(CASE WHEN (metadata->>'duration_seconds') ~ '^[0-9]+([.][0-9]+)?$' THEN (metadata->>'duration_seconds')::numeric ELSE 0 END) AS duration_seconds",
         '    FROM filtered_events',
         "   WHERE event_name IN ('video_progress', 'video_pause', 'video_complete', 'video_exit')",
+        "     AND session_id IN (SELECT session_id FROM filtered_events WHERE event_name = 'video_start')",
         '   GROUP BY session_id',
         ')',
         'SELECT event_totals.impressions, event_totals.starts, event_totals.completions,',
@@ -522,11 +577,11 @@ adminRouter.get('/analytics/overview', requireGlobalAdmin, async (req, res, next
       db.query(`
         SELECT COUNT(*)::int AS sessions,
                COUNT(DISTINCT visitor_id)::int AS visitors,
-               COALESCE(ROUND(AVG(duration_seconds)), 0)::int AS avg_duration_seconds,
+               COALESCE(ROUND(AVG(LEAST(duration_seconds, 1800))), 0)::int AS avg_duration_seconds,
                COUNT(*) FILTER (WHERE duration_seconds >= 10 OR event_count >= 3)::int AS engaged_sessions,
                COUNT(*) FILTER (WHERE pageview_count <= 1 AND duration_seconds < 10)::int AS bounced_sessions,
                COALESCE(SUM(pageview_count), 0)::int AS pageviews,
-               COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM analytics_events e WHERE e.session_id = s.id AND e.event_name = 'checkout_start'))::int AS checkouts,
+               COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM analytics_events e WHERE e.session_id = s.id AND e.event_name = 'checkout_created'))::int AS checkouts,
                COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM analytics_events e WHERE e.session_id = s.id AND e.event_name = 'purchase'))::int AS purchases
           FROM analytics_sessions s WHERE ${where}`, values),
       db.query(`
@@ -550,7 +605,7 @@ adminRouter.get('/analytics/overview', requireGlobalAdmin, async (req, res, next
       db.query(`
         SELECT COALESCE(s.utm_campaign, 'Sem campanha') AS label,
                COUNT(*)::int AS value,
-               COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM analytics_events e WHERE e.session_id = s.id AND e.event_name = 'checkout_start'))::int AS checkouts,
+               COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM analytics_events e WHERE e.session_id = s.id AND e.event_name = 'checkout_created'))::int AS checkouts,
                COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM analytics_events e WHERE e.session_id = s.id AND e.event_name = 'purchase'))::int AS purchases
           FROM analytics_sessions s WHERE ${where}
          GROUP BY 1 ORDER BY value DESC LIMIT 12`, values),
@@ -567,7 +622,7 @@ adminRouter.get('/analytics/overview', requireGlobalAdmin, async (req, res, next
                s.utm_campaign, s.device_type, s.operating_system, s.browser_name,
                s.language, s.timezone, s.country_code, s.pageview_count, s.event_count,
                s.max_scroll_depth,
-               EXISTS (SELECT 1 FROM analytics_events e WHERE e.session_id = s.id AND e.event_name = 'checkout_start') AS checkout_started,
+               EXISTS (SELECT 1 FROM analytics_events e WHERE e.session_id = s.id AND e.event_name = 'checkout_created') AS checkout_started,
                EXISTS (SELECT 1 FROM analytics_events e WHERE e.session_id = s.id AND e.event_name = 'purchase') AS purchased
           FROM analytics_sessions s WHERE ${where}
          ORDER BY s.started_at DESC LIMIT 100`, values)
@@ -632,6 +687,7 @@ module.exports = {
   adminRouter,
   publicRouter,
   ensureAnalyticsSchema,
+  recordCheckoutCreatedEvent,
   recordPurchaseEvent,
   parseClient,
   cleanPagePath,

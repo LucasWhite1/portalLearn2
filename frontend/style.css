@@ -7040,7 +7040,7 @@ body {
 
 .analytics-toolbar {
   display: grid;
-  grid-template-columns: 150px minmax(150px, 1fr) 150px minmax(170px, 1fr) minmax(220px, 1.2fr) auto;
+  grid-template-columns: 130px minmax(140px, 1fr) 130px 140px minmax(160px, 1fr) minmax(210px, 1.2fr) auto;
   align-items: end;
   gap: 10px;
   margin-top: 20px;

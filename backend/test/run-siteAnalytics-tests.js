@@ -51,4 +51,11 @@ const unknown = normalizeEvent({
 }, 'e0bb6db0-091c-4c47-b878-001fbed91ca8', '60921ae5-2b5e-4577-afb3-d5f45197cb7c');
 assert.strictEqual(unknown.name, 'custom');
 
+const checkoutCreated = normalizeEvent({
+  id: '643f8a30-c3f0-4fc0-9f68-d7decd8eaabe',
+  name: 'checkout_created',
+  pagePath: '/checkout.html?plan=pro-unlimited'
+}, 'e0bb6db0-091c-4c47-b878-001fbed91ca8', '60921ae5-2b5e-4577-afb3-d5f45197cb7c');
+assert.strictEqual(checkoutCreated.name, 'checkout_created');
+
 console.log('Site analytics tests passed.');
