@@ -439,10 +439,11 @@
     window.addEventListener('pagehide', () => trackExit('page_exit'));
     if ('IntersectionObserver' in window) {
       const observer = new IntersectionObserver((entries) => {
-        if (!entries.some((entry) => entry.isIntersecting && entry.intersectionRatio >= .65)) return;
-        track('video_impression', { visible_ratio: 65 });
+        const visibleEntry = entries.find((entry) => entry.isIntersecting && entry.intersectionRatio >= .15);
+        if (!visibleEntry) return;
+        track('video_impression', { visible_ratio: Math.round(visibleEntry.intersectionRatio * 100) });
         observer.disconnect();
-      }, { threshold: [.65] });
+      }, { threshold: [.15] });
       observer.observe(player);
     } else {
       track('video_impression', { visible_ratio: 100 });

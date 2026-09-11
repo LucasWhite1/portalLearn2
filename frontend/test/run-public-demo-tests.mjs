@@ -6,11 +6,12 @@ import { normalizeThreeDAttachment, normalizeThreeDScene } from '../modules/thre
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const frontendDir = path.resolve(testDir, '..');
-const [viewerSource, viewerHtml, salesSource, salesHtml] = await Promise.all([
+const [viewerSource, viewerHtml, salesSource, salesHtml, analyticsSource] = await Promise.all([
   readFile(path.join(frontendDir, 'module-viewer.js'), 'utf8'),
   readFile(path.join(frontendDir, 'module-viewer.html'), 'utf8'),
   readFile(path.join(frontendDir, 'aulas-interativas-ia.js'), 'utf8'),
-  readFile(path.join(frontendDir, 'aulas-interativas-ia.html'), 'utf8')
+  readFile(path.join(frontendDir, 'aulas-interativas-ia.html'), 'utf8'),
+  readFile(path.join(frontendDir, 'analytics.js'), 'utf8')
 ]);
 
 assert.match(viewerSource, /viewerState\.isDemo = demoTemplateKeys\.length > 0/);
@@ -23,6 +24,9 @@ assert.doesNotMatch(viewerSource.slice(0, 500), /three-d-stage\.js/);
 assert.match(viewerSource, /import\('\.\/modules\/three-d-stage\.js'\)/);
 assert.match(salesSource, /endsWith\('\/login\.html'\)/);
 assert.match(salesHtml, /loading="eager" fetchpriority="high"/);
+assert.doesNotMatch(analyticsSource, /&&\s*document\.hasFocus\(\)/);
+assert.match(analyticsSource, /'video_impression', 'video_start', 'video_pause', 'video_complete', 'video_exit'/);
+assert.match(salesSource, /intersectionRatio >= \.15/);
 
 const build = salesSource.match(/DEMO_VIEWER_BUILD = '([^']+)'/)?.[1];
 assert.ok(build);

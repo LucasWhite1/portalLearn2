@@ -199,6 +199,30 @@ const ensureAnalyticsSchema = async () => {
     CREATE INDEX IF NOT EXISTS idx_analytics_events_page_date ON analytics_events(page_path, occurred_at DESC);
   `);
   await db.query('ALTER TABLE analytics_sessions ADD COLUMN IF NOT EXISTS is_internal BOOLEAN NOT NULL DEFAULT FALSE');
+  await db.query(`
+    WITH ordered_events AS (
+      SELECT e.session_id,
+             e.occurred_at,
+             LAG(e.occurred_at) OVER (PARTITION BY e.session_id ORDER BY e.occurred_at) AS previous_at
+        FROM analytics_events e
+        JOIN analytics_sessions s ON s.id = e.session_id
+       WHERE s.duration_seconds = 0
+    ), derived_duration AS (
+      SELECT session_id,
+             LEAST(
+               1800,
+               FLOOR(SUM(LEAST(30, GREATEST(0, EXTRACT(EPOCH FROM (occurred_at - previous_at))))))
+             )::int AS duration_seconds
+        FROM ordered_events
+       WHERE previous_at IS NOT NULL
+       GROUP BY session_id
+    )
+    UPDATE analytics_sessions s
+       SET duration_seconds = GREATEST(s.duration_seconds, d.duration_seconds)
+      FROM derived_duration d
+     WHERE s.id = d.session_id
+       AND d.duration_seconds > 0
+  `);
   schemaEnsured = true;
 };
 

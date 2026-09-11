@@ -197,7 +197,13 @@
     session.lastActiveAt = Date.now();
     safeStorageSet(window.sessionStorage, SESSION_KEY, JSON.stringify(session));
     writeQueue(queue);
-    if (queue.length >= 10 || ['purchase', 'checkout_start', 'checkout_form_submit', 'checkout_created'].includes(name)) flush();
+    if (
+      queue.length >= 10
+      || [
+        'purchase', 'checkout_start', 'checkout_form_submit', 'checkout_created',
+        'video_impression', 'video_start', 'video_pause', 'video_complete', 'video_exit'
+      ].includes(name)
+    ) flush();
     return true;
   };
 
@@ -259,7 +265,9 @@
 
   const accrueActiveTime = (now = Date.now()) => {
     const elapsed = Math.max(0, Math.min(30000, now - lastActiveTickAt));
-    if (document.visibilityState === 'visible' && document.hasFocus()) activeDurationMs += elapsed;
+    // document.hasFocus() is unreliable in mobile browsers and ad webviews.
+    // Page Visibility is the browser lifecycle signal that works across those clients.
+    if (document.visibilityState === 'visible') activeDurationMs += elapsed;
     lastActiveTickAt = now;
     return activeDurationMs;
   };
