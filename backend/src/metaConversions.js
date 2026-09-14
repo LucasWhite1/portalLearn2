@@ -153,7 +153,10 @@ const sendMetaEvent = async (event, { fetchImpl = global.fetch } = {}) => {
   const timeoutSignal = typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(5000) : undefined;
   const response = await fetchImpl(`https://graph.facebook.com/${config.graphVersion}/${config.pixelId}/events`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${config.accessToken}`
+    },
     body: JSON.stringify(body),
     signal: timeoutSignal
   });

@@ -81,7 +81,9 @@ const run = async () => {
   assert.equal(result.eventsReceived, 1);
   assert.equal(sentRequests.length, 1);
   assert.equal(sentRequests[0].url, 'https://graph.facebook.com/v24.0/1067171249057361/events');
+  assert.equal(sentRequests[0].options.headers.authorization, 'Bearer test-access-token');
   const body = JSON.parse(sentRequests[0].options.body);
+  assert.equal(sentRequests[0].options.body.includes('test-access-token'), false);
   assert.equal(body.test_event_code, 'TEST123');
   assert.equal(body.data[0].event_name, 'Purchase');
   assert.equal(body.data[0].custom_data.value, 97.9);
