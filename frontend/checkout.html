@@ -388,7 +388,7 @@
           <div id="checkoutContactStep">
           <div class="field">
             <label for="checkoutName">Nome completo</label>
-            <input id="checkoutName" name="name" type="text" autocomplete="name" required />
+            <input id="checkoutName" name="name" type="text" autocomplete="name" minlength="4" pattern=".*\S\s+\S.*" title="Informe nome e sobrenome" required />
           </div>
 
           <div class="field-grid">

@@ -102,6 +102,12 @@ const normalizeAsaasCustomerName = (value) => sanitizeText(value || '', 120)
   .replace(/\s+/g, ' ')
   .trim();
 
+const isValidAsaasCustomerName = (value) => {
+  const normalized = normalizeAsaasCustomerName(value);
+  const words = normalized.split(' ').filter((word) => /\p{L}/u.test(word));
+  return words.length >= 2 && normalized.replace(/[^\p{L}\p{M}]/gu, '').length >= 4;
+};
+
 const attachAsaasCustomerData = (payload, customer = {}) => {
   const cpfCnpj = sanitizeCpfCnpj(customer.cpfCnpj || customer.document || '');
   if (![11, 14].includes(cpfCnpj.length)) return payload;
@@ -1459,8 +1465,8 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
   }
   const locatedAddress = await lookupCheckoutAddressByCpf(cpfCnpj);
   const asaasCustomerName = locatedAddress?.customerName || normalizeAsaasCustomerName(name);
-  if (!asaasCustomerName) {
-    const message = 'Informe um nome completo valido para continuar.';
+  if (!isValidAsaasCustomerName(asaasCustomerName)) {
+    const message = 'Informe nome e sobrenome para continuar.';
     return redirect ? res.status(400).send(message) : res.status(400).json({ message, code: 'INVALID_CUSTOMER_NAME' });
   }
   postalCode = postalCode || locatedAddress?.postalCode || '';
@@ -1728,7 +1734,10 @@ const captureCheckoutContact = async (req, res) => {
   const email = sanitizeEmail(source.email || '');
   const phone = sanitizePhone(source.phone || '');
   const preferredContact = sanitizeText(source.preferredContact || '', 24).toUpperCase();
-  if (!name || !email || !phone || !['WHATSAPP', 'PHONE', 'EMAIL'].includes(preferredContact)) {
+  if (!isValidAsaasCustomerName(name)) {
+    return res.status(400).json({ message: 'Informe nome e sobrenome para continuar.', code: 'INVALID_CUSTOMER_NAME' });
+  }
+  if (!email || !phone || !['WHATSAPP', 'PHONE', 'EMAIL'].includes(preferredContact)) {
     return res.status(400).json({ message: 'Informe nome, email, telefone e forma de contato.' });
   }
   const analytics = source.analytics && typeof source.analytics === 'object' ? source.analytics : {};
@@ -2044,6 +2053,7 @@ router.post('/webhook/asaas', async (req, res) => {
 router.__test = {
   PLANS,
   attachAsaasCustomerData,
+  isValidAsaasCustomerName,
   normalizeAsaasCustomerName,
   buildTrialAccessWindow,
   describeBillingAccess,

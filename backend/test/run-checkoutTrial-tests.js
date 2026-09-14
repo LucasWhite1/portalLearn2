@@ -9,6 +9,7 @@ const {
   describeBillingAccess,
   getPlanConfig,
   getRenewalPlanConfig,
+  isValidAsaasCustomerName,
   normalizeAsaasCustomerName,
   resolvePublicCheckoutPlan,
   resolveCheckoutPaymentMode,
@@ -18,6 +19,8 @@ const {
 assert.equal(normalizeAsaasCustomerName('  Maria   da Silva  '), 'Maria da Silva');
 assert.equal(normalizeAsaasCustomerName('Maria <script> da Silva'), 'Maria script da Silva');
 assert.equal(normalizeAsaasCustomerName('12345'), '');
+assert.equal(isValidAsaasCustomerName('Teste'), false);
+assert.equal(isValidAsaasCustomerName('Cliente Teste'), true);
 
 assert.equal(resolvePublicCheckoutPlan().id, 'pro-unlimited');
 assert.equal(resolvePublicCheckoutPlan('pro').id, 'pro');
