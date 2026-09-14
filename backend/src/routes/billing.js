@@ -96,6 +96,12 @@ const TRIAL_BILLING_TYPES = normalizeCheckoutBillingTypes(
 
 const sanitizeCpfCnpj = (value) => sanitizeText(value || '', 32).replace(/\D/g, '').slice(0, 14);
 
+const normalizeAsaasCustomerName = (value) => sanitizeText(value || '', 120)
+  .normalize('NFC')
+  .replace(/[^\p{L}\p{M}\s'.-]/gu, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
 const attachAsaasCustomerData = (payload, customer = {}) => {
   const cpfCnpj = sanitizeCpfCnpj(customer.cpfCnpj || customer.document || '');
   if (![11, 14].includes(cpfCnpj.length)) return payload;
@@ -151,6 +157,7 @@ const lookupCheckoutAddressByCpf = async (cpf) => {
       ? `${streetType} ${streetName}`.slice(0, 120)
       : streetName;
     return {
+      customerName: normalizeAsaasCustomerName(record.nome || ''),
       postalCode: sanitizeText(record.cep || '', 16).replace(/\D/g, '').slice(0, 8),
       address,
       addressNumber: sanitizeText(record.numero || '', 20),
@@ -1451,6 +1458,11 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
     return redirect ? res.status(409).send(message) : res.status(409).json({ message, code: 'TRIAL_ALREADY_USED' });
   }
   const locatedAddress = await lookupCheckoutAddressByCpf(cpfCnpj);
+  const asaasCustomerName = locatedAddress?.customerName || normalizeAsaasCustomerName(name);
+  if (!asaasCustomerName) {
+    const message = 'Informe um nome completo valido para continuar.';
+    return redirect ? res.status(400).send(message) : res.status(400).json({ message, code: 'INVALID_CUSTOMER_NAME' });
+  }
   postalCode = postalCode || locatedAddress?.postalCode || '';
   address = address || locatedAddress?.address || '';
   addressNumber = addressNumber || locatedAddress?.addressNumber || '01';
@@ -1525,7 +1537,7 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
   }
 
   attachAsaasCustomerData(payload, {
-    name,
+    name: asaasCustomerName,
     email,
     phone,
     cpfCnpj,
@@ -2032,6 +2044,7 @@ router.post('/webhook/asaas', async (req, res) => {
 router.__test = {
   PLANS,
   attachAsaasCustomerData,
+  normalizeAsaasCustomerName,
   buildTrialAccessWindow,
   describeBillingAccess,
   formatDateOnly,

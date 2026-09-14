@@ -9,10 +9,15 @@ const {
   describeBillingAccess,
   getPlanConfig,
   getRenewalPlanConfig,
+  normalizeAsaasCustomerName,
   resolvePublicCheckoutPlan,
   resolveCheckoutPaymentMode,
   shouldActivateAccountForEvent
 } = billingRouter.__test;
+
+assert.equal(normalizeAsaasCustomerName('  Maria   da Silva  '), 'Maria da Silva');
+assert.equal(normalizeAsaasCustomerName('Maria <script> da Silva'), 'Maria script da Silva');
+assert.equal(normalizeAsaasCustomerName('12345'), '');
 
 assert.equal(resolvePublicCheckoutPlan().id, 'pro-unlimited');
 assert.equal(resolvePublicCheckoutPlan('pro').id, 'pro');
@@ -120,6 +125,8 @@ assert.doesNotMatch(checkoutHtml, /payload\.customerData\s*=\s*\{\s*name\s*,\s*e
 assert.match(checkoutHtml, /name="marketingConsent"/i);
 assert.match(checkoutHtml, /CheckoutFormSubmit[^]*checkoutUrl/i);
 assert.match(billingSource, /lookupCheckoutAddressByCpf\(cpfCnpj\)/);
+assert.match(billingSource, /customerName:\s*normalizeAsaasCustomerName\(record\.nome/);
+assert.match(billingSource, /name:\s*asaasCustomerName/);
 assert.match(billingSource, /addressNumber\s*=\s*addressNumber\s*\|\|\s*locatedAddress\?\.addressNumber\s*\|\|\s*'01'/);
 assert.match(billingSource, /attachAsaasCustomerData\(payload\s*,/);
 assert.doesNotMatch(billingSource, /payload\.customer\s*=/);
