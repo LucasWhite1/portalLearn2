@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const express = require('express');
 const db = require('./db');
 const { createRateLimiter, isUuid, sanitizeText } = require('./security');
+const { sendMetaCheckoutEvent } = require('./metaConversions');
 
 const publicRouter = express.Router();
 const adminRouter = express.Router();
@@ -472,6 +473,9 @@ const ensureCheckoutSubmissionColumns = async () => {
     'checkout_province TEXT',
     'checkout_complement TEXT',
     'checkout_billing_type TEXT',
+    'meta_checkout_event_sent_at TIMESTAMPTZ',
+    'meta_checkout_event_id TEXT',
+    "meta_checkout_event_response JSONB NOT NULL DEFAULT '{}'::jsonb",
     "attribution_data JSONB NOT NULL DEFAULT '{}'::jsonb"
   ].map((definition) => db.query(`ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS ${definition}`)));
   checkoutSubmissionColumnsEnsured = true;
@@ -501,10 +505,12 @@ adminRouter.get('/analytics/checkout-submissions', requireGlobalAdmin, async (re
              checkout_province, checkout_complement, checkout_billing_type,
              plan_code, amount, student_limit, status, provider_payment_id,
              provider_subscription_id, created_at, updated_at, activated_at,
-             analytics_session_id, attribution_data, raw_payload
+             analytics_session_id, attribution_data, raw_payload,
+             meta_checkout_event_sent_at, meta_checkout_event_id
         FROM billing_subscriptions
        WHERE provider = 'asaas'
-         AND checkout_external_reference LIKE 'checkout:%'${searchClause}
+         AND (checkout_external_reference LIKE 'checkout:%'
+           OR (checkout_external_reference LIKE 'lead:%' AND status = 'CONTACT_CAPTURED'))${searchClause}
        ORDER BY created_at DESC
        LIMIT 150`, values);
     return res.json({
@@ -518,7 +524,8 @@ adminRouter.get('/analytics/checkout-submissions', requireGlobalAdmin, async (re
           referrer: cleanText(attributionData?.referrer, 300),
           pageUrl: cleanText(attributionData?.pageUrl, 300),
           metaClickIdentified: Boolean(attributionData?.fbclid || attributionData?.fbc),
-          internal: attributionData?.isInternal === true
+          internal: attributionData?.isInternal === true,
+          preferredContact: cleanText(attributionData?.preferredContact, 24)
         },
         checkout_cpf_cnpj_masked: maskDocument(row.checkout_cpf_cnpj),
         checkout_error: cleanText(
@@ -529,6 +536,91 @@ adminRouter.get('/analytics/checkout-submissions', requireGlobalAdmin, async (re
         )
       }))
     });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+adminRouter.post('/analytics/checkout-submissions/:id/qualified-lead', requireGlobalAdmin, async (req, res, next) => {
+  try {
+    if (!await ensureCheckoutSubmissionColumns()) {
+      return res.status(404).json({ message: 'Nenhum checkout foi encontrado.' });
+    }
+    const submissionId = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(submissionId) || submissionId <= 0) {
+      return res.status(400).json({ message: 'Envio de checkout inválido.' });
+    }
+    const { rows } = await db.query(`
+      SELECT id, payer_name, payer_email, checkout_phone, checkout_billing_type,
+             plan_code, amount, created_at, attribution_data,
+             meta_checkout_event_sent_at, meta_checkout_event_id
+        FROM billing_subscriptions
+       WHERE id = $1
+         AND provider = 'asaas'
+         AND checkout_external_reference LIKE 'checkout:%'
+       LIMIT 1`, [submissionId]);
+    const submission = rows[0];
+    if (!submission) return res.status(404).json({ message: 'Envio de checkout não encontrado.' });
+    if (submission.meta_checkout_event_sent_at) {
+      return res.json({
+        sent: true,
+        alreadySent: true,
+        eventId: submission.meta_checkout_event_id,
+        sentAt: submission.meta_checkout_event_sent_at
+      });
+    }
+    const attribution = submission.attribution_data || {};
+    if (attribution.isInternal === true) {
+      return res.status(422).json({ message: 'Tráfego interno não pode ser enviado como lead qualificado.' });
+    }
+    if (!submission.payer_email && !submission.checkout_phone) {
+      return res.status(422).json({ message: 'Este envio não possui e-mail nem telefone para correspondência na Meta.' });
+    }
+    const eventId = `qualified-checkout-form-submit-${submission.id}`;
+    const result = await sendMetaCheckoutEvent({
+      eventId,
+      eventTime: submission.created_at,
+      customer: {
+        name: submission.payer_name,
+        email: submission.payer_email,
+        phone: submission.checkout_phone
+      },
+      attribution,
+      plan: {
+        id: submission.plan_code || 'pro',
+        name: submission.plan_code === 'pro-unlimited' ? 'Criatyve Pro Ilimitado' : 'Criatyve Pro',
+        value: submission.amount,
+        billingType: submission.checkout_billing_type
+      },
+      eventSourceUrl: 'https://criatyve.com',
+      leadStatus: 'qualified'
+    });
+    if (result?.skipped) {
+      return res.status(503).json({ message: 'A API de Conversões da Meta não está configurada no servidor.' });
+    }
+    const { rows: updatedRows } = await db.query(`
+      UPDATE billing_subscriptions
+         SET meta_checkout_event_sent_at = NOW(),
+             meta_checkout_event_id = $2,
+             meta_checkout_event_response = $3::jsonb,
+             updated_at = NOW()
+       WHERE id = $1
+         AND meta_checkout_event_sent_at IS NULL
+       RETURNING meta_checkout_event_sent_at`, [submission.id, eventId, JSON.stringify(result || {})]);
+    const sentAt = updatedRows[0]?.meta_checkout_event_sent_at;
+    if (!sentAt) {
+      const existing = await db.query(
+        'SELECT meta_checkout_event_sent_at, meta_checkout_event_id FROM billing_subscriptions WHERE id = $1',
+        [submission.id]
+      );
+      return res.json({
+        sent: true,
+        alreadySent: true,
+        eventId: existing.rows[0]?.meta_checkout_event_id || eventId,
+        sentAt: existing.rows[0]?.meta_checkout_event_sent_at || null
+      });
+    }
+    return res.json({ sent: true, eventId, sentAt, eventsReceived: result?.eventsReceived || 0 });
   } catch (error) {
     return next(error);
   }

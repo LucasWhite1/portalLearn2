@@ -7284,6 +7284,13 @@ body {
 .analytics-result-pill { padding: 3px 6px; border-radius: 999px; background: #eef0f5; color: #59627f; font-size: 10px; font-weight: 800; }
 .analytics-result-pill.checkout { background: #fff1c8; color: #714a00; }
 .analytics-result-pill.purchase { background: #e2f6ed; color: #126044; }
+.checkout-submission-actions { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding-top: 16px; }
+.checkout-submission-actions span { color: #59627f; font-size: 13px; line-height: 1.45; }
+.checkout-submission-actions button { flex: 0 0 auto; }
+@media (max-width: 700px) {
+  .checkout-submission-actions { align-items: stretch; flex-direction: column; }
+  .checkout-submission-actions button { width: 100%; }
+}
 .analytics-empty { grid-column: 1 / -1; align-self: center; margin: auto; color: #69718d; text-align: center; }
 .analytics-privacy-note { margin: 18px 0 0; color: #69718d; font-size: 11px; line-height: 1.6; }
 

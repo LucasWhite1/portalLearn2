@@ -50,6 +50,17 @@ assert.equal(checkoutEvent.user_data.ph[0], hash('5571999990000'));
 assert.equal(checkoutEvent.user_data.client_ip_address, '203.0.113.1');
 assert.equal(checkoutEvent.user_data.fbp, 'fb.1.123456789.test');
 assert.equal(checkoutEvent.user_data.fbc, 'fb.1.1789041600000.meta-click-id');
+
+const qualifiedCheckoutEvent = buildCheckoutEvent({
+  eventId: 'qualified-checkout-form-submit-34',
+  eventTime: '2026-09-11T14:11:23.000Z',
+  customer: { email: 'lead@example.com', phone: '33999887766' },
+  attribution: { pageUrl: 'https://criatyve.com/checkout.html?plan=pro-unlimited' },
+  plan: { id: 'pro-unlimited', name: 'Criatyve Pro Ilimitado', value: 97.9, billingType: 'PIX' },
+  leadStatus: 'qualified'
+});
+assert.equal(qualifiedCheckoutEvent.event_time, 1789135883);
+assert.equal(qualifiedCheckoutEvent.custom_data.lead_status, 'qualified');
 assert.equal(checkoutEvent.custom_data.utm_campaign, 'professores');
 
 const sentRequests = [];

@@ -230,6 +230,16 @@
       display: grid;
       gap: .95rem;
     }
+    #checkoutContactStep,
+    #checkoutCpfStep,
+    #checkoutAddressFallback {
+      display: grid;
+      gap: .95rem;
+    }
+    #checkoutContactStep[hidden],
+    #checkoutCpfStep[hidden],
+    #checkoutAddressFallback[hidden],
+    #checkoutAddressFallback .field[hidden] { display: none; }
     .field-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -375,6 +385,7 @@
         <div class="early-reviews" id="checkoutEarlyReviews" hidden aria-label="Relatos de usuários iniciais"></div>
 
         <form class="form" id="checkoutForm">
+          <div id="checkoutContactStep">
           <div class="field">
             <label for="checkoutName">Nome completo</label>
             <input id="checkoutName" name="name" type="text" autocomplete="name" required />
@@ -391,13 +402,13 @@
             </div>
           </div>
 
-          <div class="field" id="checkoutPaymentMethodField">
-            <label for="checkoutBillingType">Forma de pagamento</label>
-            <select id="checkoutBillingType" name="billingType">
-              <option value="CREDIT_CARD">Cartão de crédito - assinatura mensal automática</option>
-              <option value="PIX">Pix - pagamento mensal avulso</option>
+          <div class="field">
+            <label for="checkoutPreferredContact">Forma de contato</label>
+            <select id="checkoutPreferredContact" name="preferredContact" required>
+              <option value="WHATSAPP">WhatsApp</option>
+              <option value="PHONE">Ligação</option>
+              <option value="EMAIL">E-mail</option>
             </select>
-            <small id="checkoutBillingTypeHint">Para assinatura automática, use cartão. Pix é confirmado por webhook após o pagamento.</small>
           </div>
 
           <div class="field" id="checkoutStudentCountField">
@@ -416,6 +427,42 @@
             <input type="checkbox" id="checkoutMarketingConsent" name="marketingConsent" />
             <span>Quero receber novidades, conteúdos e ofertas da Criatyve. Esta opção não é obrigatória para assinar.</span>
           </label>
+          </div>
+
+          <div id="checkoutCpfStep" hidden>
+            <div class="field">
+              <label for="checkoutCpfCnpj">Informe o CPF para garantir os 20 dias grátis</label>
+              <input id="checkoutCpfCnpj" name="cpfCnpj" type="text" inputmode="numeric" autocomplete="off" maxlength="18" />
+            </div>
+
+            <div class="field" id="checkoutPaymentMethodField">
+              <label for="checkoutBillingType">Forma de pagamento</label>
+              <select id="checkoutBillingType" name="billingType">
+                <option value="CREDIT_CARD">Cartão de crédito - assinatura mensal automática</option>
+                <option value="PIX">Pix - pagamento mensal avulso</option>
+              </select>
+              <small id="checkoutBillingTypeHint">Para assinatura automática, use cartão. Pix é confirmado por webhook após o pagamento.</small>
+            </div>
+
+            <div id="checkoutAddressFallback" hidden>
+              <div class="field" data-address-field="postalCode" hidden>
+                <label for="checkoutPostalCode">CEP</label>
+                <input id="checkoutPostalCode" name="postalCode" type="text" inputmode="numeric" autocomplete="postal-code" maxlength="9" />
+              </div>
+              <div class="field" data-address-field="address" hidden>
+                <label for="checkoutAddress">Endereço</label>
+                <input id="checkoutAddress" name="address" type="text" autocomplete="street-address" maxlength="120" />
+              </div>
+              <div class="field" data-address-field="addressNumber" hidden>
+                <label for="checkoutAddressNumber">Número</label>
+                <input id="checkoutAddressNumber" name="addressNumber" type="text" autocomplete="address-line2" maxlength="20" />
+              </div>
+              <div class="field" data-address-field="province" hidden>
+                <label for="checkoutProvince">Bairro</label>
+                <input id="checkoutProvince" name="province" type="text" maxlength="80" />
+              </div>
+            </div>
+          </div>
         </form>
       </section>
 
@@ -434,7 +481,6 @@
         <div class="flash" id="checkoutFlash"></div>
         <button class="cta" type="submit" form="checkoutForm" id="checkoutContinueBtn">Ir para o checkout seguro</button>
         <p class="footnote" id="checkoutFootnote"></p>
-        <p class="footnote">CPF e os demais dados obrigatórios do pagamento serão solicitados com segurança na página do Asaas.</p>
       </aside>
     </div>
   </main>
@@ -512,8 +558,9 @@
     };
 
     const params = new URLSearchParams(window.location.search);
-    const planKey = params.get('plan') || 'pro';
-    const plan = plans[planKey] || plans.pro;
+    const requestedPlanKey = params.get('plan') || 'pro-unlimited';
+    const planKey = Object.prototype.hasOwnProperty.call(plans, requestedPlanKey) ? requestedPlanKey : 'pro-unlimited';
+    const plan = plans[planKey];
     const submitButton = document.getElementById('checkoutContinueBtn');
     const flash = document.getElementById('checkoutFlash');
     const configFlag = document.getElementById('checkoutConfigFlag');
@@ -523,6 +570,12 @@
     const paymentMethodField = document.getElementById('checkoutPaymentMethodField');
     const billingTypeSelect = document.getElementById('checkoutBillingType');
     const billingTypeHint = document.getElementById('checkoutBillingTypeHint');
+    const contactStep = document.getElementById('checkoutContactStep');
+    const cpfStep = document.getElementById('checkoutCpfStep');
+    const cpfCnpjInput = document.getElementById('checkoutCpfCnpj');
+    const addressFallback = document.getElementById('checkoutAddressFallback');
+    let checkoutStep = 'contact';
+    let capturedLeadReference = '';
     const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
     const basePrice = 97.90;
     const includedStudents = 15;
@@ -600,6 +653,8 @@
     }
 
     function getSubmitLabel() {
+      if (checkoutStep === 'contact') return 'Continuar';
+      if (checkoutStep === 'address') return 'Continuar para o pagamento';
       return isPixGuaranteeSelected()
         ? `Pagar ${brl.format(basePrice)} com garantia de 20 dias`
         : Number(plan.trialDays || 0) > 0
@@ -661,6 +716,26 @@
           : 'Cartão cria a assinatura mensal automática no Asaas.';
     }
 
+    function requestMissingAddressFields(fieldNames = []) {
+      const allowedFields = new Set(['postalCode', 'address', 'addressNumber', 'province']);
+      let firstInput = null;
+      addressFallback.querySelectorAll('[data-address-field]').forEach((field) => {
+        const fieldName = field.dataset.addressField;
+        const visible = allowedFields.has(fieldName) && fieldNames.includes(fieldName);
+        field.hidden = !visible;
+        const input = field.querySelector('input');
+        if (input) input.required = visible;
+        if (visible && !firstInput) firstInput = input;
+      });
+      addressFallback.hidden = !firstInput;
+      if (!firstInput) return false;
+      checkoutStep = 'address';
+      submitButton.disabled = false;
+      submitButton.textContent = getSubmitLabel();
+      firstInput.focus();
+      return true;
+    }
+
     document.getElementById('checkoutForm').addEventListener('submit', async (event) => {
       event.preventDefault();
       setFlash('');
@@ -668,12 +743,16 @@
       submitButton.textContent = 'Abrindo checkout...';
 
       const formData = new FormData(event.currentTarget);
+      const cpfCnpj = String(formData.get('cpfCnpj') || '').replace(/\D/g, '').slice(0, 14);
+      const billingType = planKey === 'trial-30-dias'
+        ? 'CREDIT_CARD'
+        : String(formData.get('billingType') || 'CREDIT_CARD');
       const payload = {
         plan: planKey,
         name: String(formData.get('name') || '').trim(),
         email: String(formData.get('email') || '').trim(),
         phone: String(formData.get('phone') || '').trim(),
-        billingType: planKey === 'trial-30-dias' ? 'CREDIT_CARD' : String(formData.get('billingType') || 'CREDIT_CARD'),
+        preferredContact: String(formData.get('preferredContact') || '').trim(),
         studentCount: getStudentCount(),
         termsAccepted: formData.get('termsAccepted') === 'on',
         marketingConsent: formData.get('marketingConsent') === 'on'
@@ -692,7 +771,49 @@
         setFlash('Informe o e-mail que receberá o login e a senha de acesso.');
         return;
       }
-
+      if (checkoutStep === 'contact') {
+        try {
+          const response = await fetch(`${API_ORIGIN}/api/billing/checkout-contact`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok || !data.leadReference) throw new Error(data.message || 'Não foi possível continuar.');
+          capturedLeadReference = data.leadReference;
+          checkoutStep = 'cpf';
+          contactStep.hidden = true;
+          cpfStep.hidden = false;
+          submitButton.disabled = false;
+          submitButton.textContent = getSubmitLabel();
+          window.CriatyveAnalytics?.track('CheckoutContactCaptured', {
+            plan: planKey,
+            preferred_contact: payload.preferredContact
+          });
+          cpfCnpjInput.focus();
+          return;
+        } catch (error) {
+          submitButton.disabled = false;
+          submitButton.textContent = getSubmitLabel();
+          setFlash(error.message || 'Não foi possível continuar agora.');
+          return;
+        }
+      }
+      if (cpfCnpj.length !== 11) {
+        submitButton.disabled = false;
+        submitButton.textContent = getSubmitLabel();
+        cpfCnpjInput.setCustomValidity('Informe um CPF válido.');
+        cpfCnpjInput.reportValidity();
+        return;
+      }
+      cpfCnpjInput.setCustomValidity('');
+      payload.cpfCnpj = cpfCnpj;
+      payload.billingType = billingType;
+      payload.leadReference = capturedLeadReference;
+      payload.postalCode = String(formData.get('postalCode') || '').trim();
+      payload.address = String(formData.get('address') || '').trim();
+      payload.addressNumber = String(formData.get('addressNumber') || '').trim();
+      payload.province = String(formData.get('province') || '').trim();
       try {
         const response = await fetch(`${API_ORIGIN}/api/billing/checkout-session`, {
           method: 'POST',
@@ -700,6 +821,12 @@
           body: JSON.stringify(payload)
         });
         const data = await response.json().catch(() => ({}));
+        if (response.status === 422 && data.code === 'CHECKOUT_ADDRESS_REQUIRED') {
+          if (requestMissingAddressFields(Array.isArray(data.missingFields) ? data.missingFields : [])) {
+            setFlash(data.message || 'Complete os dados que não foram encontrados.');
+            return;
+          }
+        }
         if (!response.ok || !data.checkoutUrl) {
           const providerDetails = Array.isArray(data.details?.errors)
             ? data.details.errors.map((item) => item.description).filter(Boolean).join(' ')

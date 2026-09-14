@@ -5040,6 +5040,7 @@ const renderAnalyticsSessions = (sessions) => {
 };
 
 const checkoutSubmissionStatusLabel = (status) => ({
+  CONTACT_CAPTURED: 'Contato capturado',
   CHECKOUT_CREATED: 'Checkout criado',
   CHECKOUT_REJECTED: 'Dados rejeitados',
   CHECKOUT_INVALID_RESPONSE: 'Resposta inválida do Asaas',
@@ -5097,10 +5098,13 @@ const openCheckoutSubmission = (submissionId) => {
   document.getElementById('checkoutSubmissionSubtitle').textContent = `Enviado em ${Number.isFinite(createdAt.getTime()) ? createdAt.toLocaleString('pt-BR') : 'data não informada'} · ${checkoutSubmissionStatusLabel(item.status)}`;
   const address = [item.checkout_address, item.checkout_address_number, item.checkout_complement, item.checkout_province, item.checkout_postal_code ? `CEP ${item.checkout_postal_code}` : ''].filter(Boolean).join(', ');
   const attribution = item.attribution || {};
+  const metaButton = document.getElementById('checkoutSubmissionQualifiedLeadBtn');
+  const metaStatus = document.getElementById('checkoutSubmissionMetaStatus');
   const rows = [
     ['Nome', item.payer_name],
     ['E-mail', item.payer_email],
     ['Telefone', item.checkout_phone],
+    ['Forma de contato', ({ WHATSAPP: 'WhatsApp', PHONE: 'Ligação', EMAIL: 'E-mail' }[attribution.preferredContact] || attribution.preferredContact)],
     ['CPF/CNPJ', item.checkout_cpf_cnpj],
     ['Endereço', address],
     ['Pagamento escolhido', item.checkout_billing_type === 'PIX' ? 'Pix' : item.checkout_billing_type === 'CREDIT_CARD' ? 'Cartão de crédito' : item.checkout_billing_type],
@@ -5121,8 +5125,50 @@ const openCheckoutSubmission = (submissionId) => {
     ['Tráfego interno', attribution.internal ? 'Sim' : 'Não']
   ].filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== '');
   details.innerHTML = rows.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`).join('');
+  if (metaButton) {
+    metaButton.dataset.checkoutSubmissionId = String(item.id);
+    metaButton.disabled = Boolean(item.meta_checkout_event_sent_at) || attribution.internal === true;
+    metaButton.textContent = item.meta_checkout_event_sent_at ? 'Lead já enviado à Meta' : 'Enviar lead qualificado à Meta';
+  }
+  if (metaStatus) {
+    metaStatus.textContent = item.meta_checkout_event_sent_at
+      ? `CheckoutFormSubmit enviado em ${new Date(item.meta_checkout_event_sent_at).toLocaleString('pt-BR')}.`
+      : attribution.internal === true
+        ? 'Testes internos não são enviados à Meta.'
+        : 'Envia um único CheckoutFormSubmit com status de lead qualificado.';
+  }
   modal.classList.remove('hidden');
   modal.setAttribute('aria-hidden', 'false');
+};
+
+const sendQualifiedCheckoutLead = async () => {
+  const button = document.getElementById('checkoutSubmissionQualifiedLeadBtn');
+  const status = document.getElementById('checkoutSubmissionMetaStatus');
+  const submissionId = button?.dataset.checkoutSubmissionId;
+  if (!button || !submissionId || button.disabled) return;
+  const item = checkoutSubmissionCache.find((submission) => String(submission.id) === String(submissionId));
+  if (!item) return;
+  if (!window.confirm(`Enviar à Meta o CheckoutFormSubmit de ${item.payer_name || 'este contato'} como lead qualificado?`)) return;
+  button.disabled = true;
+  button.textContent = 'Enviando...';
+  if (status) status.textContent = 'Enviando o evento server-side com a atribuição original...';
+  try {
+    const response = await authorizedFetch(`/api/admin/analytics/checkout-submissions/${encodeURIComponent(submissionId)}/qualified-lead`, {
+      method: 'POST'
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(payload?.message || 'Não foi possível enviar o evento à Meta.');
+    item.meta_checkout_event_sent_at = payload?.sentAt || new Date().toISOString();
+    item.meta_checkout_event_id = payload?.eventId || '';
+    button.textContent = 'Lead já enviado à Meta';
+    if (status) status.textContent = payload?.alreadySent
+      ? 'Este CheckoutFormSubmit já havia sido enviado; nenhum evento foi duplicado.'
+      : 'CheckoutFormSubmit recebido pela API de Conversões da Meta.';
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = 'Tentar enviar novamente';
+    if (status) status.textContent = error.message || 'Falha ao enviar o evento à Meta.';
+  }
 };
 
 const loadCheckoutSubmissions = async () => {
@@ -5292,6 +5338,7 @@ const initSiteAnalytics = () => {
   document.getElementById('checkoutSubmissionModal')?.addEventListener('click', (event) => {
     if (event.target.closest('[data-checkout-submission-close]')) closeCheckoutSubmission();
   });
+  document.getElementById('checkoutSubmissionQualifiedLeadBtn')?.addEventListener('click', sendQualifiedCheckoutLead);
   document.getElementById('analyticsJourneyModal')?.addEventListener('click', (event) => {
     if (event.target.closest('[data-analytics-close]')) closeAnalyticsJourney();
   });

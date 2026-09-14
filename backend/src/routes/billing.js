@@ -55,6 +55,11 @@ const ASAAS_BASE_URL = sanitizeText(
   255
 );
 const PUBLIC_APP_URL = sanitizeText(process.env.PUBLIC_APP_URL || '', 255).replace(/\/+$/, '');
+const NOVAERA_PERSON_LOOKUP_URL = sanitizeText(
+  process.env.NOVAERA_PERSON_LOOKUP_URL || 'https://servicos-utilitarios-novaera.ugztmp.easypanel.host/api/pessoas/cpf',
+  300
+).replace(/\/+$/, '');
+const NOVAERA_PERSON_LOOKUP_TOKEN = sanitizeText(process.env.NOVAERA_PERSON_LOOKUP_TOKEN || '', 500);
 const ASAAS_WEBHOOK_ENFORCE_SOURCE_IP = String(process.env.ASAAS_WEBHOOK_ENFORCE_SOURCE_IP || '')
   .toLowerCase() === 'true';
 const ASAAS_WEBHOOK_ALLOWED_IPS = new Set(
@@ -113,6 +118,51 @@ const attachAsaasCustomerData = (payload, customer = {}) => {
   });
   payload.customerData = customerData;
   return payload;
+};
+
+const getAsaasHeaders = () => ({
+  accept: 'application/json',
+  'content-type': 'application/json',
+  'user-agent': APP_NAME,
+  access_token: ASAAS_API_KEY
+});
+
+const lookupCheckoutAddressByCpf = async (cpf) => {
+  if (!NOVAERA_PERSON_LOOKUP_TOKEN || !/^\d{11}$/.test(cpf)) return null;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const response = await fetch(`${NOVAERA_PERSON_LOOKUP_URL}/${encodeURIComponent(cpf)}`, {
+      method: 'GET',
+      headers: {
+        accept: 'application/json',
+        authorization: `Bearer ${NOVAERA_PERSON_LOOKUP_TOKEN}`
+      },
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error(`consulta respondeu HTTP ${response.status}`);
+    const body = await response.json().catch(() => ({}));
+    const records = Array.isArray(body?.data) ? body.data : [];
+    const record = records.find((entry) => sanitizeCpfCnpj(entry?.cpf) === cpf);
+    if (!record) return null;
+    const streetType = sanitizeText(record.tipoEndereco || '', 30);
+    const streetName = sanitizeText(record.logradouro || '', 120);
+    const address = streetType && streetName && !streetName.toUpperCase().startsWith(`${streetType.toUpperCase()} `)
+      ? `${streetType} ${streetName}`.slice(0, 120)
+      : streetName;
+    return {
+      postalCode: sanitizeText(record.cep || '', 16).replace(/\D/g, '').slice(0, 8),
+      address,
+      addressNumber: sanitizeText(record.numero || '', 20),
+      province: sanitizeText(record.bairro || '', 80),
+      complement: sanitizeText(record.complemento || '', 80)
+    };
+  } catch (error) {
+    console.warn(`Consulta de endereco por CPF indisponivel: ${error.message}`);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
 };
 
 const ACTIVE_PAYMENT_EVENTS = new Set(['PAYMENT_CONFIRMED', 'PAYMENT_RECEIVED']);
@@ -216,6 +266,11 @@ const PLANS = {
 };
 
 const getPlanConfig = (planKey = '') => PLANS[planKey] || PLANS.pro;
+
+const resolvePublicCheckoutPlan = (planKey) => {
+  const normalized = sanitizeText(planKey || 'pro-unlimited', 40);
+  return Object.prototype.hasOwnProperty.call(PLANS, normalized) ? PLANS[normalized] : null;
+};
 
 const roundCurrency = (value) => Math.round((Number(value) || 0) * 100) / 100;
 
@@ -761,6 +816,20 @@ const persistCheckoutLead = async ({
       sanitizeText(checkoutStatus || '', 80) || 'CHECKOUT_CREATED',
       checkoutResponse || null
     ]
+  );
+};
+
+const markCapturedCheckoutLeadContinued = async (leadReference, payerEmail) => {
+  const reference = sanitizeText(leadReference || '', 160);
+  const email = sanitizeEmail(payerEmail || '');
+  if (!/^lead:(pro|pro-unlimited|trial-30-dias):[0-9a-f-]{36}$/i.test(reference) || !email) return;
+  await db.query(
+    `UPDATE billing_subscriptions
+        SET status = 'CHECKOUT_CONTINUED', updated_at = NOW()
+      WHERE checkout_external_reference = $1
+        AND LOWER(payer_email) = LOWER($2)
+        AND status = 'CONTACT_CAPTURED'`,
+    [reference, email]
   );
 };
 
@@ -1350,27 +1419,54 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
   }
 
   const source = req.method === 'GET' ? req.query : req.body;
-  const plan = getPlanConfig(sanitizeText(source?.plan || 'pro', 40));
+  const plan = resolvePublicCheckoutPlan(source?.plan);
+  if (!plan) {
+    const message = 'O plano informado nao existe. Volte para a pagina da oferta e tente novamente.';
+    return redirect ? res.status(400).send(message) : res.status(400).json({ message, code: 'INVALID_PLAN' });
+  }
   const name = sanitizeText(source?.name || '', 120);
   const email = sanitizeEmail(source?.email || '');
   const phone = sanitizePhone(source?.phone || '');
   const cpfCnpj = sanitizeCpfCnpj(source?.cpfCnpj || source?.document || '');
-  const postalCode = sanitizeText(source?.postalCode || source?.zipCode || '', 16).replace(/\D/g, '').slice(0, 8);
-  const address = sanitizeText(source?.address || '', 120);
-  const addressNumber = sanitizeText(source?.addressNumber || source?.number || '', 20);
-  const province = sanitizeText(source?.province || source?.neighborhood || '', 80);
-  const complement = sanitizeText(source?.complement || source?.addressComplement || '', 80);
+  const preferredContact = sanitizeText(source?.preferredContact || '', 24).toUpperCase();
+  let postalCode = sanitizeText(source?.postalCode || source?.zipCode || '', 16).replace(/\D/g, '').slice(0, 8);
+  let address = sanitizeText(source?.address || '', 120);
+  let addressNumber = sanitizeText(source?.addressNumber || source?.number || '', 20);
+  let province = sanitizeText(source?.province || source?.neighborhood || '', 80);
+  let complement = sanitizeText(source?.complement || source?.addressComplement || '', 80);
   if (!hasRequiredLegalConsent(source)) {
     const message = 'Para continuar, aceite os Termos de Uso e Privacidade.';
     return redirect ? res.status(400).send(message) : res.status(400).json({ message });
   }
-  if (!name || !email || !phone) {
-    const message = 'Informe nome, email e telefone antes de iniciar o checkout. O email sera usado para enviar login e senha.';
+  if (!name || !email || !phone || !['WHATSAPP', 'PHONE', 'EMAIL'].includes(preferredContact)) {
+    const message = 'Informe nome, email, telefone e forma de contato antes de iniciar o checkout.';
+    return redirect ? res.status(400).send(message) : res.status(400).json({ message });
+  }
+  if (cpfCnpj.length !== 11) {
+    const message = 'Informe um CPF valido para continuar.';
     return redirect ? res.status(400).send(message) : res.status(400).json({ message });
   }
   if (await hasPreviouslyActivatedPlanTrial(email, plan)) {
     const message = 'Este email ja utilizou o periodo gratuito desta oferta. Entre na sua conta para consultar ou renovar a assinatura.';
     return redirect ? res.status(409).send(message) : res.status(409).json({ message, code: 'TRIAL_ALREADY_USED' });
+  }
+  const locatedAddress = await lookupCheckoutAddressByCpf(cpfCnpj);
+  postalCode = postalCode || locatedAddress?.postalCode || '';
+  address = address || locatedAddress?.address || '';
+  addressNumber = addressNumber || locatedAddress?.addressNumber || '01';
+  province = province || locatedAddress?.province || '';
+  complement = complement || locatedAddress?.complement || '';
+  const missingAddressFields = [
+    ['postalCode', postalCode.length === 8],
+    ['address', Boolean(address)],
+    ['addressNumber', Boolean(addressNumber)],
+    ['province', Boolean(province)]
+  ].filter(([, complete]) => !complete).map(([field]) => field);
+  if (missingAddressFields.length) {
+    const message = 'Complete apenas os dados de endereco que nao foram encontrados.';
+    return redirect
+      ? res.status(422).send(message)
+      : res.status(422).json({ message, code: 'CHECKOUT_ADDRESS_REQUIRED', missingFields: missingAddressFields });
   }
   const existingStudentLimit = await findExistingProfessorBillingLimit(email);
   const purchase = buildPlanPurchase({
@@ -1405,7 +1501,8 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
     clientIpAddress: sanitizeText(req.ip || req.headers['x-forwarded-for'] || '', 120) || null,
     clientUserAgent: sanitizeText(req.headers['user-agent'] || '', 1000) || null,
     externalId: isUuid(analytics.visitorId) ? analytics.visitorId : null,
-    isInternal: analytics.isInternal === true
+    isInternal: analytics.isInternal === true,
+    preferredContact
   };
   const payload = {
     billingTypes: paymentMode.billingTypes,
@@ -1456,12 +1553,7 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
   try {
     const response = await fetch(`${ASAAS_BASE_URL}/checkouts`, {
       method: 'POST',
-      headers: {
-        accept: 'application/json',
-        'content-type': 'application/json',
-        'user-agent': APP_NAME,
-        access_token: ASAAS_API_KEY
-      },
+      headers: getAsaasHeaders(),
       body: JSON.stringify(payload)
     });
 
@@ -1491,6 +1583,7 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
         checkoutStatus: 'CHECKOUT_REJECTED',
         checkoutResponse: responseBody
       });
+      await markCapturedCheckoutLeadContinued(source?.leadReference, email);
       const errorPayload = {
         message: firstError?.description || 'Nao foi possivel iniciar o checkout no Asaas.',
         provider: 'asaas'
@@ -1523,6 +1616,7 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
         checkoutStatus: 'CHECKOUT_INVALID_RESPONSE',
         checkoutResponse: responseBody
       });
+      await markCapturedCheckoutLeadContinued(source?.leadReference, email);
       const errorPayload = {
         message: 'O Asaas respondeu sem link de checkout utilizavel.',
         provider: 'asaas'
@@ -1553,6 +1647,7 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
       attributionData,
       checkoutResponse: responseBody
     });
+    await markCapturedCheckoutLeadContinued(source?.leadReference, email);
 
     const metaEventId = sanitizeText(source?.metaEventId || '', 100);
     await recordCheckoutCreatedEvent({
@@ -1600,11 +1695,69 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
   } catch (error) {
     console.error('Erro ao criar checkout Asaas', error);
     const errorPayload = {
-      message: 'Falha ao conectar com o gateway de pagamento.',
+      message: error.publicMessage || 'Falha ao conectar com o gateway de pagamento.',
       provider: 'asaas'
     };
-    return redirect ? res.status(502).send(errorPayload.message) : res.status(502).json(errorPayload);
+    const statusCode = Number.isInteger(error.statusCode) && error.statusCode >= 400 && error.statusCode < 600
+      ? error.statusCode
+      : 502;
+    return redirect ? res.status(statusCode).send(errorPayload.message) : res.status(statusCode).json(errorPayload);
   }
+};
+
+const captureCheckoutContact = async (req, res) => {
+  const source = req.body || {};
+  const plan = resolvePublicCheckoutPlan(source.plan);
+  if (!plan) return res.status(400).json({ message: 'O plano informado nao existe.', code: 'INVALID_PLAN' });
+  if (!hasRequiredLegalConsent(source)) {
+    return res.status(400).json({ message: 'Para continuar, aceite os Termos de Uso e Privacidade.' });
+  }
+  const name = sanitizeText(source.name || '', 120);
+  const email = sanitizeEmail(source.email || '');
+  const phone = sanitizePhone(source.phone || '');
+  const preferredContact = sanitizeText(source.preferredContact || '', 24).toUpperCase();
+  if (!name || !email || !phone || !['WHATSAPP', 'PHONE', 'EMAIL'].includes(preferredContact)) {
+    return res.status(400).json({ message: 'Informe nome, email, telefone e forma de contato.' });
+  }
+  const analytics = source.analytics && typeof source.analytics === 'object' ? source.analytics : {};
+  const purchase = buildPlanPurchase({ plan, requestedStudentLimit: source.studentCount });
+  const leadReference = `lead:${plan.id}:${crypto.randomUUID()}`;
+  const attributionData = {
+    visitorId: isUuid(analytics.visitorId) ? analytics.visitorId : null,
+    sessionId: isUuid(analytics.sessionId) ? analytics.sessionId : null,
+    sessionStartedAt: sanitizeText(analytics.sessionStartedAt || '', 40) || null,
+    pageUrl: sanitizeText(analytics.pageUrl || `${buildPublicBaseUrl(req)}/checkout.html`, 450) || null,
+    referrer: sanitizeText(analytics.referrer || '', 450) || null,
+    utmSource: sanitizeText(analytics.utmSource || '', 120) || null,
+    utmMedium: sanitizeText(analytics.utmMedium || '', 120) || null,
+    utmCampaign: sanitizeText(analytics.utmCampaign || '', 180) || null,
+    utmContent: sanitizeText(analytics.utmContent || '', 180) || null,
+    utmTerm: sanitizeText(analytics.utmTerm || '', 180) || null,
+    fbclid: sanitizeText(analytics.fbclid || '', 500) || null,
+    fbp: sanitizeText(analytics.fbp || '', 500) || null,
+    fbc: sanitizeText(analytics.fbc || '', 500) || null,
+    clientIpAddress: sanitizeText(req.ip || req.headers['x-forwarded-for'] || '', 120) || null,
+    clientUserAgent: sanitizeText(req.headers['user-agent'] || '', 1000) || null,
+    isInternal: analytics.isInternal === true,
+    preferredContact
+  };
+  await persistCheckoutLead({
+    externalReference: leadReference,
+    planCode: plan.id,
+    payerName: name,
+    payerEmail: email,
+    phone,
+    amount: purchase.amount,
+    studentLimit: purchase.studentLimit,
+    termsAccepted: true,
+    marketingConsent: source.marketingConsent === true,
+    analyticsVisitorId: analytics.visitorId,
+    analyticsSessionId: analytics.sessionId,
+    attributionData,
+    checkoutStatus: 'CONTACT_CAPTURED',
+    checkoutResponse: { preferredContact }
+  });
+  return res.json({ captured: true, leadReference });
 };
 
 const normalizeAsaasPaymentUrl = (value) => {
@@ -1849,6 +2002,7 @@ router.post('/renewal-checkout', requireAuth, checkoutRateLimiter, async (req, r
   }
 });
 
+router.post('/checkout-contact', checkoutRateLimiter, captureCheckoutContact);
 router.get('/checkout-session', checkoutRateLimiter, (req, res) => createCheckoutSession(req, res, { redirect: true }));
 router.post('/checkout-session', checkoutRateLimiter, (req, res) => createCheckoutSession(req, res));
 
@@ -1883,6 +2037,7 @@ router.__test = {
   formatDateOnly,
   getPlanConfig,
   getRenewalPlanConfig,
+  resolvePublicCheckoutPlan,
   resolveCheckoutPaymentMode,
   shouldActivateAccountForEvent
 };

@@ -9,9 +9,14 @@ const {
   describeBillingAccess,
   getPlanConfig,
   getRenewalPlanConfig,
+  resolvePublicCheckoutPlan,
   resolveCheckoutPaymentMode,
   shouldActivateAccountForEvent
 } = billingRouter.__test;
+
+assert.equal(resolvePublicCheckoutPlan().id, 'pro-unlimited');
+assert.equal(resolvePublicCheckoutPlan('pro').id, 'pro');
+assert.equal(resolvePublicCheckoutPlan('plano-inexistente'), null);
 
 const contactOnlyCheckoutPayload = attachAsaasCustomerData(
   { billingTypes: ['CREDIT_CARD'] },
@@ -89,23 +94,35 @@ assert.equal(describeBillingAccess(
   { provider_subscription_id: 'sub_123', billing_status: 'CANCELED' }
 ).automaticRenewal, false);
 assert.ok(billingRouter.stack.some((layer) => layer.route?.path === '/subscription/cancel'));
+assert.ok(billingRouter.stack.some((layer) => layer.route?.path === '/checkout-contact'));
 
 const frontendRoot = path.resolve(__dirname, '../../frontend');
+const billingSource = fs.readFileSync(path.join(__dirname, '../src/routes/billing.js'), 'utf8');
 const checkoutHtml = fs.readFileSync(path.join(frontendRoot, 'checkout.html'), 'utf8');
 const landingHtml = fs.readFileSync(path.join(frontendRoot, 'aulas-interativas-ia.html'), 'utf8');
 const termsHtml = fs.readFileSync(path.join(frontendRoot, 'terms.html'), 'utf8');
 const adminHtml = fs.readFileSync(path.join(frontendRoot, 'admin.html'), 'utf8');
 const frontendScript = fs.readFileSync(path.join(frontendRoot, 'script.js'), 'utf8');
 assert.match(checkoutHtml, /R\$0 <small>agora<\/small>/);
+assert.match(checkoutHtml, /params\.get\('plan'\) \|\| 'pro-unlimited'/);
 assert.match(checkoutHtml, /primeira cobrança de R\$97,90 será feita somente 20 dias depois/i);
 assert.match(checkoutHtml, /No Pix,.*será cobrado agora/i);
 assert.match(checkoutHtml, /name="phone"[^>]+required/i);
-assert.doesNotMatch(checkoutHtml, /name="cpfCnpj"/i);
-assert.doesNotMatch(checkoutHtml, /name="postalCode"/i);
-assert.match(checkoutHtml, /CPF e os demais dados obrigatórios do pagamento serão solicitados[^]*Asaas/i);
+assert.match(checkoutHtml, /id="checkoutCpfStep" hidden/i);
+assert.match(checkoutHtml, /Informe o CPF para garantir os 20 dias grátis/i);
+assert.match(checkoutHtml, /name="preferredContact"[^>]+required/i);
+assert.match(checkoutHtml, /\/api\/billing\/checkout-contact/);
+assert.match(checkoutHtml, /id="checkoutAddressFallback" hidden/i);
+assert.match(checkoutHtml, /data-address-field="postalCode" hidden/i);
+assert.match(checkoutHtml, /data-address-field="addressNumber" hidden/i);
+assert.doesNotMatch(checkoutHtml, /CPF, os dados adicionais|depois vem o CPF/i);
 assert.doesNotMatch(checkoutHtml, /payload\.customerData\s*=\s*\{\s*name\s*,\s*email\s*\}/i);
 assert.match(checkoutHtml, /name="marketingConsent"/i);
 assert.match(checkoutHtml, /CheckoutFormSubmit[^]*checkoutUrl/i);
+assert.match(billingSource, /lookupCheckoutAddressByCpf\(cpfCnpj\)/);
+assert.match(billingSource, /addressNumber\s*=\s*addressNumber\s*\|\|\s*locatedAddress\?\.addressNumber\s*\|\|\s*'01'/);
+assert.match(billingSource, /attachAsaasCustomerData\(payload\s*,/);
+assert.doesNotMatch(billingSource, /payload\.customer\s*=/);
 assert.match(landingHtml, /No Pix, você paga R\$97,90 agora/i);
 assert.match(termsHtml, /primeira mensalidade não é cobrada no dia da contratação/i);
 assert.match(termsHtml, /No Pix, o valor da primeira mensalidade é pago no momento da contratação/i);

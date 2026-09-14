@@ -108,14 +108,22 @@ const buildPurchaseEvent = ({ payment = {}, subscription = {}, customer = {}, at
   };
 };
 
-const buildCheckoutEvent = ({ eventId, customer = {}, attribution = {}, plan = {}, eventSourceUrl = '' } = {}) => {
+const buildCheckoutEvent = ({
+  eventId,
+  eventTime,
+  customer = {},
+  attribution = {},
+  plan = {},
+  eventSourceUrl = '',
+  leadStatus = ''
+} = {}) => {
   const safeEventId = normalizeText(eventId, 100);
   if (!safeEventId) throw new Error('Checkout sem event_id para deduplicacao na Meta.');
   const { userData, source } = buildUserData({ customer, attribution });
   const value = Number(plan.value || 0);
   return {
     event_name: 'CheckoutFormSubmit',
-    event_time: Math.floor(Date.now() / 1000),
+    event_time: toEventTimestamp(eventTime),
     event_id: safeEventId,
     action_source: 'website',
     event_source_url: source.pageUrl || `${normalizeText(eventSourceUrl, 450).replace(/\/+$/, '') || 'https://criatyve.com'}/checkout.html`,
@@ -127,6 +135,7 @@ const buildCheckoutEvent = ({ eventId, customer = {}, attribution = {}, plan = {
       content_name: normalizeText(plan.name || 'Criatyve', 200),
       content_ids: [normalizeText(plan.id || 'pro', 120)],
       billing_type: normalizeText(plan.billingType, 30),
+      lead_status: normalizeText(leadStatus, 30) || undefined,
       utm_source: normalizeText(attribution.utmSource, 120) || undefined,
       utm_medium: normalizeText(attribution.utmMedium, 120) || undefined,
       utm_campaign: normalizeText(attribution.utmCampaign, 180) || undefined,
