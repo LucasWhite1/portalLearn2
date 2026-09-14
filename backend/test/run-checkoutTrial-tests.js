@@ -4,6 +4,7 @@ const path = require('node:path');
 
 const billingRouter = require('../src/routes/billing');
 const {
+  attachAsaasCustomerData,
   buildTrialAccessWindow,
   describeBillingAccess,
   getPlanConfig,
@@ -11,6 +12,28 @@ const {
   resolveCheckoutPaymentMode,
   shouldActivateAccountForEvent
 } = billingRouter.__test;
+
+const contactOnlyCheckoutPayload = attachAsaasCustomerData(
+  { billingTypes: ['CREDIT_CARD'] },
+  { name: 'Cliente Teste', email: 'cliente@example.com', phone: '(11) 99999-9999' }
+);
+assert.equal(Object.hasOwn(contactOnlyCheckoutPayload, 'customerData'), false);
+
+const identifiedCheckoutPayload = attachAsaasCustomerData(
+  { billingTypes: ['CREDIT_CARD'] },
+  {
+    name: 'Cliente Identificado',
+    email: 'identificado@example.com',
+    phone: '(11) 98888-7777',
+    cpfCnpj: '529.982.247-25'
+  }
+);
+assert.deepEqual(identifiedCheckoutPayload.customerData, {
+  name: 'Cliente Identificado',
+  cpfCnpj: '52998224725',
+  email: 'identificado@example.com',
+  phone: '11988887777'
+});
 
 const unlimited = getPlanConfig('pro-unlimited');
 assert.equal(unlimited.trialDays, 20);
@@ -79,6 +102,8 @@ assert.match(checkoutHtml, /No Pix,.*será cobrado agora/i);
 assert.match(checkoutHtml, /name="phone"[^>]+required/i);
 assert.doesNotMatch(checkoutHtml, /name="cpfCnpj"/i);
 assert.doesNotMatch(checkoutHtml, /name="postalCode"/i);
+assert.match(checkoutHtml, /CPF e os demais dados obrigatórios do pagamento serão solicitados[^]*Asaas/i);
+assert.doesNotMatch(checkoutHtml, /payload\.customerData\s*=\s*\{\s*name\s*,\s*email\s*\}/i);
 assert.match(checkoutHtml, /name="marketingConsent"/i);
 assert.match(checkoutHtml, /CheckoutFormSubmit[^]*checkoutUrl/i);
 assert.match(landingHtml, /No Pix, você paga R\$97,90 agora/i);

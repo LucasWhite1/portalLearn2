@@ -91,6 +91,30 @@ const TRIAL_BILLING_TYPES = normalizeCheckoutBillingTypes(
 
 const sanitizeCpfCnpj = (value) => sanitizeText(value || '', 32).replace(/\D/g, '').slice(0, 14);
 
+const attachAsaasCustomerData = (payload, customer = {}) => {
+  const cpfCnpj = sanitizeCpfCnpj(customer.cpfCnpj || customer.document || '');
+  if (![11, 14].includes(cpfCnpj.length)) return payload;
+
+  const customerData = {
+    name: sanitizeText(customer.name || '', 120),
+    cpfCnpj
+  };
+  const optionalFields = {
+    email: sanitizeEmail(customer.email || ''),
+    phone: sanitizePhone(customer.phone || '').replace(/\D/g, '').slice(0, 11),
+    postalCode: sanitizeText(customer.postalCode || '', 16).replace(/\D/g, '').slice(0, 8),
+    address: sanitizeText(customer.address || '', 120),
+    addressNumber: sanitizeText(customer.addressNumber || '', 20),
+    province: sanitizeText(customer.province || '', 80),
+    complement: sanitizeText(customer.complement || '', 80)
+  };
+  Object.entries(optionalFields).forEach(([key, value]) => {
+    if (value) customerData[key] = value;
+  });
+  payload.customerData = customerData;
+  return payload;
+};
+
 const ACTIVE_PAYMENT_EVENTS = new Set(['PAYMENT_CONFIRMED', 'PAYMENT_RECEIVED']);
 const ACCESS_REVOCATION_EVENTS = new Set([
   'PAYMENT_REFUNDED',
@@ -1403,13 +1427,17 @@ const createCheckoutSession = async (req, res, { redirect = false } = {}) => {
     payload.subscription = paymentMode.subscription;
   }
 
-  payload.customerData = { name, email };
-  if (phone) {
-    payload.customerData.phone = phone;
-  }
-  if (complement) {
-    payload.customerData.complement = complement;
-  }
+  attachAsaasCustomerData(payload, {
+    name,
+    email,
+    phone,
+    cpfCnpj,
+    postalCode,
+    address,
+    addressNumber,
+    province,
+    complement
+  });
 
   if (isPublicCallbackUrl(publicBaseUrl)) {
     const callbackBase = `${publicBaseUrl}/checkout-status.html`;
@@ -1774,7 +1802,6 @@ router.post('/renewal-checkout', requireAuth, checkoutRateLimiter, async (req, r
       quantity: 1,
       value: purchase.amount
     }],
-    customerData: { name: user.full_name, email: user.email },
     description: `${plan.label} - renovação (${user.email})`.slice(0, 200)
   };
   if (paymentMode.subscription) payload.subscription = paymentMode.subscription;
@@ -1850,6 +1877,7 @@ router.post('/webhook/asaas', async (req, res) => {
 
 router.__test = {
   PLANS,
+  attachAsaasCustomerData,
   buildTrialAccessWindow,
   describeBillingAccess,
   formatDateOnly,
