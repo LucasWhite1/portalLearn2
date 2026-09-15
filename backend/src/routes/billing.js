@@ -179,6 +179,13 @@ const lookupCheckoutAddressByCpf = async (cpf) => {
 };
 
 const ACTIVE_PAYMENT_EVENTS = new Set(['PAYMENT_CONFIRMED', 'PAYMENT_RECEIVED']);
+const CHECKOUT_EVENTS = new Set([
+  'CHECKOUT_CREATED',
+  'CHECKOUT_PAID',
+  'CHECKOUT_CANCELED',
+  'CHECKOUT_EXPIRED'
+]);
+const CHECKOUT_TERMINATION_EVENTS = new Set(['CHECKOUT_CANCELED', 'CHECKOUT_EXPIRED']);
 const ACCESS_REVOCATION_EVENTS = new Set([
   'PAYMENT_REFUNDED',
   'PAYMENT_CHARGEBACK_REQUESTED'
@@ -585,6 +592,7 @@ const ensureBillingTables = async () => {
       id BIGSERIAL PRIMARY KEY,
       provider TEXT NOT NULL,
       provider_customer_id TEXT,
+      provider_checkout_id TEXT,
       provider_subscription_id TEXT,
       provider_payment_id TEXT UNIQUE,
       checkout_external_reference TEXT,
@@ -626,6 +634,19 @@ const ensureBillingTables = async () => {
   `);
   await db.query('ALTER TABLE asaas_webhook_events ADD COLUMN IF NOT EXISTS source_ip TEXT');
   await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS student_limit INT');
+  await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS provider_checkout_id TEXT');
+  await db.query(`
+    UPDATE billing_subscriptions
+       SET provider_checkout_id = NULLIF(raw_payload->>'id', '')
+     WHERE provider = 'asaas'
+       AND provider_checkout_id IS NULL
+       AND status LIKE 'CHECKOUT_%'
+  `);
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS billing_subscriptions_provider_checkout_idx
+      ON billing_subscriptions(provider, provider_checkout_id)
+      WHERE provider_checkout_id IS NOT NULL
+  `);
   await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ');
   await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS terms_version TEXT');
   await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS marketing_consent_at TIMESTAMPTZ');
@@ -641,6 +662,36 @@ const ensureBillingTables = async () => {
   await db.query('ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS checkout_billing_type TEXT');
   await db.query("ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS attribution_data JSONB NOT NULL DEFAULT '{}'::jsonb");
   await ensureBillingAccessSchema();
+  await db.query(`
+    UPDATE users u
+       SET subscription_access_expires_at = LEAST(
+             COALESCE(u.subscription_access_expires_at, NOW()),
+             NOW()
+           ),
+           subscription_payment_status = 'PAYMENT_DELETED',
+           subscription_last_event_type = 'PAYMENT_DELETED'
+     WHERE u.role = 'professor'
+       AND u.billing_access_managed = TRUE
+       AND EXISTS (
+         SELECT 1
+           FROM billing_subscriptions b
+          WHERE b.user_id = u.id
+            AND b.last_event_type = 'PAYMENT_DELETED'
+       )
+       AND EXISTS (
+         SELECT 1
+           FROM billing_payment_periods trial_period
+          WHERE trial_period.user_id = u.id
+            AND trial_period.event_type = 'TRIAL_STARTED'
+       )
+       AND NOT EXISTS (
+         SELECT 1
+           FROM billing_payment_periods paid_period
+          WHERE paid_period.user_id = u.id
+            AND paid_period.event_type <> 'TRIAL_STARTED'
+            AND paid_period.access_expires_at > NOW()
+       )
+  `);
   await db.query(`
     WITH latest_subscription AS (
       SELECT DISTINCT ON (user_id)
@@ -778,6 +829,7 @@ const persistCheckoutLead = async ({
     `
       INSERT INTO billing_subscriptions (
         provider,
+        provider_checkout_id,
         checkout_external_reference,
         plan_code,
         payer_name,
@@ -802,10 +854,11 @@ const persistCheckoutLead = async ({
         raw_payload,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, NOW())
     `,
     [
       'asaas',
+      sanitizeText(checkoutResponse?.id || '', 120) || null,
       sanitizeText(externalReference || '', 160) || null,
       sanitizeText(planCode || '', 40) || 'pro',
       sanitizeText(payerName || '', 160) || null,
@@ -869,6 +922,7 @@ const upsertBillingSubscriptionRecord = async (client, eventType, payment, custo
            provider_payment_id = $1
            OR checkout_external_reference = $2
            OR provider_subscription_id = $3
+           OR provider_checkout_id = $4
            OR COALESCE(raw_payload->>'id', '') = $4
          )
        ORDER BY CASE
@@ -914,6 +968,7 @@ const upsertBillingSubscriptionRecord = async (client, eventType, payment, custo
            SET provider_customer_id = $2,
                provider_subscription_id = $3,
                provider_payment_id = $4,
+               provider_checkout_id = COALESCE($18, provider_checkout_id),
                checkout_external_reference = $5,
                plan_code = $6,
                payer_name = $7,
@@ -947,7 +1002,8 @@ const upsertBillingSubscriptionRecord = async (client, eventType, payment, custo
         existingSubscription.terms_accepted_at || null,
         existingSubscription.terms_version || null,
         existingSubscription.marketing_consent_at || null,
-        Boolean(plan.unlimitedStudents)
+        Boolean(plan.unlimitedStudents),
+        providerCheckoutSessionId
       ]
     );
     return rows[0];
@@ -958,6 +1014,7 @@ const upsertBillingSubscriptionRecord = async (client, eventType, payment, custo
       INSERT INTO billing_subscriptions (
         provider,
         provider_customer_id,
+        provider_checkout_id,
         provider_subscription_id,
         provider_payment_id,
         checkout_external_reference,
@@ -974,12 +1031,13 @@ const upsertBillingSubscriptionRecord = async (client, eventType, payment, custo
         raw_payload,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, NULL, NULL, $11, $12, $13, NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, NULL, NULL, $12, $13, $14, NOW())
       RETURNING *
     `,
     [
       'asaas',
       providerCustomerId,
+      providerCheckoutSessionId,
       providerSubscriptionId,
       providerPaymentId,
       checkoutExternalReference,
@@ -1216,15 +1274,187 @@ const updateProfessorPaymentIssue = async (client, subscription, nextStatus, { r
   );
 };
 
-const shouldActivateAccountForEvent = (eventType, planCode, payment = null) => {
+const shouldActivateTrialFromCheckout = (eventType, planCode, subscription = {}, checkout = {}) => {
   const plan = getPlanConfig(planCode);
-  const billingType = sanitizeText(payment?.billingType || '', 30).toUpperCase();
-  const hasRecurringSubscription = Boolean(sanitizeText(payment?.subscription || '', 80));
-  const isCardTrialStart = plan.trialDays > 0
-    && eventType === 'PAYMENT_CREATED'
+  const billingType = sanitizeText(subscription?.checkout_billing_type || '', 30).toUpperCase();
+  const chargeTypes = Array.isArray(checkout?.chargeTypes)
+    ? checkout.chargeTypes.map((entry) => sanitizeText(entry, 30).toUpperCase())
+    : [];
+  return eventType === 'CHECKOUT_PAID'
+    && String(checkout?.status || '').toUpperCase() === 'PAID'
+    && plan.trialDays > 0
     && billingType === 'CREDIT_CARD'
-    && hasRecurringSubscription;
-  return ACTIVE_PAYMENT_EVENTS.has(eventType) || isCardTrialStart;
+    && chargeTypes.includes('RECURRENT');
+};
+
+const reserveAsaasWebhookEvent = async ({ eventId, eventType, eventPayload, sourceIp }) => {
+  try {
+    await db.query(
+      `
+        INSERT INTO asaas_webhook_events (asaas_event_id, event_type, processing_status, payload, source_ip)
+        VALUES ($1, $2, 'PENDING', $3, $4)
+      `,
+      [eventId, eventType, eventPayload, sourceIp]
+    );
+    return { duplicate: false };
+  } catch (error) {
+    if (error?.code !== '23505') throw error;
+    const { rows } = await db.query(
+      'SELECT processing_status FROM asaas_webhook_events WHERE asaas_event_id = $1',
+      [eventId]
+    );
+    if (rows[0]?.processing_status !== 'ERROR') return { duplicate: true };
+    await db.query(
+      `UPDATE asaas_webhook_events
+          SET processing_status = 'PENDING', payload = $2, source_ip = $3, error_message = NULL, processed_at = NULL
+        WHERE asaas_event_id = $1`,
+      [eventId, eventPayload, sourceIp]
+    );
+    return { duplicate: false };
+  }
+};
+
+const revokeProvisionalTrialAccess = async (client, subscription, eventType) => {
+  if (!subscription?.user_id) return false;
+  const { rows } = await client.query(
+    `SELECT
+       EXISTS (
+         SELECT 1
+           FROM billing_payment_periods
+          WHERE user_id = $1
+            AND event_type = 'TRIAL_STARTED'
+       ) AS has_trial,
+       EXISTS (
+         SELECT 1
+           FROM billing_payment_periods
+          WHERE user_id = $1
+            AND event_type <> 'TRIAL_STARTED'
+            AND access_expires_at > NOW()
+       ) AS has_active_paid_period`,
+    [subscription.user_id]
+  );
+  if (rows[0]?.has_trial !== true || rows[0]?.has_active_paid_period === true) return false;
+  await updateProfessorPaymentIssue(client, subscription, eventType, { revokeAccess: true });
+  return true;
+};
+
+const processAsaasCheckoutWebhookEvent = async (eventPayload, { eventId, eventType, checkout, sourceIp }) => {
+  const checkoutId = sanitizeText(checkout?.id || '', 120);
+  if (!checkoutId) return { ignored: true, reason: 'invalid-checkout-payload' };
+
+  const { rows: matchedRows } = await db.query(
+    `SELECT id
+       FROM billing_subscriptions
+      WHERE provider = 'asaas'
+        AND (
+          provider_checkout_id = $1
+          OR COALESCE(raw_payload->>'id', '') = $1
+          OR COALESCE(raw_payload->>'checkoutSession', '') = $1
+        )
+      ORDER BY id DESC
+      LIMIT 1`,
+    [checkoutId]
+  );
+  if (!matchedRows[0]) return { ignored: true, reason: 'unrelated-checkout' };
+
+  const reservation = await reserveAsaasWebhookEvent({ eventId, eventType, eventPayload, sourceIp });
+  if (reservation.duplicate) return { duplicate: true };
+
+  const client = await db.getClient();
+  let activationResult = null;
+  let subscription = null;
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `SELECT *
+         FROM billing_subscriptions
+        WHERE id = $1
+        FOR UPDATE`,
+      [matchedRows[0].id]
+    );
+    subscription = rows[0];
+    if (!subscription) throw new Error('O checkout nao possui uma assinatura local correspondente.');
+
+    await client.query(
+      `UPDATE billing_subscriptions
+          SET provider_checkout_id = COALESCE(provider_checkout_id, $2),
+              provider_customer_id = COALESCE(NULLIF($3, ''), provider_customer_id),
+              status = $4,
+              last_event_type = $4,
+              raw_payload = COALESCE(raw_payload, '{}'::jsonb)
+                || jsonb_build_object('checkoutEvent', $5::jsonb),
+              updated_at = NOW()
+        WHERE id = $1`,
+      [
+        subscription.id,
+        checkoutId,
+        sanitizeText(checkout?.customer || '', 80),
+        eventType,
+        JSON.stringify(checkout)
+      ]
+    );
+    subscription.provider_checkout_id = subscription.provider_checkout_id || checkoutId;
+    subscription.provider_customer_id = sanitizeText(checkout?.customer || '', 80) || subscription.provider_customer_id;
+    subscription.last_event_type = eventType;
+    subscription.status = eventType;
+    subscription.raw_payload = {
+      ...(subscription.raw_payload || {}),
+      billingType: subscription.checkout_billing_type || subscription.raw_payload?.billingType || null,
+      checkoutEvent: checkout
+    };
+
+    if (shouldActivateTrialFromCheckout(eventType, subscription.plan_code, subscription, checkout)) {
+      if (!subscription.activated_at) {
+        activationResult = await activateProfessorFromSubscription(client, subscription, { trialActivation: true });
+      }
+    } else if (CHECKOUT_TERMINATION_EVENTS.has(eventType)) {
+      const revoked = await revokeProvisionalTrialAccess(client, subscription, eventType);
+      if (!revoked) {
+        await updateProfessorPaymentIssue(client, subscription, eventType);
+      }
+    }
+
+    await client.query(
+      `UPDATE asaas_webhook_events
+          SET processing_status = 'DONE', processed_at = NOW()
+        WHERE asaas_event_id = $1`,
+      [eventId]
+    );
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    await db.query(
+      `UPDATE asaas_webhook_events
+          SET processing_status = 'ERROR', error_message = $2, processed_at = NOW()
+        WHERE asaas_event_id = $1`,
+      [eventId, sanitizeText(error.message || 'Erro ao processar webhook de checkout.', 1000)]
+    ).catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  if (activationResult?.professor && activationResult?.temporaryPassword) {
+    await sendProfessorAccessEmail({
+      fullName: activationResult.professor.full_name,
+      email: activationResult.professor.email,
+      temporaryPassword: activationResult.temporaryPassword,
+      planCode: subscription.plan_code
+    }).catch((error) => {
+      console.error('Erro ao enviar email de acesso do professor:', error.message);
+    });
+  }
+
+  return {
+    processed: true,
+    eventType,
+    planCode: subscription.plan_code,
+    userCreated: Boolean(activationResult?.temporaryPassword)
+  };
+};
+
+const shouldActivateAccountForEvent = (eventType, planCode, payment = null) => {
+  return ACTIVE_PAYMENT_EVENTS.has(eventType);
 };
 
 const processAsaasWebhookEvent = async (eventPayload, requestMeta = {}) => {
@@ -1232,11 +1462,16 @@ const processAsaasWebhookEvent = async (eventPayload, requestMeta = {}) => {
   const eventId = sanitizeText(eventPayload?.id || '', 120);
   const eventType = sanitizeText(eventPayload?.event || '', 80);
   let payment = eventPayload?.payment && typeof eventPayload.payment === 'object' ? { ...eventPayload.payment } : null;
+  const checkout = eventPayload?.checkout && typeof eventPayload.checkout === 'object' ? { ...eventPayload.checkout } : null;
   const sourceIp = sanitizeText(requestMeta.sourceIp || '', 120) || null;
 
-  if (!eventId || !eventType || !payment?.id) {
+  if (!eventId || !eventType) {
     return { ignored: true, reason: 'invalid-payload' };
   }
+  if (CHECKOUT_EVENTS.has(eventType)) {
+    return processAsaasCheckoutWebhookEvent(eventPayload, { eventId, eventType, checkout, sourceIp });
+  }
+  if (!payment?.id) return { ignored: true, reason: 'invalid-payment-payload' };
   const topupResult = await processCreditTopupWebhook(eventPayload, fetchAsaasPayment);
   if (topupResult?.handled) {
     return {
@@ -1264,6 +1499,7 @@ const processAsaasWebhookEvent = async (eventPayload, requestMeta = {}) => {
           AND (
             provider_payment_id = $1
             OR provider_subscription_id = $2
+            OR provider_checkout_id = $3
             OR COALESCE(raw_payload->>'id', '') = $3
           )
         LIMIT 1`,
@@ -1281,33 +1517,8 @@ const processAsaasWebhookEvent = async (eventPayload, requestMeta = {}) => {
     payment.externalReference = existingSubscription.checkout_external_reference;
   }
 
-  try {
-    await db.query(
-      `
-        INSERT INTO asaas_webhook_events (asaas_event_id, event_type, processing_status, payload, source_ip)
-        VALUES ($1, $2, 'PENDING', $3, $4)
-      `,
-      [eventId, eventType, eventPayload, sourceIp]
-    );
-  } catch (error) {
-    if (error?.code === '23505') {
-      const { rows } = await db.query(
-        'SELECT processing_status FROM asaas_webhook_events WHERE asaas_event_id = $1',
-        [eventId]
-      );
-      if (rows[0]?.processing_status !== 'ERROR') {
-        return { duplicate: true };
-      }
-      await db.query(
-        `UPDATE asaas_webhook_events
-            SET processing_status = 'PENDING', payload = $2, source_ip = $3, error_message = NULL, processed_at = NULL
-          WHERE asaas_event_id = $1`,
-        [eventId, eventPayload, sourceIp]
-      );
-    } else {
-      throw error;
-    }
-  }
+  const reservation = await reserveAsaasWebhookEvent({ eventId, eventType, eventPayload, sourceIp });
+  if (reservation.duplicate) return { duplicate: true };
 
   const client = await db.getClient();
   try {
@@ -1336,16 +1547,15 @@ const processAsaasWebhookEvent = async (eventPayload, requestMeta = {}) => {
     let activationResult = null;
 
     if (shouldActivateAccountForEvent(eventType, subscription.plan_code, verifiedPayment)) {
-      const trialActivation = eventType === 'PAYMENT_CREATED'
-        && getPlanConfig(subscription.plan_code).trialDays > 0
-        && String(verifiedPayment.billingType || '').toUpperCase() === 'CREDIT_CARD'
-        && Boolean(verifiedPayment.subscription);
-      if (!trialActivation || !subscription.activated_at) {
-        activationResult = await activateProfessorFromSubscription(client, subscription, { trialActivation });
+      if (!subscription.activated_at || ACTIVE_PAYMENT_EVENTS.has(eventType)) {
+        activationResult = await activateProfessorFromSubscription(client, subscription, { trialActivation: false });
       }
     } else if (ACCESS_REVOCATION_EVENTS.has(eventType)) {
       await updateProfessorPaymentIssue(client, subscription, eventType, { revokeAccess: true });
-    } else if (PAYMENT_FAILURE_EVENTS.has(eventType) || PAYMENT_PENDING_EVENTS.has(eventType) || eventType === 'PAYMENT_DELETED') {
+    } else if (eventType === 'PAYMENT_DELETED') {
+      const revoked = await revokeProvisionalTrialAccess(client, subscription, eventType);
+      if (!revoked) await updateProfessorPaymentIssue(client, subscription, eventType);
+    } else if (PAYMENT_FAILURE_EVENTS.has(eventType) || PAYMENT_PENDING_EVENTS.has(eventType)) {
       await updateProfessorPaymentIssue(client, subscription, eventType);
     }
 
@@ -2062,6 +2272,7 @@ router.__test = {
   getRenewalPlanConfig,
   resolvePublicCheckoutPlan,
   resolveCheckoutPaymentMode,
+  shouldActivateTrialFromCheckout,
   shouldActivateAccountForEvent
 };
 

@@ -13,6 +13,7 @@ const {
   normalizeAsaasCustomerName,
   resolvePublicCheckoutPlan,
   resolveCheckoutPaymentMode,
+  shouldActivateTrialFromCheckout,
   shouldActivateAccountForEvent
 } = billingRouter.__test;
 
@@ -75,9 +76,34 @@ assert.equal(shouldActivateAccountForEvent('PAYMENT_CREATED', 'pro-unlimited', {
 assert.equal(shouldActivateAccountForEvent('PAYMENT_CREATED', 'pro-unlimited', {
   billingType: 'CREDIT_CARD',
   subscription: 'sub_trial_123'
-}), true);
+}), false);
 assert.equal(shouldActivateAccountForEvent('PAYMENT_CREATED', 'pro'), false);
 assert.equal(shouldActivateAccountForEvent('PAYMENT_CONFIRMED', 'pro-unlimited'), true);
+assert.equal(shouldActivateAccountForEvent('PAYMENT_RECEIVED', 'pro-unlimited'), true);
+assert.equal(shouldActivateTrialFromCheckout('CHECKOUT_PAID', 'pro-unlimited', {
+  checkout_billing_type: 'CREDIT_CARD'
+}, {
+  status: 'PAID',
+  chargeTypes: ['RECURRENT']
+}), true);
+assert.equal(shouldActivateTrialFromCheckout('CHECKOUT_CREATED', 'pro-unlimited', {
+  checkout_billing_type: 'CREDIT_CARD'
+}, {
+  status: 'ACTIVE',
+  chargeTypes: ['RECURRENT']
+}), false);
+assert.equal(shouldActivateTrialFromCheckout('CHECKOUT_PAID', 'pro-unlimited', {
+  checkout_billing_type: 'PIX'
+}, {
+  status: 'PAID',
+  chargeTypes: ['DETACHED']
+}), false);
+assert.equal(shouldActivateTrialFromCheckout('CHECKOUT_PAID', 'pro-unlimited', {
+  checkout_billing_type: 'CREDIT_CARD'
+}, {
+  status: 'ACTIVE',
+  chargeTypes: ['RECURRENT']
+}), false);
 
 const trialStart = new Date('2026-08-28T15:00:00.000Z');
 const trialWindow = buildTrialAccessWindow({
@@ -128,6 +154,10 @@ assert.doesNotMatch(checkoutHtml, /payload\.customerData\s*=\s*\{\s*name\s*,\s*e
 assert.match(checkoutHtml, /name="marketingConsent"/i);
 assert.match(checkoutHtml, /CheckoutFormSubmit[^]*checkoutUrl/i);
 assert.match(billingSource, /lookupCheckoutAddressByCpf\(cpfCnpj\)/);
+assert.match(billingSource, /CHECKOUT_PAID/);
+assert.match(billingSource, /provider_checkout_id/);
+assert.match(billingSource, /revokeProvisionalTrialAccess/);
+assert.match(billingSource, /paid_period\.event_type <> 'TRIAL_STARTED'/);
 assert.match(billingSource, /customerName:\s*normalizeAsaasCustomerName\(record\.nome/);
 assert.match(billingSource, /name:\s*asaasCustomerName/);
 assert.match(billingSource, /addressNumber\s*=\s*addressNumber\s*\|\|\s*locatedAddress\?\.addressNumber\s*\|\|\s*'01'/);
